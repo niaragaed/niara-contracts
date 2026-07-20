@@ -1,0 +1,22 @@
+# Segredos — nunca commitar
+.env
+*.pem
+*.key
+
+# Build artifacts
+out/
+cache/
+broadcast/
+
+# Foundry
+lcov.info
+*.lock.json
+
+# Node (caso ferramentas auxiliares sejam adicionadas)
+node_modules/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
