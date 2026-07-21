@@ -136,8 +136,75 @@ Pré-requisitos: [Foundry](https://book.getfoundry.sh/) instalado (`forge`, `cas
 `lib/`.
 
 Nenhuma variável de ambiente é necessária para build/test. `.env.example` documenta o
-que será necessário quando houver deploy em testnet (ainda não solicitado — ver
-CLAUDE.md deste repositório).
+que é necessário para deploy em testnet (ver seção abaixo).
+
+---
+
+## Deploy em testnet (Sepolia)
+
+⚠️ Só Sepolia. Nunca mainnet sem pedido explícito (ver CLAUDE.md). Use sempre uma
+carteira **descartável**, criada só para testnet, sem nenhum valor real — a chave
+privada fica apenas em `.env` local (já no `.gitignore`; confirme com `git status`
+antes de qualquer commit).
+
+### 1. Preparar a carteira e obter ETH de teste
+
+1. Gere uma carteira nova só para isso (`cast wallet new`, MetaMask em modo teste, etc.)
+   — nunca reutilize uma carteira com fundos reais.
+2. Peça ETH de Sepolia em um faucet, por exemplo:
+   - https://sepoliafaucet.com/
+   - https://www.alchemy.com/faucets/ethereum-sepolia
+   - https://cloud.google.com/application/web3/faucet/ethereum/sepolia
+3. Copie `.env.example` para `.env` e preencha `RPC_URL` (um endpoint Sepolia — Alchemy,
+   Infura, etc.), `PRIVATE_KEY` (a chave da carteira descartável) e
+   `ETHERSCAN_API_KEY` (para a verificação de contrato).
+
+### 2. Deploy em duas fases (por causa do timelock real)
+
+`TimelockedAccessControl.MIN_TIMELOCK_DELAY` é 1 hora — nem em testnet dá para pular
+essa espera (ver CLAUDE.md). Por isso o deploy é em duas fases:
+
+**Fase 1 — implanta os contratos e agenda (propose) toda a fiação de papéis:**
+
+```bash
+forge script script/Deploy.s.sol --rpc-url sepolia
+```
+
+Sempre rode primeiro **sem** `--broadcast` (simulação/dry-run) e confira a saída antes
+de transmitir de verdade. Só depois de confirmar, adicione `--broadcast --verify`:
+
+```bash
+forge script script/Deploy.s.sol --rpc-url sepolia --broadcast --verify
+```
+
+A saída lista os endereços implantados (`DEPLOYED_*`) — copie-os para o seu `.env`
+local.
+
+**Espere `TIMELOCK_DELAY` segundos** (1 hora por padrão) e então rode a fase 2, que
+executa (consome) as propostas da fase 1:
+
+```bash
+forge script script/Deploy.s.sol --sig "executeWiring()" --rpc-url sepolia --broadcast
+```
+
+### 3. Script de demonstração
+
+Com a fiação concluída, `script/Demo.s.sol` executa o fluxo completo do protocolo em
+transações reais: `requestBacking → attestBacking → mintAttested → settle → cashback
+creditado → withdraw`. Precisa das mesmas variáveis `DEPLOYED_*` no `.env`:
+
+```bash
+forge script script/Demo.s.sol --rpc-url sepolia --broadcast
+```
+
+O "comprador" de demonstração é uma conta derivada automaticamente pelo script (não
+precisa de uma segunda chave privada) — recebe um pouco de ETH e USDT de teste do
+deployer só para aprovar sua própria ponta da liquidação.
+
+### Transações da demonstração (Sepolia)
+
+_A preencher após a primeira execução real de `script/Demo.s.sol` — lista dos
+endereços implantados e o link de cada transação no Etherscan, na ordem do fluxo._
 
 ---
 
@@ -155,6 +222,9 @@ src/
   BackingGateway.sol
   NiaraSettlement.sol
   CashbackDistributor.sol
+script/
+  Deploy.s.sol   (fase 1: deploy + propose da fiação; fase 2 via --sig "executeWiring()")
+  Demo.s.sol     (fluxo completo em transações reais, para demonstração pública)
 test/
   mocks/
     MockUSDT.sol                 (6 casas decimais)
@@ -168,4 +238,5 @@ test/
   CashbackDistributor.t.sol
   TimelockedAccessControl.t.sol
   Integration.t.sol              (fluxo completo: lastro → liquidação → cashback → resgate)
+  Invariant.t.sol + invariant/Handler.sol  (fuzzing stateful dos invariantes centrais)
 ```

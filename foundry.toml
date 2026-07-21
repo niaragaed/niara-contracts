@@ -18,4 +18,12 @@ runs = 256
 depth = 300
 fail_on_revert = false
 
+# Endpoints referenciados por NOME nos comandos (--rpc-url sepolia, --etherscan-api-key
+# sepolia) — os valores reais vêm de RPC_URL/ETHERSCAN_API_KEY no .env local, nunca daqui.
+[rpc_endpoints]
+sepolia = "${RPC_URL}"
+
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}" }
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

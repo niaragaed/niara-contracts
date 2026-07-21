@@ -53,8 +53,10 @@ como final; se o usuário pedir para ajustá-lo, é esperado.
   release, não como submódulo git — não rodar `forge update` nessa lib sem revisar
   antes; não há histórico git dentro dela).
 - Remappings em `remappings.txt` e replicados em `foundry.toml`.
-- Sem scripts de deploy configurados ainda (`script/` vazio) — criar apenas quando o
-  usuário pedir deploy.
+- Scripts de deploy em `script/`: `Deploy.s.sol` (fase 1 `run()` deploy+propose, fase 2
+  `executeWiring()` após o timelock decorrer de verdade) e `Demo.s.sol` (fluxo completo
+  em transações reais). Só usados mediante pedido explícito de deploy — nunca disparar
+  `--broadcast` por conta própria; ver seção "Deploy em testnet" do README.
 
 ## Convenções
 
@@ -89,8 +91,9 @@ Identidade Git deste repositório: a mesma configurada localmente pelo usuário 
 
 ## Pendências conhecidas
 
-- Scripts de deploy (`script/`) — a fazer quando houver pedido explícito de deploy em
-  testnet (Sepolia, conforme combinado).
+- Deploy real em Sepolia — scripts prontos (`script/Deploy.s.sol`, `script/Demo.s.sol`),
+  falta a transmissão (`--broadcast`) em si, que só ocorre mediante confirmação
+  explícita do usuário (ver README, seção "Deploy em testnet").
 - Parâmetro `cashbackBps` (ver acima) — provisório.
 - Nenhuma auditoria externa foi feita. Não descrever este código como auditado em
   nenhuma documentação futura.
