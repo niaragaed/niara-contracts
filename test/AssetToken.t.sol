@@ -236,7 +236,8 @@ contract AssetTokenTest is Test {
 
         vm.prank(alice);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        token.transfer(bob, 1 ether);
+        bool transferSucceeded = token.transfer(bob, 1 ether);
+        assertFalse(transferSucceeded);
     }
 
     // ── Timelock: issuerWallet ─────────────────────────────────────────────────────────
