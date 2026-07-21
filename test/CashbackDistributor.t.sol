@@ -212,4 +212,31 @@ contract CashbackDistributorTest is Test {
 
         assertEq(distributor.cashbackBps(), 2_000);
     }
+
+    /// @notice `executeSetCashbackBps` valida o teto ANTES de consumir a proposta
+    /// pendente — esse guard dispara mesmo sem nenhuma `proposeSetCashbackBps` ter sido
+    /// feita (que já bloquearia o agendamento de um valor acima do teto). Chamado
+    /// diretamente para cobrir essa checagem defensiva, hoje inalcançável pelo fluxo
+    /// normal propose→execute.
+    function test_ExecuteCashbackBps_DefensiveCapCheck_RevertsWithoutNeedingProposal() public {
+        uint16 tooHigh = distributor.MAX_CASHBACK_BPS() + 1;
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(CashbackDistributor.CashbackBpsExceedsCap.selector, tooHigh));
+        distributor.executeSetCashbackBps(tooHigh);
+    }
+
+    // ── Guardas de endereço zero ───────────────────────────────────────────────────────
+
+    function test_Constructor_RevertsForZeroAdmin() public {
+        vm.expectRevert(CashbackDistributor.ZeroAddress.selector);
+        new CashbackDistributor(address(0), TIMELOCK_DELAY);
+    }
+
+    function test_WithdrawProtocolFees_RevertsForZeroRecipient() public {
+        _recordFee(currencyToken, 1_000e6);
+
+        vm.prank(admin);
+        vm.expectRevert(CashbackDistributor.ZeroAddress.selector);
+        distributor.withdrawProtocolFees(address(usdt), address(0), 1_000e6);
+    }
 }

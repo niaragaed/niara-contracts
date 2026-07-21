@@ -7,6 +7,7 @@ import {AssetToken} from "../src/AssetToken.sol";
 import {TimelockedAccessControl} from "../src/governance/TimelockedAccessControl.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract BackingGatewayTest is Test {
     BackingGateway public gateway;
@@ -360,5 +361,112 @@ contract BackingGatewayTest is Test {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, pauserRole));
         gateway.pause();
+    }
+
+    function test_Unpause_OnlyPauserRole() public {
+        vm.prank(admin);
+        gateway.pause();
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, pauserRole));
+        gateway.unpause();
+    }
+
+    /// @notice Ponta a ponta: pausar bloqueia as quatro operações protegidas por
+    /// `whenNotPaused` (requestBacking, attestBacking, mintAttested, redemptionRequest);
+    /// despausar restaura o funcionamento normal de cada uma delas.
+    function test_PauseUnpause_EndToEnd_BlocksThenRestoresOperations() public {
+        uint256 requestId = _requestBacking(100 ether);
+
+        vm.prank(admin);
+        gateway.pause();
+        assertTrue(gateway.paused());
+
+        vm.prank(operator);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        gateway.requestBacking(address(token), 1 ether);
+
+        vm.prank(custodian);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        gateway.attestBacking(requestId, keccak256("proof"), 100 ether);
+
+        vm.prank(operator);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        gateway.mintAttested(requestId, alice);
+
+        vm.prank(alice);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        gateway.redemptionRequest(address(token), 1 ether);
+
+        vm.prank(admin);
+        gateway.unpause();
+        assertFalse(gateway.paused());
+
+        // As mesmas operações voltam a funcionar normalmente após o unpause.
+        vm.prank(custodian);
+        gateway.attestBacking(requestId, keccak256("proof"), 100 ether);
+        vm.prank(operator);
+        gateway.mintAttested(requestId, alice);
+        assertEq(token.balanceOf(alice), 100 ether);
+
+        vm.prank(alice);
+        token.approve(address(gateway), 40 ether);
+        vm.prank(alice);
+        uint256 redemptionId = gateway.redemptionRequest(address(token), 40 ether);
+        assertEq(token.balanceOf(address(gateway)), 40 ether);
+
+        vm.prank(custodian);
+        gateway.redemptionAttest(redemptionId, keccak256("proof2"));
+        assertEq(token.balanceOf(alice), 60 ether);
+    }
+
+    // ── Guardas de endereço/quantidade zero ────────────────────────────────────────────
+
+    function test_Constructor_RevertsForZeroAdmin() public {
+        vm.expectRevert(BackingGateway.ZeroAddress.selector);
+        new BackingGateway(address(0), TIMELOCK_DELAY);
+    }
+
+    function test_RequestBacking_RevertsForZeroAssetAddress() public {
+        vm.prank(operator);
+        vm.expectRevert(BackingGateway.ZeroAddress.selector);
+        gateway.requestBacking(address(0), 100 ether);
+    }
+
+    function test_MintAttested_RevertsForZeroRecipient() public {
+        uint256 requestId = _requestBacking(100 ether);
+        vm.prank(custodian);
+        gateway.attestBacking(requestId, keccak256("proof"), 100 ether);
+
+        vm.prank(operator);
+        vm.expectRevert(BackingGateway.ZeroAddress.selector);
+        gateway.mintAttested(requestId, address(0));
+    }
+
+    function test_RedemptionRequest_RevertsForZeroAssetAddress() public {
+        vm.prank(alice);
+        vm.expectRevert(BackingGateway.ZeroAddress.selector);
+        gateway.redemptionRequest(address(0), 1 ether);
+    }
+
+    function test_RedemptionRequest_RevertsForZeroQuantity() public {
+        vm.prank(alice);
+        vm.expectRevert(BackingGateway.ZeroQuantity.selector);
+        gateway.redemptionRequest(address(token), 0);
+    }
+
+    function test_CancelRedemptionRequest_RevertsIfNotPending() public {
+        _mintTokensTo(alice, 100 ether);
+        vm.prank(alice);
+        token.approve(address(gateway), 40 ether);
+        vm.prank(alice);
+        uint256 requestId = gateway.redemptionRequest(address(token), 40 ether);
+
+        vm.prank(custodian);
+        gateway.cancelRedemptionRequest(requestId);
+
+        vm.prank(custodian);
+        vm.expectRevert(abi.encodeWithSelector(BackingGateway.RequestNotPending.selector, requestId));
+        gateway.cancelRedemptionRequest(requestId);
     }
 }
