@@ -11,14 +11,20 @@ import {MockUSDT} from "../mocks/MockUSDT.sol";
 import {MockWBTC} from "../mocks/MockWBTC.sol";
 
 /// @notice Ator de fuzzing stateful: expõe uma ação por função pública (request, attest,
-/// mint, redeem, settle, saques, pausas) com parâmetros limitados (`bound`) a estados
-/// válidos, para que o motor de invariantes do Foundry explore sequências aleatórias
-/// desses passos entre múltiplos atores. Chamadas que não fazem sentido no estado atual
-/// (ex.: atestar um pedido que já não está PENDING) são no-ops silenciosos — não usamos
-/// `vm.assume`/revert para não distorcer a taxa de rejeição do fuzzer.
-/// @dev Variáveis "ghost" (`ghost_sum*`) acumulam totais que não existem como estado no
-/// protocolo real, usadas pelas invariantes para verificar contabilidade ao longo do tempo
-/// (não apenas o saldo atual).
+/// mint, redeem, settle, saques, pausas) para que o motor de invariantes do Foundry explore
+/// sequências aleatórias desses passos entre múltiplos atores.
+/// @dev Na maior parte das chamadas os parâmetros são limitados (`bound`) a estados válidos,
+/// maximizando sequências produtivas (mint real, settle real etc.) — mas uma fração de cada
+/// chamada (`_chaos`, ~1 em 5) ignora essas guardas de propósito e tenta o caminho inválido
+/// (endereço zero, quantidade zero, estado errado, valores fora do saldo/aprovação real).
+/// Não envolvemos as chamadas externas em try/catch: com `fail_on_revert = false` (ver
+/// foundry.toml), um revert genuíno é tolerado pelo runner de invariantes e desfaz, de forma
+/// atômica, qualquer efeito colateral desta chamada (inclusive as variáveis "ghost" abaixo) —
+/// não há necessidade de capturá-lo manualmente, e capturá-lo apenas escondia esses caminhos
+/// de revert da exploração do fuzzer.
+/// Variáveis "ghost" (`ghost_sum*`) acumulam totais que não existem como estado no protocolo
+/// real, usadas pelas invariantes para verificar contabilidade ao longo do tempo (não apenas
+/// o saldo atual).
 contract Handler is Test {
     // Variáveis de estado normais (não `immutable`) de propósito: um construtor com muitas
     // `immutable` simultâneas nesta contagem faz o codegen do Solidity estourar a stack
@@ -104,95 +110,111 @@ contract Handler is Test {
         return candidate;
     }
 
+    /// @dev ~1 em 5 chamadas toma o caminho "caótico" (inválido de propósito) em vez do
+    /// caminho limitado a estados válidos.
+    function _chaos(uint256 seed) internal pure returns (bool) {
+        return seed % 5 == 0;
+    }
+
     // ── Lastro (emissão) ────────────────────────────────────────────────────────────────
 
     function requestBacking(uint256 assetSeed, uint256 quantitySeed) external {
-        AssetToken asset = _pickAsset(assetSeed);
-        uint256 quantity = bound(quantitySeed, 1, 1_000_000 ether);
+        address asset = _chaos(assetSeed) ? address(0) : address(_pickAsset(assetSeed));
+        uint256 quantity = _chaos(quantitySeed) ? 0 : bound(quantitySeed, 1, 1_000_000 ether);
 
         vm.prank(operator);
-        try gateway.requestBacking(address(asset), quantity) returns (uint256 requestId) {
-            backingRequestIds.push(requestId);
-        } catch {}
+        uint256 requestId = gateway.requestBacking(asset, quantity);
+        backingRequestIds.push(requestId);
     }
 
     function attestBacking(uint256 idxSeed, uint256 acquiredSeed) external {
         if (backingRequestIds.length == 0) return;
         uint256 requestId = backingRequestIds[idxSeed % backingRequestIds.length];
-
         (,, uint256 quantityRequested,,, BackingGateway.RequestStatus status,) = gateway.backingRequests(requestId);
-        if (status != BackingGateway.RequestStatus.PENDING) return;
 
-        uint256 quantityAcquired = bound(acquiredSeed, 1, quantityRequested);
+        // Na maior parte das vezes só ataca pedidos PENDING — uma fração ignora essa
+        // checagem de propósito para alcançar RequestNotPending.
+        if (status != BackingGateway.RequestStatus.PENDING && !_chaos(idxSeed)) return;
+
+        uint256 quantityAcquired = _chaos(acquiredSeed)
+            ? acquiredSeed % 2_000_000 ether // pode exceder quantityRequested, ou ser zero.
+            : bound(acquiredSeed, 1, quantityRequested == 0 ? 1 : quantityRequested);
 
         vm.prank(custodian);
-        try gateway.attestBacking(requestId, keccak256(abi.encode("backing-proof", requestId)), quantityAcquired) {}
-        catch {}
+        gateway.attestBacking(requestId, keccak256(abi.encode("backing-proof", requestId, acquiredSeed)), quantityAcquired);
     }
 
     function mintAttested(uint256 idxSeed, uint256 toSeed) external {
         if (backingRequestIds.length == 0) return;
         uint256 requestId = backingRequestIds[idxSeed % backingRequestIds.length];
-
         (,,,,, BackingGateway.RequestStatus status, bool minted) = gateway.backingRequests(requestId);
-        if (status != BackingGateway.RequestStatus.SETTLED || minted) return;
 
-        address to = _actorAt(toSeed);
+        bool eligible = status == BackingGateway.RequestStatus.SETTLED && !minted;
+        if (!eligible && !_chaos(idxSeed)) return;
+
+        address to = _chaos(toSeed) ? address(0) : _actorAt(toSeed);
 
         vm.prank(operator);
-        try gateway.mintAttested(requestId, to) {} catch {}
+        gateway.mintAttested(requestId, to);
     }
 
     function cancelBackingRequest(uint256 idxSeed) external {
         if (backingRequestIds.length == 0) return;
         uint256 requestId = backingRequestIds[idxSeed % backingRequestIds.length];
-
         (,,,,, BackingGateway.RequestStatus status,) = gateway.backingRequests(requestId);
-        if (status != BackingGateway.RequestStatus.PENDING) return;
+
+        if (status != BackingGateway.RequestStatus.PENDING && !_chaos(idxSeed)) return;
 
         vm.prank(operator);
-        try gateway.cancelBackingRequest(requestId) {} catch {}
+        gateway.cancelBackingRequest(requestId);
     }
 
     // ── Resgate (queima) ────────────────────────────────────────────────────────────────
 
     function redemptionRequest(uint256 actorSeed, uint256 assetSeed, uint256 quantitySeed) external {
         address actor = _actorAt(actorSeed);
-        AssetToken asset = _pickAsset(assetSeed);
+        address asset = _chaos(assetSeed) ? address(0) : address(_pickAsset(assetSeed));
+        uint256 balance = asset == address(0) ? 0 : AssetToken(asset).balanceOf(actor);
 
-        uint256 balance = asset.balanceOf(actor);
-        if (balance == 0) return;
-        uint256 quantity = bound(quantitySeed, 1, balance);
+        uint256 quantity;
+        if (_chaos(quantitySeed)) {
+            quantity = quantitySeed % 2; // às vezes 0 (ZeroQuantity), às vezes 1 mesmo sem saldo.
+        } else if (balance == 0) {
+            return;
+        } else {
+            quantity = bound(quantitySeed, 1, balance);
+        }
+
+        if (asset != address(0) && quantity > 0) {
+            vm.prank(actor);
+            AssetToken(asset).approve(address(gateway), quantity);
+        }
 
         vm.prank(actor);
-        asset.approve(address(gateway), quantity);
-
-        vm.prank(actor);
-        try gateway.redemptionRequest(address(asset), quantity) returns (uint256 requestId) {
-            redemptionRequestIds.push(requestId);
-        } catch {}
+        uint256 requestId = gateway.redemptionRequest(asset, quantity);
+        redemptionRequestIds.push(requestId);
     }
 
     function redemptionAttest(uint256 idxSeed) external {
         if (redemptionRequestIds.length == 0) return;
         uint256 requestId = redemptionRequestIds[idxSeed % redemptionRequestIds.length];
-
         (,,,, BackingGateway.RequestStatus status) = gateway.redemptionRequests(requestId);
-        if (status != BackingGateway.RequestStatus.PENDING) return;
+
+        if (status != BackingGateway.RequestStatus.PENDING && !_chaos(idxSeed)) return;
 
         vm.prank(custodian);
-        try gateway.redemptionAttest(requestId, keccak256(abi.encode("redemption-proof", requestId))) {} catch {}
+        gateway.redemptionAttest(requestId, keccak256(abi.encode("redemption-proof", requestId)));
     }
 
     function cancelRedemptionRequest(uint256 idxSeed) external {
         if (redemptionRequestIds.length == 0) return;
         uint256 requestId = redemptionRequestIds[idxSeed % redemptionRequestIds.length];
-
         (,,,, BackingGateway.RequestStatus status) = gateway.redemptionRequests(requestId);
-        if (status != BackingGateway.RequestStatus.PENDING) return;
+
+        if (status != BackingGateway.RequestStatus.PENDING && !_chaos(idxSeed)) return;
 
         vm.prank(custodian);
-        try gateway.cancelRedemptionRequest(requestId) {} catch {}
+        gateway.cancelRedemptionRequest(requestId);
     }
 
     // ── Liquidação atômica ──────────────────────────────────────────────────────────────
@@ -206,13 +228,13 @@ contract Handler is Test {
         uint256 paymentAmountSeed
     ) external {
         address buyer = _actorAt(buyerSeed);
-        address seller = _distinctActor(sellerSeed, buyer);
+        address seller = _chaos(sellerSeed) ? buyer : _distinctActor(sellerSeed, buyer);
         AssetToken asset = _pickAsset(assetSeed);
         address paymentToken = _pickPaymentToken(paymentSeed);
 
-        uint256 assetAmount = _boundAssetAmount(asset, seller, assetAmountSeed);
+        uint256 assetAmount = _pickAssetAmount(asset, seller, assetAmountSeed);
         if (assetAmount == 0) return;
-        uint256 paymentAmount = _fundAndBoundPayment(paymentToken, buyer, paymentAmountSeed);
+        uint256 paymentAmount = _pickPaymentAmount(paymentToken, buyer, paymentAmountSeed);
 
         vm.prank(seller);
         asset.approve(address(settlement), assetAmount);
@@ -220,29 +242,29 @@ contract Handler is Test {
         IERC20(paymentToken).approve(address(settlement), paymentAmount);
 
         uint256 cashbackBefore = distributor.cashbackBalance(address(asset), paymentToken);
-
         vm.prank(settlementOperator);
-        try settlement.settle(address(asset), paymentToken, buyer, seller, assetAmount, paymentAmount) returns (
-            uint256 feeCharged
-        ) {
-            _recordSettleGhosts(asset, paymentToken, feeCharged, cashbackBefore);
-        } catch {}
+        uint256 feeCharged = settlement.settle(address(asset), paymentToken, buyer, seller, assetAmount, paymentAmount);
+        _recordSettleGhosts(asset, paymentToken, feeCharged, cashbackBefore);
     }
 
-    function _boundAssetAmount(AssetToken asset, address seller, uint256 seed) internal view returns (uint256) {
+    function _pickAssetAmount(AssetToken asset, address seller, uint256 seed) internal view returns (uint256) {
+        if (_chaos(seed)) return seed % 2_000_000 ether; // pode exceder saldo/aprovação real, ou ser zero.
         uint256 sellerBalance = asset.balanceOf(seller);
         if (sellerBalance == 0) return 0;
         return bound(seed, 1, sellerBalance);
     }
 
-    function _fundAndBoundPayment(address paymentToken, address buyer, uint256 seed) internal returns (uint256) {
-        // Garante liquidez suficiente ao comprador para não desperdiçar a chamada fuzzed
-        // em um no-op por falta de saldo — o mock permite mint livre, só usado em teste.
+    function _pickPaymentAmount(address paymentToken, address buyer, uint256 seed) internal returns (uint256) {
+        // Garante liquidez suficiente ao comprador na maior parte das vezes, para não
+        // desperdiçar a chamada fuzzed em um no-op por falta de saldo — o mock permite mint
+        // livre, só usado em teste.
         if (paymentToken == address(usdt)) {
             usdt.mint(buyer, 1_000_000e6);
         } else {
             wbtc.mint(buyer, 1_000e8);
         }
+
+        if (_chaos(seed)) return seed % 2_000_000e8; // pode exceder o saldo recém-financiado, ou ser zero.
         uint256 buyerBalance = IERC20(paymentToken).balanceOf(buyer);
         return bound(seed, 1, buyerBalance);
     }
@@ -262,47 +284,60 @@ contract Handler is Test {
         address paymentToken = _pickPaymentToken(paymentSeed);
         address issuer = asset.issuerWallet();
 
+        // Sem guarda de saldo disponível de propósito: na maior parte das vezes não há
+        // nada a sacar ainda, exercitando NothingToWithdraw organicamente.
         vm.prank(issuer);
-        try distributor.withdraw(address(asset), paymentToken) {} catch {}
+        distributor.withdraw(address(asset), paymentToken);
     }
 
     function withdrawProtocolFees(uint256 paymentSeed, uint256 amountSeed) external {
         address paymentToken = _pickPaymentToken(paymentSeed);
         uint256 available = distributor.protocolBalance(paymentToken);
-        if (available == 0) return;
-        uint256 amount = bound(amountSeed, 1, available);
+
+        uint256 amount;
+        if (_chaos(amountSeed) || available == 0) {
+            amount = amountSeed % 1_000_000e8; // pode exceder o disponível, incl. zero.
+        } else {
+            amount = bound(amountSeed, 1, available);
+        }
 
         vm.prank(admin);
-        try distributor.withdrawProtocolFees(paymentToken, admin, amount) {} catch {}
+        distributor.withdrawProtocolFees(paymentToken, admin, amount);
     }
 
     // ── Pausas (emergência) ─────────────────────────────────────────────────────────────
 
     function toggleGatewayPause() external {
+        // `vm.prank` só vale para a PRÓXIMA chamada externa — não pode ser consumido pela
+        // leitura de `paused()` antes da chamada que de fato precisa do prank (mesma
+        // armadilha documentada no topo de test/AssetToken.t.sol).
+        bool isPaused = gateway.paused();
         vm.prank(admin);
-        if (gateway.paused()) {
-            try gateway.unpause() {} catch {}
+        if (isPaused) {
+            gateway.unpause();
         } else {
-            try gateway.pause() {} catch {}
+            gateway.pause();
         }
     }
 
     function toggleSettlementPause() external {
+        bool isPaused = settlement.paused();
         vm.prank(admin);
-        if (settlement.paused()) {
-            try settlement.unpause() {} catch {}
+        if (isPaused) {
+            settlement.unpause();
         } else {
-            try settlement.pause() {} catch {}
+            settlement.pause();
         }
     }
 
     function toggleAssetPause(uint256 assetSeed) external {
         AssetToken asset = _pickAsset(assetSeed);
+        bool isPaused = asset.paused();
         vm.prank(admin);
-        if (asset.paused()) {
-            try asset.unpause() {} catch {}
+        if (isPaused) {
+            asset.unpause();
         } else {
-            try asset.pause() {} catch {}
+            asset.pause();
         }
     }
 }

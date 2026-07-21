@@ -340,4 +340,79 @@ contract NiaraSettlementTest is Test {
         );
         settlement.pause();
     }
+
+    function test_Unpause_OnlyPauserRole() public {
+        vm.prank(admin);
+        settlement.pause();
+
+        vm.prank(seller);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, seller, pauserRole)
+        );
+        settlement.unpause();
+    }
+
+    /// @notice Ponta a ponta: pausar bloqueia `settle`; despausar restaura o funcionamento
+    /// normal.
+    function test_PauseUnpause_EndToEnd_BlocksThenRestoresSettle() public {
+        vm.prank(admin);
+        settlement.pause();
+        assertTrue(settlement.paused());
+
+        vm.prank(operator);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+
+        vm.prank(admin);
+        settlement.unpause();
+        assertFalse(settlement.paused());
+
+        vm.prank(operator);
+        uint256 feeCharged = settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        assertGt(feeCharged, 0);
+        assertEq(assetToken.balanceOf(buyer), 10 ether);
+    }
+
+    // ── Guardas de endereço zero ───────────────────────────────────────────────────────
+
+    function test_Constructor_RevertsForZeroAdmin() public {
+        vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
+        new NiaraSettlement(address(0), address(distributor), TIMELOCK_DELAY);
+    }
+
+    function test_Constructor_RevertsForZeroCashbackDistributor() public {
+        vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
+        new NiaraSettlement(admin, address(0), TIMELOCK_DELAY);
+    }
+
+    function test_Settle_RevertsOnZeroBuyer() public {
+        vm.prank(operator);
+        vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
+        settlement.settle(address(assetToken), address(usdt), address(0), seller, 10 ether, 1_000e6);
+    }
+
+    function test_Settle_RevertsOnZeroSeller() public {
+        vm.prank(operator);
+        vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
+        settlement.settle(address(assetToken), address(usdt), buyer, address(0), 10 ether, 1_000e6);
+    }
+
+    function test_ProposeSetCashbackDistributor_RevertsForZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
+        settlement.proposeSetCashbackDistributor(address(0));
+    }
+
+    // ── Guarda defensiva de teto (redundante ao teto já checado em propose) ───────────
+
+    /// @notice `executeSetFeeBps` valida o teto ANTES de consumir a proposta pendente —
+    /// esse guard dispara mesmo sem nenhuma `proposeSetFeeBps` ter sido feita (que já
+    /// bloquearia o agendamento de um valor acima do teto). Chamado diretamente para
+    /// cobrir essa checagem defensiva, hoje inalcançável pelo fluxo normal propose→execute.
+    function test_ExecuteSetFeeBps_DefensiveCapCheck_RevertsWithoutNeedingProposal() public {
+        uint16 tooHigh = settlement.MAX_FEE_BPS() + 1;
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.FeeExceedsCap.selector, tooHigh));
+        settlement.executeSetFeeBps(tooHigh);
+    }
 }

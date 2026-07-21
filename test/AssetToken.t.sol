@@ -283,6 +283,26 @@ contract AssetTokenTest is Test {
         token.proposeSetIssuerWallet(address(0));
     }
 
+    function test_Constructor_RevertsForZeroIssuerWallet() public {
+        vm.expectRevert(AssetToken.ZeroAddress.selector);
+        new AssetToken(
+            "Test", "TST", "TST", AssetToken.AssetClass.EQUITY, "US", address(0), admin, TIMELOCK_DELAY
+        );
+    }
+
+    function test_Constructor_RevertsForZeroAdmin() public {
+        vm.expectRevert(AssetToken.ZeroAddress.selector);
+        new AssetToken(
+            "Test", "TST", "TST", AssetToken.AssetClass.EQUITY, "US", issuer, address(0), TIMELOCK_DELAY
+        );
+    }
+
+    function test_SetBackingGateway_RevertsForZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert(AssetToken.ZeroAddress.selector);
+        token.proposeSetBackingGateway(address(0));
+    }
+
     // ── Papéis: grantRole/revokeRole diretos desabilitados ────────────────────────────
 
     function test_DirectGrantRole_AlwaysReverts() public {
