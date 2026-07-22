@@ -297,13 +297,61 @@ migração), e `AssetToken.issuerWallet()` passou a apontar para a empresa emiss
 | 3 | `executeGrantRole` SETTLEMENT_OPERATOR_ROLE→operador | [`0xc1ed...92c30e3`](https://sepolia.etherscan.io/tx/0xc1ed525034b5c49ecfcebc9dcde40832295899203c495a7315f30de4192c30e3) |
 | 4 | `executeSetIssuerWallet` → empresa emissora | [`0x7b76...b3481a6`](https://sepolia.etherscan.io/tx/0x7b76b708331827ae23aa91e82b97ff12d95afca1e71f47cdf1775bb0ab3481a6) |
 
-### Demo
+### Demo (concluída em 2026-07-22)
 
-_A preencher depois que `runDemo()` for transmitido._
+Cada etapa foi assinada pela carteira do papel correspondente — não pelo deployer
+(exceto o `mint` de USDT de demonstração ao comprador, que qualquer conta pode fazer no
+mock):
 
-```bash
-forge script script/PresentationDemo.s.sol --sig "runDemo()" --rpc-url sepolia --broadcast
+| # | Etapa | Assinada por (papel) | Transação |
+|---|---|---|---|
+| 1 | `requestBacking` | Operador `0xe37e...65eD` | [`0x357d...02c599`](https://sepolia.etherscan.io/tx/0x357d5ff52a1b8072cac139f6200e1b13910804f13443ef2904ecd39ec002c599) |
+| 2 | `attestBacking` | Custodiante `0xD3d3...20252` | [`0x0776...1053a`](https://sepolia.etherscan.io/tx/0x077646d2ab9dbb57698f81332c2ed8920e1bcaf06b7cf963c9741b89cae1053a) |
+| 3 | `mintAttested` | Operador `0xe37e...65eD` | [`0x5307...9a08ca`](https://sepolia.etherscan.io/tx/0x5307b7e415581c9065e570c3f0ed87a1108dc5e3f9c7907fc505a57c7e9a08ca) |
+| 4 | `mint` USDT de demonstração ao comprador | Admin/deployer `0x8763...3101a` | [`0x95a4...84d2a`](https://sepolia.etherscan.io/tx/0x95a4b6c60bb490a4aa8eaf42d466a76029b98e9b4ed10632aca733f0e8884d2a) |
+| 5 | `approve` (AssetToken) | Vendedor `0xdF60...B0b7F` | [`0xa667...9e67`](https://sepolia.etherscan.io/tx/0xa6675e20c66243e8e61b00df6c79ccb6f6ff87b3ef677e76b699aa00b7ae9e67) |
+| 6 | `approve` (USDT) | Comprador `0xc105...AD8AA` | [`0x5a9d...968e9`](https://sepolia.etherscan.io/tx/0x5a9dfe7e79828e1e6c0483289f82a1c2d8b2b1bab3ba801d8a17b82b709968e9) |
+| 7 | **`settle`** | Operador `0xe37e...65eD` | [`0x5bad8660e43bb277517e6de57490ca5ffe77a8a5684122cd978f1dcaf2ecf5a6`](https://sepolia.etherscan.io/tx/0x5bad8660e43bb277517e6de57490ca5ffe77a8a5684122cd978f1dcaf2ecf5a6) |
+| 8 | `withdraw` (cashback) | **Empresa emissora** `0xf8Eb...20F8` | [`0xc6e8...e9224`](https://sepolia.etherscan.io/tx/0xc6e87439dc3e0c77da96b3915574c82a04df578b2c3616cf18692c2fbd2e9224) |
+
+#### A transação de `settle`, log a log
+
+A transação `0x5bad8660e43bb277517e6de57490ca5ffe77a8a5684122cd978f1dcaf2ecf5a6` emite
+exatamente **6 eventos**, na ordem em que o contrato os dispara:
+
+1. `Transfer` (AssetToken nPRES): vendedor → comprador, **100 nPRES**
+2. `Transfer` (USDT): comprador → vendedor, **9.950 USDT** (pagamento líquido, já descontada a taxa)
+3. `Transfer` (USDT): comprador → `CashbackDistributor`, **50 USDT** (a taxa inteira, na própria moeda de liquidação)
+4. `CashbackCredited` (CashbackDistributor): `issuer = 0xf8Eb1CDC6edDE176ee8Dcb57D4BB8Be464e120F8` (**a empresa emissora, nem comprador nem vendedor**), **5 USDT**
+5. `FeeRecorded` (CashbackDistributor): `feeAmount = 50 USDT`, `cashbackAmount = 5 USDT`, `eligible = true`
+6. `Settled` (NiaraSettlement): resume a liquidação inteira — 100 nPRES ↔ 10.000 USDT, `feeCharged = 50 USDT`
+
+**A conta fecha:**
+
 ```
+Negociação:            100 nPRES  ↔  10.000 USDT
+Taxa (0,5% de 10.000):                   50 USDT
+  Cashback (10% da taxa, à empresa emissora):    5 USDT
+  Receita do protocolo (90% da taxa):           45 USDT
+Vendedor recebe:       10.000 − 50 =   9.950 USDT
+```
+
+#### Confirmação on-chain de que o cashback foi para um terceiro
+
+Saldos finais de USDT, lidos diretamente dos contratos após a demo:
+
+| Conta | Saldo USDT | O que é |
+|---|---|---|
+| **Empresa emissora** `0xf8Eb...20F8` | **5.000000** (5 USDT) | Exatamente o cashback sacado — não recebeu nada da negociação em si |
+| Vendedor `0xdF60...B0b7F` | 9.950,000000 (9.950 USDT) | Só o líquido da venda — nenhum cashback misturado |
+| Comprador `0xc105...AD8AA` | 0 | Pagou exatamente os 10.000 USDT financiados |
+| `cashbackBalance(nPRES, USDT)` | 0 | Cashback desta rodada integralmente sacado |
+| `protocolBalance(USDT)` | 90,000000 (90 USDT) | Acumulado das duas demos: 45 USDT desta + 45 USDT da primeira demo (nunca sacado pela tesouraria) |
+
+A empresa emissora — que nunca participou da negociação como compradora ou
+vendedora — é a única conta que recebeu o cashback, confirmando exatamente o que a
+segunda demo se propõe a mostrar: o cashback vai a um terceiro (o emissor do ativo
+real), não a uma das partes que negociam.
 
 ---
 
