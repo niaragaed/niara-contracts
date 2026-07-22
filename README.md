@@ -282,13 +282,26 @@ emissora.
 | 4 | `proposeSetIssuerWallet` → empresa emissora | [`0xee29...160882`](https://sepolia.etherscan.io/tx/0xee299db2fa36beabe9e1d56db589dedb8b53571fb5253cddde09ed3208160882) |
 | 5-9 | Financiamento (0,003 ETH cada) das 5 carteiras de papel | [`0xe1f8...9ce62`](https://sepolia.etherscan.io/tx/0xe1f82c0f718169e4f635de78f5e996c78aa1a006336c00f8868edb571c99ce62), [`0x8ab3...c63e75e`](https://sepolia.etherscan.io/tx/0x8ab38a707d803e270395cef88161d58ee448f06a35c383e05c945f730c63e75e), [`0x7750...90a9b8b`](https://sepolia.etherscan.io/tx/0x7750722b0646f091a6454fae5e9604c76acb21e5e5a8f49d0b7c7054390a9b8b), [`0x88a4...9181d1b`](https://sepolia.etherscan.io/tx/0x88a48101086b83297c11978b758bca9db8d6f86ed06aebef0bf4f67359181d1b), [`0xb670...455227`](https://sepolia.etherscan.io/tx/0xb670dee3fa219bd90c4823ea15fd471624354fe4eda9d1a1906395f282455227) |
 
-### Fase 2 e demo
+### Fase 2 — reatribuição executada (concluída em 2026-07-22)
 
-_A preencher depois que o timelock decorrer e `executeWiring()` + `runDemo()` forem
-transmitidos._
+Confirmado on-chain antes de transmitir: `executeAfter` das 4 propostas já havia
+decorrido (`1784754288`) em relação ao timestamp do bloco no momento (`1784754612`).
+Depois da execução, também confirmado on-chain: os novos papéis foram concedidos, os
+papéis antigos do deployer permanecem intactos (reatribuição aditiva, não uma
+migração), e `AssetToken.issuerWallet()` passou a apontar para a empresa emissora.
+
+| # | Ação | Transação |
+|---|---|---|
+| 1 | `executeGrantRole` OPERATOR_ROLE→operador | [`0x205a...3e32c`](https://sepolia.etherscan.io/tx/0x205a98d2c7711913a5310878e2d3db9657e99587ebe63c8122c860382a43e32c) |
+| 2 | `executeGrantRole` CUSTODIAN_ROLE→custodiante | [`0x932b...5c7ef5`](https://sepolia.etherscan.io/tx/0x932b45385f16b04d1ef0de0c002017979112e3ee56ce31c04597535c1c5c7ef5) |
+| 3 | `executeGrantRole` SETTLEMENT_OPERATOR_ROLE→operador | [`0xc1ed...92c30e3`](https://sepolia.etherscan.io/tx/0xc1ed525034b5c49ecfcebc9dcde40832295899203c495a7315f30de4192c30e3) |
+| 4 | `executeSetIssuerWallet` → empresa emissora | [`0x7b76...b3481a6`](https://sepolia.etherscan.io/tx/0x7b76b708331827ae23aa91e82b97ff12d95afca1e71f47cdf1775bb0ab3481a6) |
+
+### Demo
+
+_A preencher depois que `runDemo()` for transmitido._
 
 ```bash
-forge script script/PresentationDemo.s.sol --sig "executeWiring()" --rpc-url sepolia --broadcast
 forge script script/PresentationDemo.s.sol --sig "runDemo()" --rpc-url sepolia --broadcast
 ```
 
