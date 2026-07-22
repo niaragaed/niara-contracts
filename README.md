@@ -239,6 +239,61 @@ final de USDT do emissor/vendedor é 9.955 USDT (9.950 do recebimento líquido d
 
 ---
 
+## Segunda demo: papéis em carteiras distintas (`script/PresentationDemo.s.sol`)
+
+Versão para **apresentação pública**, pensada para deixar explícito que o cashback vai
+para um terceiro alheio à negociação — não para o comprador nem para o vendedor.
+Diferença central em relação à primeira demo (que continua intacta, documentada acima,
+e não foi alterada): lá o mesmo deployer acumulava todos os papéis; aqui **cada papel é
+uma carteira própria**:
+
+| Papel | Endereço | Observação |
+|---|---|---|
+| Admin (deployer / governança) | `0x8763606AE3C03733AF248cfEF549573e3073101a` | o mesmo de sempre — só governança, não participa do fluxo |
+| Operador | `0xe37e5C7ee77119CE789f22Df50ccB8ebDFb665eD` | `requestBacking`, `mintAttested`, `settle` |
+| Custodiante | `0xD3d3323ce7Bce15A27CA38C12c9C2Cef21020252` | `attestBacking` |
+| **Empresa emissora** | `0xf8Eb1CDC6edDE176ee8Dcb57D4BB8Be464e120F8` | `issuerWallet` — recebe e saca o cashback; **não é nem comprador nem vendedor** |
+| Vendedor | `0xdF60E0Da8071028BD2C90656848854De5A5B0b7F` | entrega o `AssetToken` na liquidação |
+| Comprador | `0xc1051639110730DE92D717d5F0Bd7dC229FAD8AA` | paga na liquidação |
+
+As 5 carteiras de papel são derivadas deterministicamente por rótulo
+(`makeAddrAndKey`, sem depender de nenhuma chave privada além da do deployer) e
+financiadas com 0,003 ETH cada, só para pagar o próprio gás.
+
+⚠️ **Importante**: este script **reutiliza os mesmos seis contratos já implantados**
+pela primeira demo (endereços na seção anterior) — não implanta nada novo. Ele só
+**reatribui**, via timelock, `OPERATOR_ROLE`/`CUSTODIAN_ROLE`
+(`BackingGateway`)/`SETTLEMENT_OPERATOR_ROLE` (`NiaraSettlement`) para as carteiras
+acima — de forma **aditiva**, sem revogar os papéis do deployer original — e **troca o
+`issuerWallet`** do `AssetToken` (`nDEMO`) da carteira do deployer para a "empresa
+emissora" acima. Essa troca é permanente daqui para frente (o design do contrato prevê
+rotação de emissor — ver seção "Decisões de design"): o cashback creditado na primeira
+demo já tinha sido sacado antes desta mudança, então nada do histórico documentado
+acima é afetado; só o cashback gerado **a partir de agora** vai para a nova empresa
+emissora.
+
+### Fase 1 — reatribuição agendada (concluída em 2026-07-22)
+
+| # | Ação | Transação |
+|---|---|---|
+| 1 | `proposeGrantRole` OPERATOR_ROLE→operador | [`0x32b7...019003`](https://sepolia.etherscan.io/tx/0x32b7bbb76050d21473ef1d6737cb0da84880bba44e8e9a3dd88e3116a4019003) |
+| 2 | `proposeGrantRole` CUSTODIAN_ROLE→custodiante | [`0x4faa...2d3db`](https://sepolia.etherscan.io/tx/0x4faa10237506e3f58b7d28b9e27211b288beccc5474004892ab249bed2e2d3db) |
+| 3 | `proposeGrantRole` SETTLEMENT_OPERATOR_ROLE→operador | [`0x02d7...c06246`](https://sepolia.etherscan.io/tx/0x02d789f80ed10648faf2c3506870ed3ccd83607042dc3aa9466a0e8f99c06246) |
+| 4 | `proposeSetIssuerWallet` → empresa emissora | [`0xee29...160882`](https://sepolia.etherscan.io/tx/0xee299db2fa36beabe9e1d56db589dedb8b53571fb5253cddde09ed3208160882) |
+| 5-9 | Financiamento (0,003 ETH cada) das 5 carteiras de papel | [`0xe1f8...9ce62`](https://sepolia.etherscan.io/tx/0xe1f82c0f718169e4f635de78f5e996c78aa1a006336c00f8868edb571c99ce62), [`0x8ab3...c63e75e`](https://sepolia.etherscan.io/tx/0x8ab38a707d803e270395cef88161d58ee448f06a35c383e05c945f730c63e75e), [`0x7750...90a9b8b`](https://sepolia.etherscan.io/tx/0x7750722b0646f091a6454fae5e9604c76acb21e5e5a8f49d0b7c7054390a9b8b), [`0x88a4...9181d1b`](https://sepolia.etherscan.io/tx/0x88a48101086b83297c11978b758bca9db8d6f86ed06aebef0bf4f67359181d1b), [`0xb670...455227`](https://sepolia.etherscan.io/tx/0xb670dee3fa219bd90c4823ea15fd471624354fe4eda9d1a1906395f282455227) |
+
+### Fase 2 e demo
+
+_A preencher depois que o timelock decorrer e `executeWiring()` + `runDemo()` forem
+transmitidos._
+
+```bash
+forge script script/PresentationDemo.s.sol --sig "executeWiring()" --rpc-url sepolia --broadcast
+forge script script/PresentationDemo.s.sol --sig "runDemo()" --rpc-url sepolia --broadcast
+```
+
+---
+
 ## Estrutura
 
 ```
@@ -254,8 +309,9 @@ src/
   NiaraSettlement.sol
   CashbackDistributor.sol
 script/
-  Deploy.s.sol   (fase 1: deploy + propose da fiação; fase 2 via --sig "executeWiring()")
-  Demo.s.sol     (fluxo completo em transações reais, para demonstração pública)
+  Deploy.s.sol           (fase 1: deploy + propose da fiação; fase 2 via --sig "executeWiring()")
+  Demo.s.sol             (fluxo completo em transações reais, para demonstração pública)
+  PresentationDemo.s.sol (2ª demo: mesmos contratos, papéis em carteiras distintas, para apresentação)
 test/
   mocks/
     MockUSDT.sol                 (6 casas decimais)
