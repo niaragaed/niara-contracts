@@ -91,9 +91,12 @@ Identidade Git deste repositório: a mesma configurada localmente pelo usuário 
 
 ## Pendências conhecidas
 
-- Deploy real em Sepolia — scripts prontos (`script/Deploy.s.sol`, `script/Demo.s.sol`),
-  falta a transmissão (`--broadcast`) em si, que só ocorre mediante confirmação
-  explícita do usuário (ver README, seção "Deploy em testnet").
+- Deploy em Sepolia concluído (2026-07-22): as duas fases (`run()` + `executeWiring()`)
+  e o `script/Demo.s.sol` já rodaram com `--broadcast` de verdade, com confirmação
+  explícita do usuário em cada etapa. Endereços e transações documentados no README,
+  seção "Deploy em testnet" / "Transações da demonstração". Qualquer novo deploy
+  (redeploy, outra rede) continua exigindo pedido explícito — nunca disparar
+  `--broadcast` por conta própria.
 - Parâmetro `cashbackBps` (ver acima) — provisório.
 - Nenhuma auditoria externa foi feita. Não descrever este código como auditado em
   nenhuma documentação futura.
