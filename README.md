@@ -203,8 +203,39 @@ deployer só para aprovar sua própria ponta da liquidação.
 
 ### Transações da demonstração (Sepolia)
 
-_A preencher após a primeira execução real de `script/Demo.s.sol` — lista dos
-endereços implantados e o link de cada transação no Etherscan, na ordem do fluxo._
+Execução real de `script/Demo.s.sol` em 2026-07-22. Endereços dos contratos (fase 1 +
+fase 2 de deploy):
+
+| Contrato | Endereço |
+|---|---|
+| MockUSDT | [`0x8737...b112`](https://sepolia.etherscan.io/address/0x87374912f372378f94af3f93b36e06126e53b112#code) |
+| MockWBTC | [`0xA202...8bb7`](https://sepolia.etherscan.io/address/0xa202111580a6d9afa3f0f7e48fe49de650528bb7#code) |
+| CashbackDistributor | [`0x2A08...A1bE`](https://sepolia.etherscan.io/address/0x2a08c09d10f5d6b15c176241317e9ad20d5da1be#code) |
+| NiaraSettlement | [`0xd7DE...D178`](https://sepolia.etherscan.io/address/0xd7deabcac261cbdc9bb898baf8e60da1355bd178#code) |
+| BackingGateway | [`0x6C90...835c`](https://sepolia.etherscan.io/address/0x6c90bc018d9fc396093cc0394801f4de175e835c#code) |
+| AssetToken (nDEMO) | [`0xcE92...b37f`](https://sepolia.etherscan.io/address/0xce920ba910c1ecb8e767f37933b38520892eb37f#code) |
+
+Vendedor/emissor: `0x8763606AE3C03733AF248cfEF549573e3073101a` (deployer). Comprador:
+`0x5E6b075b52684dC3a4d84d13465F02273c05e3eC` (conta derivada automaticamente pelo
+script, só para esta demonstração).
+
+Sequência de transações, na ordem em que aconteceram:
+
+| # | Etapa | Transação | Valores |
+|---|---|---|---|
+| 1 | `requestBacking` | [`0x677d...bfeba`](https://sepolia.etherscan.io/tx/0x677d8911650268013fcfa186fece5efe672b0b6ec079f2347d0771006fabfeba) | Pedido de lastro para 1.000 nDEMO |
+| 2 | `attestBacking` | [`0x30dc...ea8033`](https://sepolia.etherscan.io/tx/0x30dc02748869c5f5286d30c54c7382ef95ad803728fdfb8a301a55edcfea8033) | 1.000 nDEMO atestados (custódia confirmada) |
+| 3 | `mintAttested` | [`0x7290...da23fb`](https://sepolia.etherscan.io/tx/0x729053bb2d16cfee77e8227f26f4c5cf3e2e20a997ba29545cb8ae3559da23fb) | 1.000 nDEMO cunhados para o vendedor |
+| 4 | Funding do comprador (ETH) | [`0x201e...9d5e513`](https://sepolia.etherscan.io/tx/0x201e8bfa9138093dc244a5d3019925199e5059dc7a420615eefe9af6f9d5e513) | 0,01 ETH — só para o comprador pagar seu próprio gás |
+| 5 | Funding do comprador (USDT) | [`0xd840...781b1b5`](https://sepolia.etherscan.io/tx/0xd840a3a18250caa7670cdfee4d670eee06de57be02250cc462aa7ec16781b1b5) | `MockUSDT.mint` — 10.000 USDT de demonstração |
+| 6 | `approve` (AssetToken, vendedor) | [`0x59b7...e0cae`](https://sepolia.etherscan.io/tx/0x59b7f334df0f24fc62bf3662c575779d898b307578bf86840f3a9e9f336e0cae) | Aprovação de 100 nDEMO para o `NiaraSettlement` |
+| 7 | `approve` (USDT, comprador) | [`0x65ff...b522c`](https://sepolia.etherscan.io/tx/0x65fffb2329315038ff1f8c0a207c7a9ade519e21f67933ed952723d49b8b522c) | Aprovação de 10.000 USDT para o `NiaraSettlement` |
+| 8 | `settle` | [`0x1e1d...d17b33e`](https://sepolia.etherscan.io/tx/0x1e1ddcc072a7770e9d6e8725b0b6f8a91e129b7b036bc01b22a28d701d17b33e) | 100 nDEMO ↔ 10.000 USDT; **taxa retida: 50 USDT** (0,5%) |
+| 9 | `withdraw` (cashback) | [`0x87fd...8e0795a6`](https://sepolia.etherscan.io/tx/0x87fdcf2607af747e9a5256f18b6fb7db2895de942d05b3d6bd4f16a38e0795a6) | Emissor saca **5 USDT** de cashback (10% da taxa de 50 USDT) |
+
+Conferido on-chain após a demo: `cashbackBalance(nDEMO, USDT)` voltou a 0, e o saldo
+final de USDT do emissor/vendedor é 9.955 USDT (9.950 do recebimento líquido da venda
++ 5 do cashback sacado) — bate exatamente com o esperado.
 
 ---
 
