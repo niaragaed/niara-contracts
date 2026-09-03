@@ -140,16 +140,20 @@ contract BackingGateway is TimelockedAccessControl, Pausable, ReentrancyGuard {
     /// ocorrer uma vez por pedido. A trava definitiva contra emissão sem lastro vive em
     /// `AssetToken.mint`, não aqui — esta função apenas evita cunhar duas vezes o mesmo
     /// pedido.
-    function mintAttested(uint256 requestId, address to) external onlyRole(OPERATOR_ROLE) nonReentrant whenNotPaused {
+    function mintAttested(uint256 requestId, address to) external nonReentrant onlyRole(OPERATOR_ROLE) whenNotPaused {
         if (to == address(0)) revert ZeroAddress();
         BackingRequest storage req = backingRequests[requestId];
         if (req.status != RequestStatus.SETTLED) revert RequestNotSettled(requestId);
         if (req.minted) revert AlreadyMinted(requestId);
 
+        // Checks-effects-interactions: `minted` e o evento são gravados ANTES do mint.
+        // Se o AssetToken tiver hook (ERC-777/ERC-1363) e reentrar em outra função deste
+        // contrato durante `mint`, essa reentrância já lê `minted == true` — não existe
+        // janela em que o pedido apareça como não cunhado enquanto a cunhagem corre.
         req.minted = true;
-        IAssetToken(req.asset).mint(to, req.quantityAcquired);
-
         emit BackingMinted(requestId, req.asset, to, req.quantityAcquired);
+
+        IAssetToken(req.asset).mint(to, req.quantityAcquired);
     }
 
     /// @notice Cancela um pedido de lastro ainda pendente. Nenhum fundo foi movido nesta
@@ -187,29 +191,38 @@ contract BackingGateway is TimelockedAccessControl, Pausable, ReentrancyGuard {
 
     /// @notice Confirma que o ativo real foi liberado off-chain. Só então os tokens
     /// custodiados são queimados e `totalAttested[asset]` é reduzido na mesma quantidade.
-    function redemptionAttest(uint256 requestId, bytes32 proofHash) external onlyRole(CUSTODIAN_ROLE) nonReentrant whenNotPaused {
+    function redemptionAttest(uint256 requestId, bytes32 proofHash) external nonReentrant onlyRole(CUSTODIAN_ROLE) whenNotPaused {
         RedemptionRequest storage req = redemptionRequests[requestId];
         if (req.status != RequestStatus.PENDING) revert RequestNotPending(requestId);
 
+        // Checks-effects-interactions: status final, prova e `totalAttested` são gravados
+        // e o evento emitido ANTES da queima. Uma reentrância vinda de um hook do
+        // AssetToken durante `burn` já encontra o pedido em SETTLED — `cancelRedemptionRequest`,
+        // por exemplo, reverte com `RequestNotPending` em vez de devolver tokens de um
+        // resgate que está sendo liquidado.
         req.status = RequestStatus.SETTLED;
         req.proofHash = proofHash;
         totalAttested[req.asset] -= req.quantity;
+        emit RedemptionAttested(requestId, req.asset, proofHash, req.quantity);
 
         IAssetToken(req.asset).burn(address(this), req.quantity);
-
-        emit RedemptionAttested(requestId, req.asset, proofHash, req.quantity);
     }
 
     /// @notice Cancela um pedido de resgate pendente e devolve os tokens custodiados ao
     /// solicitante — usado quando a liberação off-chain do ativo real não pôde ocorrer.
-    function cancelRedemptionRequest(uint256 requestId) external onlyRole(CUSTODIAN_ROLE) nonReentrant {
+    function cancelRedemptionRequest(uint256 requestId) external nonReentrant onlyRole(CUSTODIAN_ROLE) {
         RedemptionRequest storage req = redemptionRequests[requestId];
         if (req.status != RequestStatus.PENDING) revert RequestNotPending(requestId);
 
+        // Checks-effects-interactions: status CANCELLED e evento são gravados ANTES da
+        // devolução dos tokens custodiados. Se `req.asset` tiver hook (ERC-777/ERC-1363) e
+        // reentrar em outra função deste contrato durante o transfer, essa reentrância já
+        // encontra o pedido em CANCELLED — `redemptionAttest`, por exemplo, reverte com
+        // `RequestNotPending` em vez de queimar tokens de um resgate já cancelado.
         req.status = RequestStatus.CANCELLED;
-        IERC20(req.asset).safeTransfer(req.requester, req.quantity);
-
         emit RedemptionRequestCancelled(requestId, req.requester, req.quantity);
+
+        IERC20(req.asset).safeTransfer(req.requester, req.quantity);
     }
 
     // ── Emergência ──────────────────────────────────────────────────────────────────────

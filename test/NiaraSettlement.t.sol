@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {NiaraSettlement} from "../src/NiaraSettlement.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
 import {AssetToken} from "../src/AssetToken.sol";
@@ -10,6 +10,7 @@ import {MockBackingGateway} from "./mocks/MockBackingGateway.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {MockWBTC} from "./mocks/MockWBTC.sol";
 import {MaliciousReentrantToken} from "./mocks/MaliciousReentrantToken.sol";
+import {MaliciousHookToken} from "./mocks/MaliciousHookToken.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -329,6 +330,83 @@ contract NiaraSettlementTest is Test {
         settlement.settle(address(assetToken), address(evilPayment), buyer, seller, 10 ether, 1_000e6);
 
         assertEq(assetToken.balanceOf(seller), sellerAssetBalanceBefore);
+    }
+
+    /// @dev Extrai o selector de um retorno bruto (ex.: o erro de uma chamada revertida).
+    function _selectorOf(bytes memory data) internal pure returns (bytes4 sel) {
+        require(data.length >= 4, "retorno sem selector");
+        assembly {
+            sel := mload(add(data, 32))
+        }
+    }
+
+    /// @notice Checks-effects-interactions: `Settled` precisa ser emitido antes de qualquer
+    /// transferência, para que um indexador off-chain nunca veja um `Transfer` desta
+    /// liquidação (ou de uma reentrância disparada por ele) antes do próprio `Settled`.
+    function test_Settle_EmitsSettledBeforeExternalTransfers() public {
+        vm.recordLogs();
+
+        vm.prank(operator);
+        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 settledTopic = keccak256("Settled(address,address,address,address,uint256,uint256,uint256)");
+        bytes32 transferTopic = keccak256("Transfer(address,address,uint256)");
+
+        uint256 settledIndex = type(uint256).max;
+        uint256 firstTransferIndex = type(uint256).max;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == settledTopic && settledIndex == type(uint256).max) settledIndex = i;
+            if (logs[i].topics[0] == transferTopic && firstTransferIndex == type(uint256).max) {
+                firstTransferIndex = i;
+            }
+        }
+
+        assertTrue(settledIndex != type(uint256).max, "Settled nao emitido");
+        assertTrue(firstTransferIndex != type(uint256).max, "nenhum Transfer emitido");
+        assertLt(settledIndex, firstTransferIndex);
+        assertEq(settledIndex, 0);
+    }
+
+    /// @notice Reentrância cruzada a partir de um token de pagamento com hook: a chamada
+    /// reentrante morre no guard (que é o primeiro modifier) antes mesmo do controle de
+    /// acesso, e a liquidação legítima conclui com estado íntegro.
+    function test_Settle_CrossFunctionReentrancyFromHookIsBlockedByGuard() public {
+        MaliciousHookToken evilPayment = new MaliciousHookToken();
+        evilPayment.mint(buyer, 1_000_000e6);
+
+        vm.prank(buyer);
+        evilPayment.approve(address(settlement), type(uint256).max);
+
+        // O token hostil NÃO recebe SETTLEMENT_OPERATOR_ROLE: se `nonReentrant` não fosse o
+        // primeiro modifier, o erro observado seria o de controle de acesso.
+        evilPayment.armOnTransferFrom(
+            address(settlement),
+            abi.encodeWithSelector(
+                settlement.settle.selector, address(assetToken), address(evilPayment), buyer, seller, 1 ether, 100e6
+            )
+        );
+
+        uint256 sellerAssetBefore = assetToken.balanceOf(seller);
+
+        vm.prank(operator);
+        uint256 feeCharged = settlement.settle(address(assetToken), address(evilPayment), buyer, seller, 10 ether, 1_000e6);
+
+        assertTrue(evilPayment.reentered());
+        assertFalse(evilPayment.reentrantSucceeded());
+        assertEq(
+            _selectorOf(evilPayment.reentrantReturnData()), ReentrancyGuard.ReentrancyGuardReentrantCall.selector
+        );
+        assertTrue(
+            _selectorOf(evilPayment.reentrantReturnData()) != IAccessControl.AccessControlUnauthorizedAccount.selector
+        );
+
+        // Apenas a liquidação legítima moveu valor — a reentrante não moveu nada.
+        assertEq(feeCharged, 5e6);
+        assertEq(assetToken.balanceOf(seller), sellerAssetBefore - 10 ether);
+        assertEq(assetToken.balanceOf(buyer), 10 ether);
+        assertEq(evilPayment.balanceOf(seller), 995e6);
+        assertEq(evilPayment.balanceOf(address(distributor)), 5e6);
     }
 
     // ── Pausable: controle de acesso ───────────────────────────────────────────────────

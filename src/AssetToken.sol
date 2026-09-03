@@ -151,7 +151,11 @@ contract AssetToken is ERC20, Pausable, TimelockedAccessControl {
         emit IssuerWalletChangeProposed(newIssuerWallet, executeAfter);
     }
 
+    /// @notice Executa uma proposta de mudança da carteira do emissor após o timelock.
+    /// @dev Revalida o endereço aqui, e não apenas na proposta: um `address(0)` executado
+    /// travaria o destino do cashback até uma nova proposta cumprir o timelock inteiro.
     function executeSetIssuerWallet(address newIssuerWallet) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (newIssuerWallet == address(0)) revert ZeroAddress();
         bytes32 actionId = keccak256(abi.encode("SET_ISSUER_WALLET", newIssuerWallet));
         _consumeAction(actionId);
         address old = issuerWallet;
@@ -170,7 +174,12 @@ contract AssetToken is ERC20, Pausable, TimelockedAccessControl {
         emit BackingGatewayChangeProposed(newBackingGateway, executeAfter);
     }
 
+    /// @notice Executa uma proposta de mudança do BackingGateway após o timelock.
+    /// @dev Revalida o endereço aqui, e não apenas na proposta: um `address(0)` executado
+    /// faria todo `mint` reverter com `BackingGatewayNotSet` até uma nova proposta cumprir
+    /// o timelock inteiro.
     function executeSetBackingGateway(address newBackingGateway) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (newBackingGateway == address(0)) revert ZeroAddress();
         bytes32 actionId = keccak256(abi.encode("SET_BACKING_GATEWAY", newBackingGateway));
         _consumeAction(actionId);
         address old = backingGateway;

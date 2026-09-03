@@ -82,7 +82,7 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         address seller,
         uint256 assetAmount,
         uint256 paymentAmount
-    ) external onlyRole(SETTLEMENT_OPERATOR_ROLE) nonReentrant whenNotPaused returns (uint256 feeCharged) {
+    ) external nonReentrant onlyRole(SETTLEMENT_OPERATOR_ROLE) whenNotPaused returns (uint256 feeCharged) {
         if (assetToken == address(0) || paymentToken == address(0)) revert ZeroAddress();
         if (buyer == address(0) || seller == address(0)) revert ZeroAddress();
         if (buyer == seller) revert BuyerEqualsSeller();
@@ -95,14 +95,23 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
 
         uint256 sellerProceeds = paymentAmount - feeCharged;
 
+        // Checks-effects-interactions: `Settled` é emitido ANTES de qualquer chamada
+        // externa. Um token de pagamento com hook (ERC-777/ERC-1363) que reentre em outra
+        // função durante um dos `safeTransferFrom` abaixo já enxerga o evento desta
+        // liquidação emitido — indexadores off-chain nunca observam uma reentrância
+        // "antes" da operação que a originou. Como `settle` não custodia saldo nem mantém
+        // estado próprio por ordem, o evento é o único efeito a ordenar aqui.
+        emit Settled(assetToken, paymentToken, buyer, seller, assetAmount, paymentAmount, feeCharged);
+
         IERC20(assetToken).safeTransferFrom(seller, buyer, assetAmount);
         IERC20(paymentToken).safeTransferFrom(buyer, seller, sellerProceeds);
         if (feeCharged > 0) {
             IERC20(paymentToken).safeTransferFrom(buyer, address(cashbackDistributor), feeCharged);
+            // `recordFee` vem depois da transferência por necessidade: o distribuidor
+            // contabiliza uma taxa que precisa já estar em seu saldo. Qualquer falha aqui
+            // reverte a transação inteira, incluindo o evento acima.
             cashbackDistributor.recordFee(assetToken, paymentToken, feeCharged);
         }
-
-        emit Settled(assetToken, paymentToken, buyer, seller, assetAmount, paymentAmount, feeCharged);
     }
 
     /// @notice Propõe uma nova taxa (bps). Sujeita ao teto imutável `MAX_FEE_BPS` e ao timelock.
