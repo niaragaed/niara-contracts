@@ -37,6 +37,62 @@ seção "Decisões de design".
   (`TimelockedAccessControl`: propose → aguardar `timelockDelay` → execute). Não
   adicione atalhos que apliquem essas mudanças imediatamente.
 
+## Tokens com hook: checks-effects-interactions é obrigatório
+
+**Premissa de design:** o protocolo pretende aceitar tokens de pagamento e ativos com
+hooks (ERC-777, ERC-1363), não apenas ERC-20 simples. Todo `transfer`,
+`transferFrom`, `mint` ou `burn` deve ser tratado como uma chamada externa que pode
+devolver o controle a um contrato hostil no meio da operação.
+
+Por causa disso, **checks-effects-interactions é regra obrigatória para qualquer
+código novo**: toda atualização de estado *e toda emissão de evento* precede a chamada
+externa. Nunca o contrário.
+
+- **`nonReentrant` sozinho não basta.** Ele impede reentrância na mesma função, mas não
+  impede reentrância **cruzada** — um hook chamando outra função do contrato durante a
+  chamada externa — nem corrige a **ordem dos logs**: com o `emit` depois do transfer,
+  um indexador off-chain vê o `Transfer` (ou os eventos da reentrância) antes do evento
+  da operação que os originou, quebrando invariantes assumidas fora da cadeia.
+- **`nonReentrant` é sempre o primeiro modifier**, antes de `onlyRole` e
+  `whenNotPaused`. Modifiers executam na ordem declarada; o guard não deve depender da
+  ordem dos demais. Isso é verificável: os testes `..._RevertsViaGuard` deliberadamente
+  *não* concedem o papel ao contrato hostil, então só passam se o erro observado for
+  `ReentrancyGuardReentrantCall` e não `AccessControlUnauthorizedAccount`.
+
+As quatro funções com chamada externa seguem esse padrão, cada uma com comentário no
+código explicando o porquê:
+
+- `NiaraSettlement.settle` — `emit Settled` antes dos três `safeTransferFrom`.
+- `BackingGateway.mintAttested` — `req.minted = true` e `emit BackingMinted` antes de
+  `IAssetToken.mint`.
+- `BackingGateway.redemptionAttest` — status `SETTLED`, `proofHash`, a baixa em
+  `totalAttested` e `emit RedemptionAttested` antes de `IAssetToken.burn`.
+- `BackingGateway.cancelRedemptionRequest` — status `CANCELLED` e
+  `emit RedemptionRequestCancelled` antes do `safeTransfer` de devolução.
+
+**Cada uma tem um teste de ordem de logs travando a regressão** (`vm.recordLogs` +
+`assertLt` entre o índice do evento e o do primeiro `Transfer`) — não remova nem
+enfraqueça esses testes ao mexer nas funções:
+
+- `test_Settle_EmitsSettledBeforeExternalTransfers` (`test/NiaraSettlement.t.sol`)
+- `test_MintAttested_EmitsBackingMintedBeforeExternalTransfer`
+- `test_RedemptionAttest_EmitsRedemptionAttestedBeforeExternalTransfer`
+- `test_CancelRedemptionRequest_EmitsCancelledBeforeExternalTransfer`
+  (os três últimos em `test/BackingGateway.t.sol`)
+
+Ao adicionar uma função nova com chamada externa, adicione o teste de ordem
+equivalente. Para simular o ativo hostil, use `test/mocks/MaliciousHookToken.sol`, que
+**registra** o resultado da reentrância (`reentrantSucceeded` /
+`reentrantReturnData`) em vez de abortar — o `MaliciousReentrantToken` mais antigo faz
+`require(success)` e reverte a transação inteira, o que serve para provar bloqueio mas
+impede inspecionar o estado que a reentrância enxergou.
+
+**Exceção documentada:** em `settle`, `cashbackDistributor.recordFee` continua *depois*
+da transferência da taxa, porque o distribuidor contabiliza uma taxa que precisa já
+estar em seu saldo. É chamada interna ao protocolo e qualquer falha reverte a transação
+inteira, evento incluído. Está comentada no código — se precisar mexer nessa ordem,
+discuta antes.
+
 ## Parâmetro pendente de definição
 
 `CashbackDistributor.cashbackBps` está em **1000 bps (10% da taxa)**, valor

@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {BackingGateway} from "../src/BackingGateway.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {TimelockedAccessControl} from "../src/governance/TimelockedAccessControl.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {MaliciousHookToken} from "./mocks/MaliciousHookToken.sol";
 
 contract BackingGatewayTest is Test {
     BackingGateway public gateway;
@@ -468,5 +470,272 @@ contract BackingGatewayTest is Test {
         vm.prank(custodian);
         vm.expectRevert(abi.encodeWithSelector(BackingGateway.RequestNotPending.selector, requestId));
         gateway.cancelRedemptionRequest(requestId);
+    }
+
+    // ── Reentrância cruzada (checks-effects-interactions) ─────────────────────────────
+
+    /// @dev Extrai o selector de um retorno bruto (ex.: o erro de uma chamada revertida).
+    function _selectorOf(bytes memory data) internal pure returns (bytes4 sel) {
+        require(data.length >= 4, "retorno sem selector");
+        assembly {
+            sel := mload(add(data, 32))
+        }
+    }
+
+    /// @dev Prepara um ativo hostil já atestado e pronto para `mintAttested`.
+    function _armedBackingRequest(MaliciousHookToken evil, uint256 quantity)
+        internal
+        returns (uint256 requestId)
+    {
+        vm.prank(operator);
+        requestId = gateway.requestBacking(address(evil), quantity);
+        vm.prank(custodian);
+        gateway.attestBacking(requestId, keccak256("proof"), quantity);
+    }
+
+    function test_MintAttested_ReentrancyDuringMintSeesRequestAlreadyMinted() public {
+        MaliciousHookToken evil = new MaliciousHookToken();
+        uint256 requestId = _armedBackingRequest(evil, 100 ether);
+
+        // Durante o `mint`, o hook lê o próprio pedido de volta no gateway.
+        evil.armOnMint(address(gateway), abi.encodeWithSignature("backingRequests(uint256)", requestId));
+
+        vm.prank(operator);
+        gateway.mintAttested(requestId, alice);
+
+        assertTrue(evil.reentered());
+        assertTrue(evil.reentrantSucceeded());
+
+        (,,,,, uint8 status, bool minted) = abi.decode(
+            evil.reentrantReturnData(), (address, address, uint256, uint256, bytes32, uint8, bool)
+        );
+        // O efeito já estava commitado quando a chamada externa ocorreu.
+        assertTrue(minted);
+        assertEq(status, uint8(BackingGateway.RequestStatus.SETTLED));
+        assertEq(evil.balanceOf(alice), 100 ether);
+    }
+
+    function test_MintAttested_ReentrantMintAttestedRevertsViaGuard() public {
+        MaliciousHookToken evil = new MaliciousHookToken();
+        uint256 requestId = _armedBackingRequest(evil, 100 ether);
+
+        // Concede OPERATOR_ROLE ao próprio token hostil para isolar a garantia sob teste
+        // (o guard de reentrância) da checagem de controle de acesso.
+        _gatewayGrantRole(operatorRole, address(evil));
+
+        evil.armOnMint(
+            address(gateway), abi.encodeWithSignature("mintAttested(uint256,address)", requestId, alice)
+        );
+
+        vm.prank(operator);
+        gateway.mintAttested(requestId, alice);
+
+        assertTrue(evil.reentered());
+        assertFalse(evil.reentrantSucceeded());
+        // `nonReentrant` é o primeiro modifier: a reentrância morre no guard, não no papel.
+        assertEq(_selectorOf(evil.reentrantReturnData()), ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        // A cunhagem legítima ocorreu uma única vez.
+        assertEq(evil.balanceOf(alice), 100 ether);
+    }
+
+    /// @dev Leva um ativo hostil até um pedido de resgate PENDING com tokens custodiados.
+    function _pendingEvilRedemption(MaliciousHookToken evil, uint256 backed, uint256 redeemed)
+        internal
+        returns (uint256 redemptionId)
+    {
+        uint256 backingId = _armedBackingRequest(evil, backed);
+        vm.prank(operator);
+        gateway.mintAttested(backingId, alice);
+
+        vm.prank(alice);
+        evil.approve(address(gateway), redeemed);
+        vm.prank(alice);
+        redemptionId = gateway.redemptionRequest(address(evil), redeemed);
+    }
+
+    function test_RedemptionAttest_ReentrancyDuringBurnSeesRequestAlreadySettled() public {
+        MaliciousHookToken evil = new MaliciousHookToken();
+        uint256 redemptionId = _pendingEvilRedemption(evil, 100 ether, 40 ether);
+
+        evil.armOnBurn(address(gateway), abi.encodeWithSignature("redemptionRequests(uint256)", redemptionId));
+
+        vm.prank(custodian);
+        gateway.redemptionAttest(redemptionId, keccak256("released"));
+
+        assertTrue(evil.reentered());
+        assertTrue(evil.reentrantSucceeded());
+
+        (,,,, uint8 status) =
+            abi.decode(evil.reentrantReturnData(), (address, address, uint256, bytes32, uint8));
+        // Status final e baixa em `totalAttested` já estavam commitados antes do burn.
+        assertEq(status, uint8(BackingGateway.RequestStatus.SETTLED));
+        assertEq(gateway.totalAttested(address(evil)), 60 ether);
+        assertEq(evil.balanceOf(address(gateway)), 0);
+    }
+
+    function test_RedemptionAttest_ReentrantCancelRevertsViaGuard() public {
+        MaliciousHookToken evil = new MaliciousHookToken();
+        uint256 redemptionId = _pendingEvilRedemption(evil, 100 ether, 40 ether);
+
+        // Deliberadamente sem conceder CUSTODIAN_ROLE ao token hostil: como `nonReentrant`
+        // é o primeiro modifier, o erro esperado é o do guard, não o de controle de acesso.
+
+        evil.armOnBurn(
+            address(gateway), abi.encodeWithSignature("cancelRedemptionRequest(uint256)", redemptionId)
+        );
+
+        uint256 aliceBalanceBefore = evil.balanceOf(alice);
+
+        vm.prank(custodian);
+        gateway.redemptionAttest(redemptionId, keccak256("released"));
+
+        assertTrue(evil.reentered());
+        assertFalse(evil.reentrantSucceeded());
+        assertEq(_selectorOf(evil.reentrantReturnData()), ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        assertTrue(
+            _selectorOf(evil.reentrantReturnData()) != IAccessControl.AccessControlUnauthorizedAccount.selector
+        );
+        // O cancelamento reentrante não devolveu nada: os tokens foram queimados.
+        assertEq(evil.balanceOf(alice), aliceBalanceBefore);
+        assertEq(evil.balanceOf(address(gateway)), 0);
+        assertEq(gateway.totalAttested(address(evil)), 60 ether);
+    }
+
+    function test_CancelRedemptionRequest_ReentrancyDuringTransferSeesRequestAlreadyCancelled() public {
+        MaliciousHookToken evil = new MaliciousHookToken();
+        uint256 redemptionId = _pendingEvilRedemption(evil, 100 ether, 40 ether);
+
+        // Durante a devolução dos tokens, o hook lê o próprio pedido de volta no gateway.
+        evil.armOnTransfer(address(gateway), abi.encodeWithSignature("redemptionRequests(uint256)", redemptionId));
+
+        vm.prank(custodian);
+        gateway.cancelRedemptionRequest(redemptionId);
+
+        assertTrue(evil.reentered());
+        assertTrue(evil.reentrantSucceeded());
+
+        (,,,, uint8 status) =
+            abi.decode(evil.reentrantReturnData(), (address, address, uint256, bytes32, uint8));
+        // O cancelamento já estava commitado quando a devolução externa ocorreu.
+        assertEq(status, uint8(BackingGateway.RequestStatus.CANCELLED));
+        // A devolução em si concluiu normalmente.
+        assertEq(evil.balanceOf(alice), 100 ether);
+        assertEq(evil.balanceOf(address(gateway)), 0);
+        assertEq(gateway.totalAttested(address(evil)), 100 ether);
+    }
+
+    function test_CancelRedemptionRequest_ReentrantRedemptionAttestRevertsViaGuard() public {
+        MaliciousHookToken evil = new MaliciousHookToken();
+        uint256 redemptionId = _pendingEvilRedemption(evil, 100 ether, 40 ether);
+
+        // Deliberadamente sem conceder CUSTODIAN_ROLE ao token hostil: como `nonReentrant`
+        // é o primeiro modifier, o erro esperado é o do guard, não o de controle de acesso.
+        evil.armOnTransfer(
+            address(gateway),
+            abi.encodeWithSignature("redemptionAttest(uint256,bytes32)", redemptionId, keccak256("forjado"))
+        );
+
+        vm.prank(custodian);
+        gateway.cancelRedemptionRequest(redemptionId);
+
+        assertTrue(evil.reentered());
+        assertFalse(evil.reentrantSucceeded());
+        assertEq(_selectorOf(evil.reentrantReturnData()), ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        assertTrue(
+            _selectorOf(evil.reentrantReturnData()) != IAccessControl.AccessControlUnauthorizedAccount.selector
+        );
+        // A atestação reentrante não queimou nada nem mexeu no lastro: só o cancelamento valeu.
+        assertEq(evil.balanceOf(alice), 100 ether);
+        assertEq(evil.balanceOf(address(gateway)), 0);
+        assertEq(gateway.totalAttested(address(evil)), 100 ether);
+    }
+
+    /// @notice Regressão direta do checks-effects-interactions: `RedemptionRequestCancelled`
+    /// precisa ser emitido antes do `Transfer` da devolução. O status já era gravado antes do
+    /// transfer mesmo na ordem antiga — é a ordem dos logs que a mudança trava.
+    function test_CancelRedemptionRequest_EmitsCancelledBeforeExternalTransfer() public {
+        _mintTokensTo(alice, 100 ether);
+        vm.prank(alice);
+        token.approve(address(gateway), 40 ether);
+        vm.prank(alice);
+        uint256 requestId = gateway.redemptionRequest(address(token), 40 ether);
+
+        vm.recordLogs();
+        vm.prank(custodian);
+        gateway.cancelRedemptionRequest(requestId);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 cancelledTopic = keccak256("RedemptionRequestCancelled(uint256,address,uint256)");
+        bytes32 transferTopic = keccak256("Transfer(address,address,uint256)");
+
+        uint256 cancelledIndex = type(uint256).max;
+        uint256 transferIndex = type(uint256).max;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == cancelledTopic && cancelledIndex == type(uint256).max) cancelledIndex = i;
+            if (logs[i].topics[0] == transferTopic && transferIndex == type(uint256).max) transferIndex = i;
+        }
+
+        assertTrue(cancelledIndex != type(uint256).max, "RedemptionRequestCancelled nao emitido");
+        assertTrue(transferIndex != type(uint256).max, "Transfer nao emitido");
+        assertLt(cancelledIndex, transferIndex);
+        assertEq(cancelledIndex, 0);
+    }
+
+    /// @notice Regressão do checks-effects-interactions em `mintAttested`: `BackingMinted`
+    /// precisa ser emitido antes do `Transfer` de cunhagem do AssetToken.
+    function test_MintAttested_EmitsBackingMintedBeforeExternalTransfer() public {
+        uint256 requestId = _requestBacking(100 ether);
+        vm.prank(custodian);
+        gateway.attestBacking(requestId, keccak256("proof"), 100 ether);
+
+        vm.recordLogs();
+        vm.prank(operator);
+        gateway.mintAttested(requestId, alice);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 mintedTopic = keccak256("BackingMinted(uint256,address,address,uint256)");
+        bytes32 transferTopic = keccak256("Transfer(address,address,uint256)");
+
+        uint256 mintedIndex = type(uint256).max;
+        uint256 transferIndex = type(uint256).max;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == mintedTopic && mintedIndex == type(uint256).max) mintedIndex = i;
+            if (logs[i].topics[0] == transferTopic && transferIndex == type(uint256).max) transferIndex = i;
+        }
+
+        assertTrue(mintedIndex != type(uint256).max, "BackingMinted nao emitido");
+        assertTrue(transferIndex != type(uint256).max, "Transfer nao emitido");
+        assertLt(mintedIndex, transferIndex);
+        assertEq(mintedIndex, 0);
+    }
+
+    /// @notice Regressão do checks-effects-interactions em `redemptionAttest`:
+    /// `RedemptionAttested` precisa ser emitido antes do `Transfer` de queima.
+    function test_RedemptionAttest_EmitsRedemptionAttestedBeforeExternalTransfer() public {
+        _mintTokensTo(alice, 100 ether);
+        vm.prank(alice);
+        token.approve(address(gateway), 40 ether);
+        vm.prank(alice);
+        uint256 requestId = gateway.redemptionRequest(address(token), 40 ether);
+
+        vm.recordLogs();
+        vm.prank(custodian);
+        gateway.redemptionAttest(requestId, keccak256("released"));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 attestedTopic = keccak256("RedemptionAttested(uint256,address,bytes32,uint256)");
+        bytes32 transferTopic = keccak256("Transfer(address,address,uint256)");
+
+        uint256 attestedIndex = type(uint256).max;
+        uint256 transferIndex = type(uint256).max;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == attestedTopic && attestedIndex == type(uint256).max) attestedIndex = i;
+            if (logs[i].topics[0] == transferTopic && transferIndex == type(uint256).max) transferIndex = i;
+        }
+
+        assertTrue(attestedIndex != type(uint256).max, "RedemptionAttested nao emitido");
+        assertTrue(transferIndex != type(uint256).max, "Transfer nao emitido");
+        assertLt(attestedIndex, transferIndex);
+        assertEq(attestedIndex, 0);
     }
 }

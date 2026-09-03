@@ -283,6 +283,16 @@ contract AssetTokenTest is Test {
         token.proposeSetIssuerWallet(address(0));
     }
 
+    function test_ExecuteSetIssuerWallet_RevertsForZeroAddress() public {
+        // Defesa em profundidade: mesmo sem proposta válida possível para address(0), a
+        // execução revalida o endereço antes de qualquer efeito.
+        vm.prank(admin);
+        vm.expectRevert(AssetToken.ZeroAddress.selector);
+        token.executeSetIssuerWallet(address(0));
+
+        assertEq(token.issuerWallet(), issuer);
+    }
+
     function test_Constructor_RevertsForZeroIssuerWallet() public {
         vm.expectRevert(AssetToken.ZeroAddress.selector);
         new AssetToken(
@@ -301,6 +311,16 @@ contract AssetTokenTest is Test {
         vm.prank(admin);
         vm.expectRevert(AssetToken.ZeroAddress.selector);
         token.proposeSetBackingGateway(address(0));
+    }
+
+    function test_ExecuteSetBackingGateway_RevertsForZeroAddress() public {
+        // Defesa em profundidade: idem `executeSetIssuerWallet` — um address(0) executado
+        // faria todo `mint` reverter até nova proposta cumprir o timelock inteiro.
+        vm.prank(admin);
+        vm.expectRevert(AssetToken.ZeroAddress.selector);
+        token.executeSetBackingGateway(address(0));
+
+        assertEq(token.backingGateway(), address(gateway));
     }
 
     // ── Papéis: grantRole/revokeRole diretos desabilitados ────────────────────────────
