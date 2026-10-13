@@ -9,17 +9,17 @@ import {CashbackDistributor} from "../src/CashbackDistributor.sol";
 import {MockUSDT} from "../test/mocks/MockUSDT.sol";
 
 /// @title DemoNiaraFlow
-/// @notice Executa, em transações reais e rastreáveis na testnet, o fluxo completo do
-/// protocolo: requestBacking -> attestBacking -> mintAttested -> settle -> cashback
-/// creditado -> withdraw. Requer que `DeployNiara.executeWiring()` já tenha sido concluída
-/// (papéis concedidos e `backingGateway` configurado).
-/// @dev A liquidação exige duas partes distintas (buyer != seller, checagem estrutural em
-/// NiaraSettlement.settle). Para não depender de uma segunda chave privada fornecida pelo
-/// usuário, o "comprador" de demonstração é uma conta derivada deterministicamente
-/// (`makeAddrAndKey`) e recebe um pouco de ETH de teste do deployer só para pagar o gás do
-/// próprio `approve` — nunca detém valor além disso. O emissor (`issuerWallet`) precisa ser
-/// o próprio deployer (padrão do Deploy.s.sol) para que o passo de `withdraw` funcione aqui,
-/// já que este script só possui a chave privada do deployer.
+/// @notice Runs the protocol's full flow as real, traceable testnet transactions:
+/// requestBacking -> attestBacking -> mintAttested -> settle -> cashback credited ->
+/// withdraw. Requires `DeployNiara.executeWiring()` to have completed (roles granted
+/// and `backingGateway` configured).
+/// @dev Settlement requires two distinct parties (buyer != seller, a structural check in
+/// NiaraSettlement.settle). To avoid depending on a second private key supplied by the
+/// user, the demo "buyer" is a deterministically derived account (`makeAddrAndKey`) that
+/// receives a little test ETH from the deployer just to pay the gas of its own
+/// `approve`; it never holds any other value. The issuer (`issuerWallet`) must be the
+/// deployer itself (the Deploy.s.sol default) for the `withdraw` step to work here,
+/// since this script only has the deployer's private key.
 contract DemoNiaraFlow is Script {
     struct Contracts {
         BackingGateway gateway;
@@ -45,7 +45,7 @@ contract DemoNiaraFlow is Script {
         Contracts memory c = _readContracts();
         DemoConfig memory cfg = _readDemoConfig(deployer);
         (address buyer, uint256 buyerPrivateKey) = makeAddrAndKey("niara-demo-buyer");
-        console2.log("Comprador de demonstracao (derivado):", buyer);
+        console2.log("Demo buyer (derived):", buyer);
 
         _runBackingFlow(c, cfg, deployerPrivateKey);
         _fundBuyer(c, cfg, deployerPrivateKey, buyer);
@@ -53,7 +53,7 @@ contract DemoNiaraFlow is Script {
         _runCashbackFlow(c, deployerPrivateKey);
 
         console2.log("");
-        console2.log("Fluxo de demonstracao concluido com sucesso.");
+        console2.log("Demo flow completed successfully.");
     }
 
     function _readContracts() internal view returns (Contracts memory c) {
@@ -66,8 +66,8 @@ contract DemoNiaraFlow is Script {
 
     function _readDemoConfig(address deployer) internal view returns (DemoConfig memory cfg) {
         cfg.issuerWallet = vm.envOr("ISSUER_WALLET_ADDRESS", deployer);
-        // O próprio deployer atua como vendedor (recebe o mint) — só o comprador precisa de
-        // uma conta separada, pela checagem buyer != seller.
+        // The deployer acts as the seller (receives the mint); only the buyer needs a
+        // separate account, because of the buyer != seller check.
         cfg.seller = deployer;
         cfg.backingQuantity = vm.envOr("DEMO_BACKING_QUANTITY", uint256(1_000 ether));
         cfg.settleAssetAmount = vm.envOr("DEMO_SETTLE_ASSET_AMOUNT", uint256(100 ether));
@@ -84,10 +84,10 @@ contract DemoNiaraFlow is Script {
         c.gateway.attestBacking(
             requestId, keccak256(abi.encode("niara-demo-backing-proof", requestId)), cfg.backingQuantity
         );
-        console2.log("2) attestBacking OK -> quantidade atestada", cfg.backingQuantity);
+        console2.log("2) attestBacking OK -> attested quantity", cfg.backingQuantity);
 
         c.gateway.mintAttested(requestId, cfg.seller);
-        console2.log("3) mintAttested -> tokens emitidos para o vendedor", cfg.seller);
+        console2.log("3) mintAttested -> tokens minted to the seller", cfg.seller);
 
         vm.stopBroadcast();
     }
@@ -98,13 +98,13 @@ contract DemoNiaraFlow is Script {
         vm.startBroadcast(deployerPrivateKey);
         if (buyer.balance < cfg.buyerGasFunding) {
             (bool ok,) = buyer.call{value: cfg.buyerGasFunding}("");
-            require(ok, "funding do comprador falhou");
+            require(ok, "buyer funding failed");
         }
-        // MockUSDT.mint e publico (sem controle de acesso, uso exclusivo de teste) — o
-        // deployer pode financiar o comprador diretamente, sem precisar da chave dele.
+        // MockUSDT.mint is public (no access control, test use only), so the deployer can
+        // fund the buyer directly without needing the buyer's key.
         c.usdt.mint(buyer, cfg.settlePaymentAmount);
         vm.stopBroadcast();
-        console2.log("4) Comprador financiado: ETH para gas + USDT de demonstracao");
+        console2.log("4) Buyer funded: ETH for gas + demo USDT");
     }
 
     function _runSettleFlow(
@@ -117,28 +117,28 @@ contract DemoNiaraFlow is Script {
         vm.startBroadcast(deployerPrivateKey);
         c.assetToken.approve(address(c.settlement), cfg.settleAssetAmount);
         vm.stopBroadcast();
-        console2.log("5) Vendedor aprovou o AssetToken para a liquidacao");
+        console2.log("5) Seller approved the AssetToken for settlement");
 
         vm.startBroadcast(buyerPrivateKey);
         c.usdt.approve(address(c.settlement), cfg.settlePaymentAmount);
         vm.stopBroadcast();
-        console2.log("6) Comprador aprovou o USDT para a liquidacao");
+        console2.log("6) Buyer approved USDT for settlement");
 
         vm.startBroadcast(deployerPrivateKey);
         uint256 feeCharged = c.settlement.settle(
             address(c.assetToken), address(c.usdt), buyer, cfg.seller, cfg.settleAssetAmount, cfg.settlePaymentAmount
         );
         vm.stopBroadcast();
-        console2.log("7) settle executado -> taxa cobrada", feeCharged);
+        console2.log("7) settle executed -> fee charged", feeCharged);
     }
 
     function _runCashbackFlow(Contracts memory c, uint256 deployerPrivateKey) internal {
         uint256 cashbackBalance = c.distributor.cashbackBalance(address(c.assetToken), address(c.usdt));
-        console2.log("8) Cashback creditado ao emissor (saldo antes do saque):", cashbackBalance);
+        console2.log("8) Cashback credited to the issuer (balance before withdrawal):", cashbackBalance);
 
         vm.startBroadcast(deployerPrivateKey);
         c.distributor.withdraw(address(c.assetToken), address(c.usdt));
         vm.stopBroadcast();
-        console2.log("9) withdraw executado -> emissor sacou o cashback");
+        console2.log("9) withdraw executed -> issuer withdrew the cashback");
     }
 }

@@ -10,11 +10,11 @@ import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {MockWBTC} from "./mocks/MockWBTC.sol";
 import {Handler} from "./invariant/Handler.sol";
 
-/// @notice Testes de invariante com fuzzing stateful (Foundry `invariant_*`): o `Handler`
-/// executa sequências aleatórias de request/attest/mint/burn(via redemptionAttest)/settle/
-/// redeem, disparadas por atores diferentes (operator, custodian, settlementOperator, e três
-/// traders), e as funções abaixo verificam que os invariantes centrais do protocolo se
-/// mantêm após CADA chamada da sequência, não apenas em cenários manualmente escritos.
+/// @notice Stateful fuzzing invariant tests (Foundry `invariant_*`): the `Handler`
+/// runs random sequences of request/attest/mint/burn (via redemptionAttest)/settle/
+/// redeem, triggered by different actors (operator, custodian, settlementOperator and three
+/// traders), and the functions below check that the protocol's core invariants hold
+/// after EVERY call in the sequence, not only in hand-written scenarios.
 contract InvariantTest is Test {
     AssetToken public assetEquity;
     AssetToken public assetCommodity;
@@ -69,7 +69,7 @@ contract InvariantTest is Test {
     }
 
     function _wireRoles() internal {
-        // Fiação de papéis — cada concessão passa pelo timelock, como em produção.
+        // Role wiring: every grant goes through the timelock, as in production.
         _grantRoleOn(address(distributor), distributor.SETTLEMENT_ROLE(), address(settlement));
         _grantRoleOn(address(settlement), settlement.SETTLEMENT_OPERATOR_ROLE(), settlementOperator);
         _grantRoleOn(address(gateway), gateway.OPERATOR_ROLE(), operator);
@@ -106,8 +106,8 @@ contract InvariantTest is Test {
             })
         );
 
-        // Restringe o fuzzer de invariantes ao Handler, e dentro dele apenas às ações de
-        // protocolo — nunca aos helpers herdados de Test (ex.: IS_TEST).
+        // Restricts the invariant fuzzer to the Handler, and within it only to protocol
+        // actions, never to helpers inherited from Test (e.g. IS_TEST).
         targetContract(address(handler));
         targetSelector(FuzzSelector({addr: address(handler), selectors: _handlerSelectors()}));
     }
@@ -157,7 +157,7 @@ contract InvariantTest is Test {
         assertLe(assetCommodity.totalSupply(), gateway.totalAttested(address(assetCommodity)));
     }
 
-    // ── Invariante: cashback creditado nunca excede as taxas recebidas ────────────────
+    // ── Invariant: credited cashback never exceeds the fees received ──────────────────
 
     function invariant_CashbackCreditedNeverExceedsFeesReceived_USDT() public view {
         assertLe(handler.ghost_sumCashbackCredited(address(usdt)), handler.ghost_sumFeesRecorded(address(usdt)));
@@ -167,7 +167,7 @@ contract InvariantTest is Test {
         assertLe(handler.ghost_sumCashbackCredited(address(wbtc)), handler.ghost_sumFeesRecorded(address(wbtc)));
     }
 
-    // ── Invariante: NiaraSettlement nunca retém saldo das partes ──────────────────────
+    // ── Invariant: NiaraSettlement never holds the parties' balances ──────────────────
 
     function invariant_SettlementNeverRetainsFunds() public view {
         assertEq(assetEquity.balanceOf(address(settlement)), 0);

@@ -8,10 +8,10 @@ import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol"
 import {IAssetToken} from "./interfaces/IAssetToken.sol";
 
 /// @title CashbackDistributor
-/// @notice Recebe a parcela de cashback (já transferida pelo NiaraSettlement) e credita o
-/// emissor do ativo em padrão pull: os valores se acumulam por (ativo, moeda de
-/// liquidação) e o emissor saca quando quiser via `withdraw`. O restante da taxa fica
-/// acumulado como receita do protocolo, sacável pela tesouraria.
+/// @notice Receives the cashback share (already transferred by NiaraSettlement) and credits
+/// the asset's issuer in a pull pattern: amounts accumulate per (asset, settlement
+/// currency) and the issuer withdraws whenever it wants via `withdraw`. The rest of the fee
+/// accumulates as protocol revenue, withdrawable by the treasury.
 contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -20,20 +20,20 @@ contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
 
     uint16 private constant BPS_DENOMINATOR = 10_000;
 
-    /// @notice Teto rígido: cashback nunca pode exceder 100% da taxa recebida.
+    /// @notice Hard cap: cashback can never exceed 100% of the fee received.
     uint16 public constant MAX_CASHBACK_BPS = 10_000;
 
-    // A DEFINIR — 1% da taxa equivale a 0,005% do volume, provavelmente insuficiente.
-    // Ver whitepaper, seção 4.
-    /// @notice Parcela da taxa, em bps, repassada ao emissor. Padrão provisório: 1000 bps
-    /// (10% da taxa).
+    // TO BE DEFINED: 1% of the fee equals 0.005% of volume, probably not enough.
+    // See the whitepaper, section 4.
+    /// @notice Share of the fee, in bps, passed on to the issuer. Provisional default: 1000 bps
+    /// (10% of the fee).
     uint16 public cashbackBps = 1_000;
 
-    /// @notice Saldo de cashback acumulado, por ativo e por moeda de liquidação, que o
-    /// emissor pode sacar.
+    /// @notice Accumulated cashback balance, per asset and per settlement currency, that
+    /// the issuer can withdraw.
     mapping(address assetToken => mapping(address paymentToken => uint256)) public cashbackBalance;
 
-    /// @notice Saldo de receita do protocolo (taxa menos cashback), por moeda de liquidação.
+    /// @notice Protocol revenue balance (fee minus cashback), per settlement currency.
     mapping(address paymentToken => uint256) public protocolBalance;
 
     event FeeRecorded(
@@ -58,10 +58,9 @@ contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
         _grantRole(TREASURY_ROLE, admin_);
     }
 
-    /// @notice Registra `feeAmount` de `paymentToken`, já transferido para este contrato
-    /// pelo NiaraSettlement, e credita o emissor de `assetToken` proporcionalmente — apenas
-    /// se `assetToken.cashbackEligible()` for verdadeiro. O restante vira receita do
-    /// protocolo.
+    /// @notice Records `feeAmount` of `paymentToken`, already transferred to this contract
+    /// by NiaraSettlement, and credits the issuer of `assetToken` proportionally, only
+    /// if `assetToken.cashbackEligible()` is true. The rest becomes protocol revenue.
     function recordFee(address assetToken, address paymentToken, uint256 feeAmount) external onlyRole(SETTLEMENT_ROLE) {
         if (feeAmount == 0) revert ZeroFeeAmount();
 
@@ -81,9 +80,9 @@ contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
         emit FeeRecorded(assetToken, paymentToken, feeAmount, cashbackAmount, eligible);
     }
 
-    /// @notice Saca o cashback acumulado de `assetToken` em `paymentToken`. Só a carteira
-    /// atualmente registrada como `issuerWallet` do ativo pode chamar — se o emissor trocar
-    /// de carteira, a nova carteira passa a poder sacar o saldo acumulado.
+    /// @notice Withdraws the accumulated cashback of `assetToken` in `paymentToken`. Only the
+    /// wallet currently registered as the asset's `issuerWallet` can call it: if the issuer
+    /// changes wallets, the new wallet can withdraw the accumulated balance.
     function withdraw(address assetToken, address paymentToken) external nonReentrant {
         if (msg.sender != IAssetToken(assetToken).issuerWallet()) revert NotIssuerWallet();
 
@@ -96,7 +95,7 @@ contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
         emit CashbackWithdrawn(assetToken, paymentToken, msg.sender, amount);
     }
 
-    /// @notice Saca receita do protocolo acumulada. Restrito à tesouraria.
+    /// @notice Withdraws accumulated protocol revenue. Restricted to the treasury.
     function withdrawProtocolFees(address paymentToken, address to, uint256 amount) external nonReentrant onlyRole(TREASURY_ROLE) {
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0 || amount > protocolBalance[paymentToken]) revert InvalidWithdrawAmount();
@@ -107,8 +106,8 @@ contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
         emit ProtocolFeesWithdrawn(paymentToken, to, amount);
     }
 
-    /// @notice Propõe uma nova parcela de cashback (bps sobre a taxa). Sujeita ao teto
-    /// imutável `MAX_CASHBACK_BPS` e ao timelock.
+    /// @notice Proposes a new cashback share (bps of the fee). Subject to the immutable
+    /// cap `MAX_CASHBACK_BPS` and to the timelock.
     function proposeSetCashbackBps(uint16 newCashbackBps)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
@@ -120,7 +119,7 @@ contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
         emit CashbackBpsChangeProposed(newCashbackBps, executeAfter);
     }
 
-    /// @notice Executa uma proposta de mudança de cashbackBps após o atraso do timelock.
+    /// @notice Executes a proposed cashbackBps change after the timelock delay.
     function executeSetCashbackBps(uint16 newCashbackBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (newCashbackBps > MAX_CASHBACK_BPS) revert CashbackBpsExceedsCap(newCashbackBps);
         bytes32 actionId = keccak256(abi.encode("SET_CASHBACK_BPS", newCashbackBps));

@@ -4,28 +4,28 @@ pragma solidity ^0.8.24;
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
 /// @title TimelockedAccessControl
-/// @notice Base de governança para os contratos da Niara: qualquer concessão/revogação de
-/// papel, e qualquer parâmetro que o contrato filho marque como sensível, passa por um
-/// atraso configurável entre proposta e execução (padrão propose/execute).
-/// @dev Pensado para operar com DEFAULT_ADMIN_ROLE (e demais papéis administrativos)
-/// atribuídos a uma carteira multisig (ex.: Gnosis Safe). Não há lógica de multisig aqui —
-/// qualquer endereço (EOA ou contrato) pode ser titular de um papel; a segurança de "N de M
-/// assinaturas" fica inteiramente a cargo do multisig usado como titular do papel.
+/// @notice Governance base for Niara's contracts: every role grant/revocation, and every
+/// parameter the child contract marks as sensitive, goes through a configurable delay
+/// between proposal and execution (propose/execute pattern).
+/// @dev Designed to run with DEFAULT_ADMIN_ROLE (and the other admin roles) assigned to a
+/// multisig wallet (e.g. Gnosis Safe). There is no multisig logic here: any address (EOA
+/// or contract) can hold a role; "N of M signatures" security is entirely up to the
+/// multisig used as the role holder.
 ///
-/// `grantRole`/`revokeRole` (as funções padrão do AccessControl) são desabilitadas de
-/// propósito — toda mudança de papel deve passar por `proposeGrantRole`/`executeGrantRole`
-/// ou `proposeRevokeRole`/`executeRevokeRole`. `renounceRole` continua liberado sem timelock:
-/// um titular abrir mão do próprio papel é sempre seguro (só reduz privilégio próprio) e pode
-/// ser necessário imediatamente numa emergência.
+/// `grantRole`/`revokeRole` (the standard AccessControl functions) are disabled on
+/// purpose: every role change must go through `proposeGrantRole`/`executeGrantRole`
+/// or `proposeRevokeRole`/`executeRevokeRole`. `renounceRole` stays available without a
+/// timelock: a holder giving up its own role is always safe (it only reduces its own
+/// privilege) and may be needed immediately in an emergency.
 abstract contract TimelockedAccessControl is AccessControl {
     uint256 public constant MIN_TIMELOCK_DELAY = 1 hours;
     uint256 public constant MAX_TIMELOCK_DELAY = 30 days;
 
-    /// @notice Atraso atual, em segundos, entre proposta e execução de uma ação sensível.
+    /// @notice Current delay, in seconds, between proposal and execution of a sensitive action.
     uint256 public timelockDelay;
 
-    /// @notice Timestamp (>0) a partir do qual a ação identificada por `actionId` pode ser
-    /// executada. Zero significa "nenhuma proposta pendente".
+    /// @notice Timestamp (>0) from which the action identified by `actionId` can be
+    /// executed. Zero means "no pending proposal".
     mapping(bytes32 => uint256) public pendingActions;
 
     event ActionProposed(bytes32 indexed actionId, uint256 executeAfter);
@@ -47,8 +47,8 @@ abstract contract TimelockedAccessControl is AccessControl {
         timelockDelay = _timelockDelay;
     }
 
-    /// @dev Registra uma proposta e retorna o timestamp mínimo de execução. Reverte se já
-    /// houver uma proposta idêntica pendente.
+    /// @dev Records a proposal and returns the earliest execution timestamp. Reverts if an
+    /// identical proposal is already pending.
     function _scheduleAction(bytes32 actionId) internal returns (uint256 executeAfter) {
         if (pendingActions[actionId] != 0) revert ActionAlreadyPending(actionId);
         executeAfter = block.timestamp + timelockDelay;
@@ -56,7 +56,7 @@ abstract contract TimelockedAccessControl is AccessControl {
         emit ActionProposed(actionId, executeAfter);
     }
 
-    /// @dev Verifica que a proposta existe e que o atraso já decorreu, e a consome.
+    /// @dev Checks that the proposal exists and that the delay has passed, and consumes it.
     function _consumeAction(bytes32 actionId) internal {
         uint256 executeAfter = pendingActions[actionId];
         if (executeAfter == 0) revert ActionNotPending(actionId);
@@ -65,14 +65,14 @@ abstract contract TimelockedAccessControl is AccessControl {
         emit ActionExecuted(actionId);
     }
 
-    /// @notice Cancela uma proposta pendente antes de ser executada.
+    /// @notice Cancels a pending proposal before it is executed.
     function cancelAction(bytes32 actionId) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (pendingActions[actionId] == 0) revert ActionNotPending(actionId);
         delete pendingActions[actionId];
         emit ActionCancelled(actionId);
     }
 
-    // ── Atraso do timelock (também sujeito a timelock) ─────────────────────────────────
+    // ── Timelock delay (also subject to the timelock) ──────────────────────────────────
 
     function proposeSetTimelockDelay(uint256 newDelay)
         external
@@ -95,14 +95,14 @@ abstract contract TimelockedAccessControl is AccessControl {
         emit TimelockDelayChanged(old, newDelay);
     }
 
-    // ── Papéis: grantRole/revokeRole padrão desabilitados, substituídos por versões com timelock ──
+    // ── Roles: standard grantRole/revokeRole disabled, replaced by timelocked versions ──
 
-    /// @dev Desabilitada de propósito. Use `proposeGrantRole` / `executeGrantRole`.
+    /// @dev Disabled on purpose. Use `proposeGrantRole` / `executeGrantRole`.
     function grantRole(bytes32, address) public pure override {
         revert RoleChangeRequiresTimelock();
     }
 
-    /// @dev Desabilitada de propósito. Use `proposeRevokeRole` / `executeRevokeRole`.
+    /// @dev Disabled on purpose. Use `proposeRevokeRole` / `executeRevokeRole`.
     function revokeRole(bytes32, address) public pure override {
         revert RoleChangeRequiresTimelock();
     }

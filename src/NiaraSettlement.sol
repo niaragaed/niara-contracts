@@ -9,16 +9,16 @@ import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol"
 import {ICashbackDistributor} from "./interfaces/ICashbackDistributor.sol";
 
 /// @title NiaraSettlement
-/// @notice Liquidação atômica entre comprador e vendedor: na mesma transação, transfere o
-/// AssetToken do vendedor ao comprador, o pagamento (USDT ou WBTC) do comprador ao vendedor,
-/// e retém a taxa do protocolo — na própria moeda de liquidação, sem swap, sem DEX, sem
-/// oráculo. Qualquer falha reverte tudo.
-/// @dev Nunca custodia saldo das partes: opera inteiramente por `allowance`, movendo apenas
-/// o valor exato de cada execução. `settle` é restrita a SETTLEMENT_OPERATOR_ROLE — embora o
-/// movimento de fundos dependa só de allowance, permitir que qualquer endereço dispare
-/// liquidações entre duas partes que aprovaram o contrato abriria margem para um chamador
-/// arbitrário escolher termos desfavoráveis dentro dessas aprovações. O papel deve ser
-/// concedido ao motor de casamento de ordens confiável da Niara.
+/// @notice Atomic settlement between buyer and seller: in the same transaction it moves the
+/// AssetToken from seller to buyer, the payment (USDT or WBTC) from buyer to seller, and
+/// retains the protocol fee, in the settlement currency itself, with no swap, no DEX and
+/// no oracle. Any failure reverts everything.
+/// @dev Never holds the parties' balances: it works entirely through `allowance`, moving only
+/// the exact amount of each execution. `settle` is restricted to SETTLEMENT_OPERATOR_ROLE:
+/// although moving funds depends only on allowance, letting any address trigger settlements
+/// between two parties that approved the contract would let an arbitrary caller pick
+/// unfavorable terms within those approvals. The role should be granted to Niara's
+/// trusted order-matching engine.
 contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -27,13 +27,13 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
 
     uint16 private constant BPS_DENOMINATOR = 10_000;
 
-    /// @notice Teto rígido e imutável da taxa: 100 bps (1%). Nem o admin pode superá-lo.
+    /// @notice Hard, immutable fee cap: 100 bps (1%). Not even the admin can exceed it.
     uint16 public constant MAX_FEE_BPS = 100;
 
-    /// @notice Taxa atual, em bps, cobrada na moeda de liquidação. Padrão: 50 bps (0,5%).
+    /// @notice Current fee, in bps, charged in the settlement currency. Default: 50 bps (0.5%).
     uint16 public feeBps = 50;
 
-    /// @notice Contrato que recebe a taxa e credita cashback ao emissor quando elegível.
+    /// @notice Contract that receives the fee and credits cashback to the issuer when eligible.
     ICashbackDistributor public cashbackDistributor;
 
     event Settled(
@@ -66,15 +66,15 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         _grantRole(PAUSER_ROLE, admin_);
     }
 
-    /// @notice Executa a liquidação atômica de uma ordem já casada.
-    /// @param assetToken Token do ativo tokenizado sendo negociado.
-    /// @param paymentToken Moeda de liquidação (USDT ou WBTC).
-    /// @param buyer Parte que recebe o ativo e paga em `paymentToken`.
-    /// @param seller Parte que entrega o ativo e recebe em `paymentToken`.
-    /// @param assetAmount Quantidade de `assetToken` transferida do vendedor ao comprador.
-    /// @param paymentAmount Valor total em `paymentToken` que o comprador paga; a taxa é
-    /// descontada deste valor antes de chegar ao vendedor.
-    /// @return feeCharged Valor da taxa retido, em `paymentToken`.
+    /// @notice Executes the atomic settlement of an already matched order.
+    /// @param assetToken Token of the tokenized asset being traded.
+    /// @param paymentToken Settlement currency (USDT or WBTC).
+    /// @param buyer Party that receives the asset and pays in `paymentToken`.
+    /// @param seller Party that delivers the asset and receives `paymentToken`.
+    /// @param assetAmount Amount of `assetToken` transferred from seller to buyer.
+    /// @param paymentAmount Total amount of `paymentToken` the buyer pays; the fee is
+    /// deducted from this amount before it reaches the seller.
+    /// @return feeCharged Fee retained, in `paymentToken`.
     function settle(
         address assetToken,
         address paymentToken,
@@ -89,32 +89,32 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         if (assetAmount == 0 || paymentAmount == 0) revert ZeroAmount();
 
         feeCharged = (paymentAmount * feeBps) / BPS_DENOMINATOR;
-        // Se a taxa está ativa (feeBps > 0), quantias mínimas não podem truncar a taxa a
-        // zero — isso permitiria negociar sem pagar taxa via valores pequenos o bastante.
+        // If the fee is active (feeBps > 0), tiny amounts cannot truncate the fee to
+        // zero; otherwise one could trade fee-free with small enough amounts.
         if (feeBps > 0 && feeCharged == 0) revert PaymentAmountTooSmallForFeePrecision();
 
         uint256 sellerProceeds = paymentAmount - feeCharged;
 
-        // Checks-effects-interactions: `Settled` é emitido ANTES de qualquer chamada
-        // externa. Um token de pagamento com hook (ERC-777/ERC-1363) que reentre em outra
-        // função durante um dos `safeTransferFrom` abaixo já enxerga o evento desta
-        // liquidação emitido — indexadores off-chain nunca observam uma reentrância
-        // "antes" da operação que a originou. Como `settle` não custodia saldo nem mantém
-        // estado próprio por ordem, o evento é o único efeito a ordenar aqui.
+        // Checks-effects-interactions: `Settled` is emitted BEFORE any external call. A
+        // payment token with a hook (ERC-777/ERC-1363) that re-enters another function during
+        // one of the `safeTransferFrom` calls below already sees this settlement's event
+        // emitted, so off-chain indexers never observe a re-entry "before" the operation
+        // that caused it. Since `settle` holds no balance and keeps no per-order state, the
+        // event is the only effect to order here.
         emit Settled(assetToken, paymentToken, buyer, seller, assetAmount, paymentAmount, feeCharged);
 
         IERC20(assetToken).safeTransferFrom(seller, buyer, assetAmount);
         IERC20(paymentToken).safeTransferFrom(buyer, seller, sellerProceeds);
         if (feeCharged > 0) {
             IERC20(paymentToken).safeTransferFrom(buyer, address(cashbackDistributor), feeCharged);
-            // `recordFee` vem depois da transferência por necessidade: o distribuidor
-            // contabiliza uma taxa que precisa já estar em seu saldo. Qualquer falha aqui
-            // reverte a transação inteira, incluindo o evento acima.
+            // `recordFee` comes after the transfer out of necessity: the distributor accounts
+            // for a fee that must already be in its balance. Any failure here reverts the whole
+            // transaction, including the event above.
             cashbackDistributor.recordFee(assetToken, paymentToken, feeCharged);
         }
     }
 
-    /// @notice Propõe uma nova taxa (bps). Sujeita ao teto imutável `MAX_FEE_BPS` e ao timelock.
+    /// @notice Proposes a new fee (bps). Subject to the immutable cap `MAX_FEE_BPS` and to the timelock.
     function proposeSetFeeBps(uint16 newFeeBps) external onlyRole(DEFAULT_ADMIN_ROLE) returns (uint256 executeAfter) {
         if (newFeeBps > MAX_FEE_BPS) revert FeeExceedsCap(newFeeBps);
         bytes32 actionId = keccak256(abi.encode("SET_FEE_BPS", newFeeBps));
@@ -122,7 +122,7 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         emit FeeBpsChangeProposed(newFeeBps, executeAfter);
     }
 
-    /// @notice Executa uma proposta de mudança de taxa após o atraso do timelock.
+    /// @notice Executes a proposed fee change after the timelock delay.
     function executeSetFeeBps(uint16 newFeeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (newFeeBps > MAX_FEE_BPS) revert FeeExceedsCap(newFeeBps);
         bytes32 actionId = keccak256(abi.encode("SET_FEE_BPS", newFeeBps));
@@ -132,7 +132,7 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         emit FeeBpsChanged(old, newFeeBps);
     }
 
-    /// @notice Propõe um novo endereço de CashbackDistributor. Sujeito a timelock.
+    /// @notice Proposes a new CashbackDistributor address. Subject to the timelock.
     function proposeSetCashbackDistributor(address newCashbackDistributor)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
@@ -144,7 +144,7 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         emit CashbackDistributorChangeProposed(newCashbackDistributor, executeAfter);
     }
 
-    /// @notice Executa uma proposta de mudança de CashbackDistributor após o atraso do timelock.
+    /// @notice Executes a proposed CashbackDistributor change after the timelock delay.
     function executeSetCashbackDistributor(address newCashbackDistributor) external onlyRole(DEFAULT_ADMIN_ROLE) {
         bytes32 actionId = keccak256(abi.encode("SET_CASHBACK_DISTRIBUTOR", newCashbackDistributor));
         _consumeAction(actionId);
@@ -153,7 +153,7 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         emit CashbackDistributorChanged(old, newCashbackDistributor);
     }
 
-    /// @notice Pausa `settle` em caso de emergência.
+    /// @notice Pauses `settle` in an emergency.
     function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }

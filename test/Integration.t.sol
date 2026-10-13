@@ -8,9 +8,9 @@ import {NiaraSettlement} from "../src/NiaraSettlement.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 
-/// @notice Exercita o fluxo completo de ponta a ponta com os quatro contratos reais
-/// interligados: lastro atestado → mint → liquidação atômica com cobrança de taxa →
-/// cashback creditado ao emissor → saque do cashback → resgate do ativo pelo detentor.
+/// @notice Exercises the full end-to-end flow with the four real contracts wired
+/// together: attested backing → mint → atomic settlement with fee → cashback credited
+/// to the issuer → cashback withdrawal → asset redemption by the holder.
 contract IntegrationTest is Test {
     AssetToken public assetToken;
     BackingGateway public gateway;
@@ -44,7 +44,7 @@ contract IntegrationTest is Test {
         );
         usdt = new MockUSDT();
 
-        // Fiação de papéis — cada concessão passa pelo timelock, como em produção.
+        // Role wiring: every grant goes through the timelock, as in production.
         _grantRoleOn(address(distributor), distributor.SETTLEMENT_ROLE(), address(settlement));
         _grantRoleOn(address(settlement), settlement.SETTLEMENT_OPERATOR_ROLE(), settlementOperator);
         _grantRoleOn(address(gateway), gateway.OPERATOR_ROLE(), operator);
@@ -72,7 +72,7 @@ contract IntegrationTest is Test {
     }
 
     function test_FullLifecycle_BackingToSettlementToCashbackToRedemption() public {
-        // 1. Lastro: pedido → atestação → mint para o vendedor.
+        // 1. Backing: request → attestation → mint to the seller.
         vm.prank(operator);
         uint256 requestId = gateway.requestBacking(address(assetToken), 1_000 ether);
 
@@ -85,7 +85,7 @@ contract IntegrationTest is Test {
         assertEq(assetToken.balanceOf(seller), 1_000 ether);
         assertEq(assetToken.totalSupply(), 1_000 ether);
 
-        // 2. Liquidação atômica: vendedor entrega 100 nAAPL, comprador paga 10.000 USDT.
+        // 2. Atomic settlement: seller delivers 100 nAAPL, buyer pays 10,000 USDT.
         vm.prank(seller);
         assetToken.approve(address(settlement), 100 ether);
         vm.prank(buyer);
@@ -101,7 +101,7 @@ contract IntegrationTest is Test {
         assertEq(usdt.balanceOf(seller), 10_000e6 - expectedFee);
         assertEq(usdt.balanceOf(address(distributor)), expectedFee);
 
-        // 3. Cashback: emissor saca a parcela creditada.
+        // 3. Cashback: the issuer withdraws the credited share.
         uint256 expectedCashback = (expectedFee * distributor.cashbackBps()) / 10_000;
         assertEq(distributor.cashbackBalance(address(assetToken), address(usdt)), expectedCashback);
 
@@ -109,7 +109,7 @@ contract IntegrationTest is Test {
         distributor.withdraw(address(assetToken), address(usdt));
         assertEq(usdt.balanceOf(issuer), expectedCashback);
 
-        // 4. Resgate: comprador devolve parte dos tokens pelo ativo real.
+        // 4. Redemption: the buyer returns part of the tokens for the real-world asset.
         vm.prank(buyer);
         assetToken.approve(address(gateway), 40 ether);
         vm.prank(buyer);

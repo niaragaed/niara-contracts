@@ -10,25 +10,25 @@ import {CashbackDistributor} from "../../src/CashbackDistributor.sol";
 import {MockUSDT} from "../mocks/MockUSDT.sol";
 import {MockWBTC} from "../mocks/MockWBTC.sol";
 
-/// @notice Ator de fuzzing stateful: expõe uma ação por função pública (request, attest,
-/// mint, redeem, settle, saques, pausas) para que o motor de invariantes do Foundry explore
-/// sequências aleatórias desses passos entre múltiplos atores.
-/// @dev Na maior parte das chamadas os parâmetros são limitados (`bound`) a estados válidos,
-/// maximizando sequências produtivas (mint real, settle real etc.) — mas uma fração de cada
-/// chamada (`_chaos`, ~1 em 5) ignora essas guardas de propósito e tenta o caminho inválido
-/// (endereço zero, quantidade zero, estado errado, valores fora do saldo/aprovação real).
-/// Não envolvemos as chamadas externas em try/catch: com `fail_on_revert = false` (ver
-/// foundry.toml), um revert genuíno é tolerado pelo runner de invariantes e desfaz, de forma
-/// atômica, qualquer efeito colateral desta chamada (inclusive as variáveis "ghost" abaixo) —
-/// não há necessidade de capturá-lo manualmente, e capturá-lo apenas escondia esses caminhos
-/// de revert da exploração do fuzzer.
-/// Variáveis "ghost" (`ghost_sum*`) acumulam totais que não existem como estado no protocolo
-/// real, usadas pelas invariantes para verificar contabilidade ao longo do tempo (não apenas
-/// o saldo atual).
+/// @notice Stateful fuzzing actor: exposes one action per public function (request, attest,
+/// mint, redeem, settle, withdrawals, pauses) so Foundry's invariant engine explores
+/// random sequences of these steps across multiple actors.
+/// @dev In most calls the parameters are bounded (`bound`) to valid states, maximizing
+/// productive sequences (real mint, real settle etc.), but a fraction of each call
+/// (`_chaos`, ~1 in 5) ignores those guards on purpose and tries the invalid path
+/// (zero address, zero quantity, wrong state, amounts beyond the real balance/approval).
+/// We don't wrap external calls in try/catch: with `fail_on_revert = false` (see
+/// foundry.toml), a genuine revert is tolerated by the invariant runner and atomically
+/// undoes any side effect of this call (including the "ghost" variables below), so
+/// there is no need to catch it manually, and catching it only hid those revert paths
+/// from the fuzzer's exploration.
+/// "Ghost" variables (`ghost_sum*`) accumulate totals that do not exist as state in the
+/// real protocol, used by the invariants to check accounting over time (not only the
+/// current balance).
 contract Handler is Test {
-    // Variáveis de estado normais (não `immutable`) de propósito: um construtor com muitas
-    // `immutable` simultâneas nesta contagem faz o codegen do Solidity estourar a stack
-    // ("stack too deep") na etapa final de finalização do construtor.
+    // Regular state variables (not `immutable`) on purpose: a constructor with this many
+    // simultaneous `immutable`s makes Solidity's codegen run out of stack
+    // ("stack too deep") in the final constructor step.
     AssetToken public assetEquity;
     AssetToken public assetCommodity;
     BackingGateway public gateway;
@@ -46,17 +46,17 @@ contract Handler is Test {
     uint256[] public backingRequestIds;
     uint256[] public redemptionRequestIds;
 
-    /// @notice Soma histórica de taxas registradas no CashbackDistributor, por moeda de
-    /// liquidação (nunca decresce).
+    /// @notice Historical sum of fees recorded in the CashbackDistributor, per settlement
+    /// currency (never decreases).
     mapping(address paymentToken => uint256) public ghost_sumFeesRecorded;
 
-    /// @notice Soma histórica de cashback creditado (não o saldo atual — saques não
-    /// reduzem este valor), por moeda de liquidação.
+    /// @notice Historical sum of credited cashback (not the current balance; withdrawals do
+    /// not reduce this value), per settlement currency.
     mapping(address paymentToken => uint256) public ghost_sumCashbackCredited;
 
-    /// @dev Agrupada em struct (em vez de ~12 parâmetros soltos) para evitar "stack too
-    /// deep" na finalização do construtor — um único ponteiro de memória em vez de uma
-    /// dezena de variáveis simultâneas na stack.
+    /// @dev Grouped in a struct (instead of ~12 loose parameters) to avoid "stack too
+    /// deep" in constructor finalization: a single memory pointer instead of a dozen
+    /// simultaneous stack variables.
     struct Config {
         AssetToken assetEquity;
         AssetToken assetCommodity;
@@ -87,7 +87,7 @@ contract Handler is Test {
         admin = config.admin;
     }
 
-    // ── Helpers de seleção ─────────────────────────────────────────────────────────────
+    // ── Selection helpers ──────────────────────────────────────────────────────────────
 
     function _pickAsset(uint256 seed) internal view returns (AssetToken) {
         return seed % 2 == 0 ? assetEquity : assetCommodity;
@@ -110,13 +110,13 @@ contract Handler is Test {
         return candidate;
     }
 
-    /// @dev ~1 em 5 chamadas toma o caminho "caótico" (inválido de propósito) em vez do
-    /// caminho limitado a estados válidos.
+    /// @dev ~1 in 5 calls takes the "chaotic" path (invalid on purpose) instead of the
+    /// path bounded to valid states.
     function _chaos(uint256 seed) internal pure returns (bool) {
         return seed % 5 == 0;
     }
 
-    // ── Lastro (emissão) ────────────────────────────────────────────────────────────────
+    // ── Backing (issuance) ──────────────────────────────────────────────────────────────
 
     function requestBacking(uint256 assetSeed, uint256 quantitySeed) external {
         address asset = _chaos(assetSeed) ? address(0) : address(_pickAsset(assetSeed));
@@ -132,12 +132,12 @@ contract Handler is Test {
         uint256 requestId = backingRequestIds[idxSeed % backingRequestIds.length];
         (,, uint256 quantityRequested,,, BackingGateway.RequestStatus status,) = gateway.backingRequests(requestId);
 
-        // Na maior parte das vezes só ataca pedidos PENDING — uma fração ignora essa
-        // checagem de propósito para alcançar RequestNotPending.
+        // Most of the time it only targets PENDING requests; a fraction skips this check
+        // on purpose to reach RequestNotPending.
         if (status != BackingGateway.RequestStatus.PENDING && !_chaos(idxSeed)) return;
 
         uint256 quantityAcquired = _chaos(acquiredSeed)
-            ? acquiredSeed % 2_000_000 ether // pode exceder quantityRequested, ou ser zero.
+            ? acquiredSeed % 2_000_000 ether // may exceed quantityRequested, or be zero.
             : bound(acquiredSeed, 1, quantityRequested == 0 ? 1 : quantityRequested);
 
         vm.prank(custodian);
@@ -178,7 +178,7 @@ contract Handler is Test {
 
         uint256 quantity;
         if (_chaos(quantitySeed)) {
-            quantity = quantitySeed % 2; // às vezes 0 (ZeroQuantity), às vezes 1 mesmo sem saldo.
+            quantity = quantitySeed % 2; // sometimes 0 (ZeroQuantity), sometimes 1 even without a balance.
         } else if (balance == 0) {
             return;
         } else {
@@ -217,7 +217,7 @@ contract Handler is Test {
         gateway.cancelRedemptionRequest(requestId);
     }
 
-    // ── Liquidação atômica ──────────────────────────────────────────────────────────────
+    // ── Atomic settlement ──────────────────────────────────────────────────────────────
 
     function settle(
         uint256 buyerSeed,
@@ -248,23 +248,22 @@ contract Handler is Test {
     }
 
     function _pickAssetAmount(AssetToken asset, address seller, uint256 seed) internal view returns (uint256) {
-        if (_chaos(seed)) return seed % 2_000_000 ether; // pode exceder saldo/aprovação real, ou ser zero.
+        if (_chaos(seed)) return seed % 2_000_000 ether; // may exceed the real balance/approval, or be zero.
         uint256 sellerBalance = asset.balanceOf(seller);
         if (sellerBalance == 0) return 0;
         return bound(seed, 1, sellerBalance);
     }
 
     function _pickPaymentAmount(address paymentToken, address buyer, uint256 seed) internal returns (uint256) {
-        // Garante liquidez suficiente ao comprador na maior parte das vezes, para não
-        // desperdiçar a chamada fuzzed em um no-op por falta de saldo — o mock permite mint
-        // livre, só usado em teste.
+        // Ensures the buyer has enough liquidity most of the time, so the fuzzed call is not
+        // wasted on a no-op for lack of balance; the mock allows free minting, test use only.
         if (paymentToken == address(usdt)) {
             usdt.mint(buyer, 1_000_000e6);
         } else {
             wbtc.mint(buyer, 1_000e8);
         }
 
-        if (_chaos(seed)) return seed % 2_000_000e8; // pode exceder o saldo recém-financiado, ou ser zero.
+        if (_chaos(seed)) return seed % 2_000_000e8; // may exceed the newly funded balance, or be zero.
         uint256 buyerBalance = IERC20(paymentToken).balanceOf(buyer);
         return bound(seed, 1, buyerBalance);
     }
@@ -284,8 +283,8 @@ contract Handler is Test {
         address paymentToken = _pickPaymentToken(paymentSeed);
         address issuer = asset.issuerWallet();
 
-        // Sem guarda de saldo disponível de propósito: na maior parte das vezes não há
-        // nada a sacar ainda, exercitando NothingToWithdraw organicamente.
+        // No available-balance guard on purpose: most of the time there is nothing to
+        // withdraw yet, exercising NothingToWithdraw organically.
         vm.prank(issuer);
         distributor.withdraw(address(asset), paymentToken);
     }
@@ -296,7 +295,7 @@ contract Handler is Test {
 
         uint256 amount;
         if (_chaos(amountSeed) || available == 0) {
-            amount = amountSeed % 1_000_000e8; // pode exceder o disponível, incl. zero.
+            amount = amountSeed % 1_000_000e8; // may exceed what is available, including zero.
         } else {
             amount = bound(amountSeed, 1, available);
         }
@@ -305,12 +304,12 @@ contract Handler is Test {
         distributor.withdrawProtocolFees(paymentToken, admin, amount);
     }
 
-    // ── Pausas (emergência) ─────────────────────────────────────────────────────────────
+    // ── Pauses (emergency) ──────────────────────────────────────────────────────────────
 
     function toggleGatewayPause() external {
-        // `vm.prank` só vale para a PRÓXIMA chamada externa — não pode ser consumido pela
-        // leitura de `paused()` antes da chamada que de fato precisa do prank (mesma
-        // armadilha documentada no topo de test/AssetToken.t.sol).
+        // `vm.prank` only applies to the NEXT external call; it must not be consumed by
+        // reading `paused()` before the call that actually needs the prank (the same
+        // pitfall documented at the top of test/AssetToken.t.sol).
         bool isPaused = gateway.paused();
         vm.prank(admin);
         if (isPaused) {
