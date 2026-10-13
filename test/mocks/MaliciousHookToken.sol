@@ -3,13 +3,13 @@ pragma solidity ^0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-/// @notice Token com hook malicioso (estilo ERC-777/ERC-1363) para testes de reentrância
-/// cruzada. Ao ser cunhado, queimado ou transferido, chama um alvo configurável com um
-/// calldata arbitrário e **registra** o resultado em vez de abortar — diferente de
-/// `MaliciousReentrantToken`, que reverte a transação inteira e por isso não permite
-/// inspecionar o estado que a reentrância enxergou.
-/// @dev Implementa a superfície de `IAssetToken` usada pelo BackingGateway (`mint`/`burn`)
-/// sem nenhum controle de acesso: o objetivo é servir de ativo hostil, não de token válido.
+/// @notice Token with a malicious hook (ERC-777/ERC-1363 style) for cross-function
+/// reentrancy tests. When minted, burned or transferred, it calls a configurable target
+/// with arbitrary calldata and **records** the result instead of aborting, unlike
+/// `MaliciousReentrantToken`, which reverts the whole transaction and therefore does not
+/// let us inspect the state the re-entry saw.
+/// @dev Implements the `IAssetToken` surface used by the BackingGateway (`mint`/`burn`)
+/// without any access control: it is meant to be a hostile asset, not a valid token.
 contract MaliciousHookToken is ERC20 {
     address public reentrantTarget;
     bytes public reentrantCalldata;
@@ -19,35 +19,35 @@ contract MaliciousHookToken is ERC20 {
     bool public armedOnTransferFrom;
     bool public armedOnTransfer;
 
-    /// @notice Verdadeiro se o hook chegou a disparar a chamada reentrante.
+    /// @notice True if the hook actually fired the re-entrant call.
     bool public reentered;
-    /// @notice Sucesso da chamada reentrante (false se ela reverteu).
+    /// @notice Success of the re-entrant call (false if it reverted).
     bool public reentrantSucceeded;
-    /// @notice Retorno bruto da chamada reentrante — dado de retorno em caso de sucesso,
-    /// ou o erro (selector + argumentos) em caso de revert.
+    /// @notice Raw return of the re-entrant call: return data on success, or the error
+    /// (selector + arguments) on revert.
     bytes public reentrantReturnData;
 
     constructor() ERC20("Malicious Hook Token", "EVILHOOK") {}
 
-    /// @notice Arma a reentrância para disparar dentro de `mint`.
+    /// @notice Arms the re-entry to fire inside `mint`.
     function armOnMint(address target, bytes calldata data) external {
         _arm(target, data);
         armedOnMint = true;
     }
 
-    /// @notice Arma a reentrância para disparar dentro de `burn`.
+    /// @notice Arms the re-entry to fire inside `burn`.
     function armOnBurn(address target, bytes calldata data) external {
         _arm(target, data);
         armedOnBurn = true;
     }
 
-    /// @notice Arma a reentrância para disparar dentro de `transferFrom`.
+    /// @notice Arms the re-entry to fire inside `transferFrom`.
     function armOnTransferFrom(address target, bytes calldata data) external {
         _arm(target, data);
         armedOnTransferFrom = true;
     }
 
-    /// @notice Arma a reentrância para disparar dentro de `transfer`.
+    /// @notice Arms the re-entry to fire inside `transfer`.
     function armOnTransfer(address target, bytes calldata data) external {
         _arm(target, data);
         armedOnTransfer = true;
@@ -93,7 +93,7 @@ contract MaliciousHookToken is ERC20 {
         reentrantReturnData = "";
     }
 
-    /// @dev Deliberadamente não propaga a falha: o teste inspeciona o resultado registrado.
+    /// @dev Deliberately does not propagate the failure: the test inspects the recorded result.
     function _reenter() internal {
         reentered = true;
         (bool ok, bytes memory ret) = reentrantTarget.call(reentrantCalldata);

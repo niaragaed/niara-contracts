@@ -56,7 +56,7 @@ contract BackingGatewayTest is Test {
         _tokenSetBackingGateway(address(gateway));
     }
 
-    // ── Helpers de governança com timelock ────────────────────────────────────────────
+    // ── Timelocked governance helpers ─────────────────────────────────────────────────
 
     function _gatewayGrantRole(bytes32 role, address account) internal {
         vm.prank(admin);
@@ -87,7 +87,7 @@ contract BackingGatewayTest is Test {
         requestId = gateway.requestBacking(address(token), quantity);
     }
 
-    // ── Lastro: request → attest → mint ───────────────────────────────────────────────
+    // ── Backing: request → attest → mint ──────────────────────────────────────────────
 
     function test_RequestBacking_OnlyOperator() public {
         vm.prank(alice);
@@ -201,22 +201,22 @@ contract BackingGatewayTest is Test {
         gateway.mintAttested(requestId, alice);
     }
 
-    /// @notice Invariante central: mesmo que MINTER_ROLE seja concedido a um endereço fora
-    /// do fluxo do BackingGateway, ainda assim é impossível cunhar além do que o gateway
-    /// atestou — a checagem vive dentro do próprio AssetToken.mint.
+    /// @notice Core invariant: even if MINTER_ROLE is granted to an address outside the
+    /// BackingGateway flow, it is still impossible to mint beyond what the gateway
+    /// attested, because the check lives inside AssetToken.mint itself.
     function test_Invariant_MintBeyondAttestedIsImpossibleRegardlessOfCaller() public {
         uint256 requestId = _requestBacking(100 ether);
         vm.prank(custodian);
         gateway.attestBacking(requestId, keccak256("proof"), 50 ether);
 
-        // Concede MINTER_ROLE diretamente a Alice, fora do fluxo do gateway.
+        // Grants MINTER_ROLE directly to Alice, outside the gateway flow.
         _tokenGrantRole(tokenMinterRole, alice);
 
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(AssetToken.MintExceedsAttestedBacking.selector, 50 ether + 1, 50 ether));
         token.mint(alice, 50 ether + 1);
 
-        // Até o teto exatamente atestado, o mint funciona normalmente.
+        // Up to exactly the attested cap, minting works normally.
         vm.prank(alice);
         token.mint(alice, 50 ether);
         assertEq(token.totalSupply(), 50 ether);
@@ -374,9 +374,9 @@ contract BackingGatewayTest is Test {
         gateway.unpause();
     }
 
-    /// @notice Ponta a ponta: pausar bloqueia as quatro operações protegidas por
+    /// @notice End to end: pausing blocks the four operations guarded by
     /// `whenNotPaused` (requestBacking, attestBacking, mintAttested, redemptionRequest);
-    /// despausar restaura o funcionamento normal de cada uma delas.
+    /// unpausing restores each of them to normal.
     function test_PauseUnpause_EndToEnd_BlocksThenRestoresOperations() public {
         uint256 requestId = _requestBacking(100 ether);
 
@@ -404,7 +404,7 @@ contract BackingGatewayTest is Test {
         gateway.unpause();
         assertFalse(gateway.paused());
 
-        // As mesmas operações voltam a funcionar normalmente após o unpause.
+        // The same operations work normally again after unpause.
         vm.prank(custodian);
         gateway.attestBacking(requestId, keccak256("proof"), 100 ether);
         vm.prank(operator);
@@ -422,7 +422,7 @@ contract BackingGatewayTest is Test {
         assertEq(token.balanceOf(alice), 60 ether);
     }
 
-    // ── Guardas de endereço/quantidade zero ────────────────────────────────────────────
+    // ── Zero address/quantity guards ──────────────────────────────────────────────────
 
     function test_Constructor_RevertsForZeroAdmin() public {
         vm.expectRevert(BackingGateway.ZeroAddress.selector);
@@ -472,17 +472,17 @@ contract BackingGatewayTest is Test {
         gateway.cancelRedemptionRequest(requestId);
     }
 
-    // ── Reentrância cruzada (checks-effects-interactions) ─────────────────────────────
+    // ── Cross-function reentrancy (checks-effects-interactions) ───────────────────────
 
-    /// @dev Extrai o selector de um retorno bruto (ex.: o erro de uma chamada revertida).
+    /// @dev Extracts the selector from raw return data (e.g. the error of a reverted call).
     function _selectorOf(bytes memory data) internal pure returns (bytes4 sel) {
-        require(data.length >= 4, "retorno sem selector");
+        require(data.length >= 4, "return data has no selector");
         assembly {
             sel := mload(add(data, 32))
         }
     }
 
-    /// @dev Prepara um ativo hostil já atestado e pronto para `mintAttested`.
+    /// @dev Prepares a hostile asset, already attested and ready for `mintAttested`.
     function _armedBackingRequest(MaliciousHookToken evil, uint256 quantity)
         internal
         returns (uint256 requestId)
@@ -497,7 +497,7 @@ contract BackingGatewayTest is Test {
         MaliciousHookToken evil = new MaliciousHookToken();
         uint256 requestId = _armedBackingRequest(evil, 100 ether);
 
-        // Durante o `mint`, o hook lê o próprio pedido de volta no gateway.
+        // During `mint`, the hook reads its own request back from the gateway.
         evil.armOnMint(address(gateway), abi.encodeWithSignature("backingRequests(uint256)", requestId));
 
         vm.prank(operator);
@@ -509,7 +509,7 @@ contract BackingGatewayTest is Test {
         (,,,,, uint8 status, bool minted) = abi.decode(
             evil.reentrantReturnData(), (address, address, uint256, uint256, bytes32, uint8, bool)
         );
-        // O efeito já estava commitado quando a chamada externa ocorreu.
+        // The effect was already committed when the external call happened.
         assertTrue(minted);
         assertEq(status, uint8(BackingGateway.RequestStatus.SETTLED));
         assertEq(evil.balanceOf(alice), 100 ether);
@@ -519,8 +519,8 @@ contract BackingGatewayTest is Test {
         MaliciousHookToken evil = new MaliciousHookToken();
         uint256 requestId = _armedBackingRequest(evil, 100 ether);
 
-        // Concede OPERATOR_ROLE ao próprio token hostil para isolar a garantia sob teste
-        // (o guard de reentrância) da checagem de controle de acesso.
+        // Grants OPERATOR_ROLE to the hostile token itself to isolate the guarantee under test
+        // (the reentrancy guard) from the access-control check.
         _gatewayGrantRole(operatorRole, address(evil));
 
         evil.armOnMint(
@@ -532,13 +532,13 @@ contract BackingGatewayTest is Test {
 
         assertTrue(evil.reentered());
         assertFalse(evil.reentrantSucceeded());
-        // `nonReentrant` é o primeiro modifier: a reentrância morre no guard, não no papel.
+        // `nonReentrant` is the first modifier: the re-entry dies at the guard, not at the role check.
         assertEq(_selectorOf(evil.reentrantReturnData()), ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
-        // A cunhagem legítima ocorreu uma única vez.
+        // The legitimate mint happened exactly once.
         assertEq(evil.balanceOf(alice), 100 ether);
     }
 
-    /// @dev Leva um ativo hostil até um pedido de resgate PENDING com tokens custodiados.
+    /// @dev Takes a hostile asset to a PENDING redemption request with custodied tokens.
     function _pendingEvilRedemption(MaliciousHookToken evil, uint256 backed, uint256 redeemed)
         internal
         returns (uint256 redemptionId)
@@ -567,7 +567,7 @@ contract BackingGatewayTest is Test {
 
         (,,,, uint8 status) =
             abi.decode(evil.reentrantReturnData(), (address, address, uint256, bytes32, uint8));
-        // Status final e baixa em `totalAttested` já estavam commitados antes do burn.
+        // Final status and the `totalAttested` decrease were already committed before the burn.
         assertEq(status, uint8(BackingGateway.RequestStatus.SETTLED));
         assertEq(gateway.totalAttested(address(evil)), 60 ether);
         assertEq(evil.balanceOf(address(gateway)), 0);
@@ -577,8 +577,8 @@ contract BackingGatewayTest is Test {
         MaliciousHookToken evil = new MaliciousHookToken();
         uint256 redemptionId = _pendingEvilRedemption(evil, 100 ether, 40 ether);
 
-        // Deliberadamente sem conceder CUSTODIAN_ROLE ao token hostil: como `nonReentrant`
-        // é o primeiro modifier, o erro esperado é o do guard, não o de controle de acesso.
+        // Deliberately without granting CUSTODIAN_ROLE to the hostile token: since `nonReentrant`
+        // is the first modifier, the expected error is the guard's, not the access-control one.
 
         evil.armOnBurn(
             address(gateway), abi.encodeWithSignature("cancelRedemptionRequest(uint256)", redemptionId)
@@ -595,7 +595,7 @@ contract BackingGatewayTest is Test {
         assertTrue(
             _selectorOf(evil.reentrantReturnData()) != IAccessControl.AccessControlUnauthorizedAccount.selector
         );
-        // O cancelamento reentrante não devolveu nada: os tokens foram queimados.
+        // The re-entrant cancellation returned nothing: the tokens were burned.
         assertEq(evil.balanceOf(alice), aliceBalanceBefore);
         assertEq(evil.balanceOf(address(gateway)), 0);
         assertEq(gateway.totalAttested(address(evil)), 60 ether);
@@ -605,7 +605,7 @@ contract BackingGatewayTest is Test {
         MaliciousHookToken evil = new MaliciousHookToken();
         uint256 redemptionId = _pendingEvilRedemption(evil, 100 ether, 40 ether);
 
-        // Durante a devolução dos tokens, o hook lê o próprio pedido de volta no gateway.
+        // While the tokens are being returned, the hook reads its own request back from the gateway.
         evil.armOnTransfer(address(gateway), abi.encodeWithSignature("redemptionRequests(uint256)", redemptionId));
 
         vm.prank(custodian);
@@ -616,9 +616,9 @@ contract BackingGatewayTest is Test {
 
         (,,,, uint8 status) =
             abi.decode(evil.reentrantReturnData(), (address, address, uint256, bytes32, uint8));
-        // O cancelamento já estava commitado quando a devolução externa ocorreu.
+        // The cancellation was already committed when the external return happened.
         assertEq(status, uint8(BackingGateway.RequestStatus.CANCELLED));
-        // A devolução em si concluiu normalmente.
+        // The return itself completed normally.
         assertEq(evil.balanceOf(alice), 100 ether);
         assertEq(evil.balanceOf(address(gateway)), 0);
         assertEq(gateway.totalAttested(address(evil)), 100 ether);
@@ -628,8 +628,8 @@ contract BackingGatewayTest is Test {
         MaliciousHookToken evil = new MaliciousHookToken();
         uint256 redemptionId = _pendingEvilRedemption(evil, 100 ether, 40 ether);
 
-        // Deliberadamente sem conceder CUSTODIAN_ROLE ao token hostil: como `nonReentrant`
-        // é o primeiro modifier, o erro esperado é o do guard, não o de controle de acesso.
+        // Deliberately without granting CUSTODIAN_ROLE to the hostile token: since `nonReentrant`
+        // is the first modifier, the expected error is the guard's, not the access-control one.
         evil.armOnTransfer(
             address(gateway),
             abi.encodeWithSignature("redemptionAttest(uint256,bytes32)", redemptionId, keccak256("forjado"))
@@ -644,15 +644,15 @@ contract BackingGatewayTest is Test {
         assertTrue(
             _selectorOf(evil.reentrantReturnData()) != IAccessControl.AccessControlUnauthorizedAccount.selector
         );
-        // A atestação reentrante não queimou nada nem mexeu no lastro: só o cancelamento valeu.
+        // The re-entrant attestation burned nothing and did not touch the backing: only the cancellation counted.
         assertEq(evil.balanceOf(alice), 100 ether);
         assertEq(evil.balanceOf(address(gateway)), 0);
         assertEq(gateway.totalAttested(address(evil)), 100 ether);
     }
 
-    /// @notice Regressão direta do checks-effects-interactions: `RedemptionRequestCancelled`
-    /// precisa ser emitido antes do `Transfer` da devolução. O status já era gravado antes do
-    /// transfer mesmo na ordem antiga — é a ordem dos logs que a mudança trava.
+    /// @notice Direct checks-effects-interactions regression: `RedemptionRequestCancelled`
+    /// must be emitted before the `Transfer` of the returned tokens. The status was already
+    /// written before the transfer even in the old order; it is the log order this change locks in.
     function test_CancelRedemptionRequest_EmitsCancelledBeforeExternalTransfer() public {
         _mintTokensTo(alice, 100 ether);
         vm.prank(alice);
@@ -675,14 +675,14 @@ contract BackingGatewayTest is Test {
             if (logs[i].topics[0] == transferTopic && transferIndex == type(uint256).max) transferIndex = i;
         }
 
-        assertTrue(cancelledIndex != type(uint256).max, "RedemptionRequestCancelled nao emitido");
-        assertTrue(transferIndex != type(uint256).max, "Transfer nao emitido");
+        assertTrue(cancelledIndex != type(uint256).max, "RedemptionRequestCancelled not emitted");
+        assertTrue(transferIndex != type(uint256).max, "Transfer not emitted");
         assertLt(cancelledIndex, transferIndex);
         assertEq(cancelledIndex, 0);
     }
 
-    /// @notice Regressão do checks-effects-interactions em `mintAttested`: `BackingMinted`
-    /// precisa ser emitido antes do `Transfer` de cunhagem do AssetToken.
+    /// @notice Checks-effects-interactions regression in `mintAttested`: `BackingMinted`
+    /// must be emitted before the AssetToken's mint `Transfer`.
     function test_MintAttested_EmitsBackingMintedBeforeExternalTransfer() public {
         uint256 requestId = _requestBacking(100 ether);
         vm.prank(custodian);
@@ -703,14 +703,14 @@ contract BackingGatewayTest is Test {
             if (logs[i].topics[0] == transferTopic && transferIndex == type(uint256).max) transferIndex = i;
         }
 
-        assertTrue(mintedIndex != type(uint256).max, "BackingMinted nao emitido");
-        assertTrue(transferIndex != type(uint256).max, "Transfer nao emitido");
+        assertTrue(mintedIndex != type(uint256).max, "BackingMinted not emitted");
+        assertTrue(transferIndex != type(uint256).max, "Transfer not emitted");
         assertLt(mintedIndex, transferIndex);
         assertEq(mintedIndex, 0);
     }
 
-    /// @notice Regressão do checks-effects-interactions em `redemptionAttest`:
-    /// `RedemptionAttested` precisa ser emitido antes do `Transfer` de queima.
+    /// @notice Checks-effects-interactions regression in `redemptionAttest`:
+    /// `RedemptionAttested` must be emitted before the burn `Transfer`.
     function test_RedemptionAttest_EmitsRedemptionAttestedBeforeExternalTransfer() public {
         _mintTokensTo(alice, 100 ether);
         vm.prank(alice);
@@ -733,8 +733,8 @@ contract BackingGatewayTest is Test {
             if (logs[i].topics[0] == transferTopic && transferIndex == type(uint256).max) transferIndex = i;
         }
 
-        assertTrue(attestedIndex != type(uint256).max, "RedemptionAttested nao emitido");
-        assertTrue(transferIndex != type(uint256).max, "Transfer nao emitido");
+        assertTrue(attestedIndex != type(uint256).max, "RedemptionAttested not emitted");
+        assertTrue(transferIndex != type(uint256).max, "Transfer not emitted");
         assertLt(attestedIndex, transferIndex);
         assertEq(attestedIndex, 0);
     }

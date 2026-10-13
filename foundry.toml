@@ -18,8 +18,8 @@ runs = 256
 depth = 300
 fail_on_revert = false
 
-# Endpoints referenciados por NOME nos comandos (--rpc-url sepolia, --etherscan-api-key
-# sepolia) — os valores reais vêm de RPC_URL/ETHERSCAN_API_KEY no .env local, nunca daqui.
+# Endpoints referenced by NAME in commands (--rpc-url sepolia, --etherscan-api-key
+# sepolia). The real values come from RPC_URL/ETHERSCAN_API_KEY in the local .env, never from here.
 [rpc_endpoints]
 sepolia = "${RPC_URL}"
 

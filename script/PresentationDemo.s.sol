@@ -9,39 +9,39 @@ import {CashbackDistributor} from "../src/CashbackDistributor.sol";
 import {MockUSDT} from "../test/mocks/MockUSDT.sol";
 
 /// @title PresentationDemo
-/// @notice Versão da demonstração para APRESENTAÇÃO PÚBLICA: cada papel do protocolo —
-/// vendedor, comprador, empresa emissora (recebe o cashback), custodiante e operador — é uma
-/// carteira DISTINTA das demais, para deixar explícito que o cashback vai para um terceiro
-/// alheio à negociação (a empresa emissora não é nem o comprador nem o vendedor).
+/// @notice Demo version for PUBLIC PRESENTATION: each protocol role (seller, buyer,
+/// issuing company that receives the cashback, custodian and operator) is a wallet
+/// DISTINCT from the others, to make explicit that the cashback goes to a third party
+/// outside the trade (the issuing company is neither the buyer nor the seller).
 ///
-/// @dev REUTILIZA os contratos JÁ implantados por `script/Deploy.s.sol` (endereços
-/// `DEPLOYED_*` no `.env`) — não implanta nada novo. Só REATRIBUI, via timelock, os papéis de
-/// operador/custodiante/emissora para carteiras distintas das usadas no deploy original (que
-/// continuam válidas — esta reatribuição é aditiva, não revoga nada). `MINTER_ROLE`/
-/// `BURNER_ROLE`/`backingGateway` já estão corretos desde o deploy original e não precisam
-/// mudar.
+/// @dev REUSES the contracts ALREADY deployed by `script/Deploy.s.sol` (`DEPLOYED_*`
+/// addresses in `.env`); it deploys nothing new. It only REASSIGNS, through the timelock,
+/// the operator/custodian/issuer roles to wallets distinct from those used in the original
+/// deploy (which remain valid: this reassignment is additive and revokes nothing).
+/// `MINTER_ROLE`/`BURNER_ROLE`/`backingGateway` are already correct since the original
+/// deploy and do not need to change.
 ///
-/// Mesma estrutura em duas fases dos demais scripts, por causa do timelock real
-/// (`MIN_TIMELOCK_DELAY` = 1h, sem atalho possível — ver CLAUDE.md):
+/// Same two-phase structure as the other scripts, because of the real timelock
+/// (`MIN_TIMELOCK_DELAY` = 1h, no shortcut possible; see CLAUDE.md):
 ///
-///   FASE 1 — `run()`: deriva as 5 carteiras de papel, agenda (propose) a reatribuição e
-///   financia cada carteira derivada com um pouco de ETH de teste (só para o próprio gás).
+///   PHASE 1, `run()`: derives the 5 role wallets, schedules (propose) the reassignment and
+///   funds each derived wallet with a little test ETH (only for its own gas).
 ///
-///   FASE 2 — `executeWiring()`: executa (consome) a reatribuição agendada, depois que o
-///   atraso realmente decorrer on-chain.
+///   PHASE 2, `executeWiring()`: executes (consumes) the scheduled reassignment, once the
+///   delay has really passed on-chain.
 ///
-///   DEMO — `runDemo()`: fluxo completo, cada etapa assinada pela carteira do papel
-///   correspondente (não pelo deployer): requestBacking/mintAttested/settle pelo operador,
-///   attestBacking pelo custodiante, approve pelo vendedor e pelo comprador, withdraw pela
-///   empresa emissora.
+///   DEMO, `runDemo()`: full flow, each step signed by the wallet of the corresponding role
+///   (not by the deployer): requestBacking/mintAttested/settle by the operator,
+///   attestBacking by the custodian, approve by the seller and the buyer, withdraw by the
+///   issuing company.
 ///
-/// As 5 carteiras são derivadas deterministicamente por rótulo (`makeAddrAndKey`) — não
-/// dependem de nenhuma chave privada além da do deployer (`PRIVATE_KEY`), que as financia.
+/// The 5 wallets are derived deterministically from a label (`makeAddrAndKey`); they
+/// depend on no private key other than the deployer's (`PRIVATE_KEY`), which funds them.
 contract PresentationDemo is Script {
     uint256 internal constant ROLE_GAS_FUNDING_WEI = 0.003 ether;
 
-    /// @dev Agrupada em struct para evitar "stack too deep" — um único ponteiro de memória
-    /// em vez de uma dezena de variáveis simultâneas na stack.
+    /// @dev Grouped in a struct to avoid "stack too deep": a single memory pointer
+    /// instead of a dozen simultaneous stack variables.
     struct Actors {
         address admin;
         address operator;
@@ -89,10 +89,10 @@ contract PresentationDemo is Script {
         c.assetToken = AssetToken(vm.envAddress("DEPLOYED_ASSET_TOKEN_ADDRESS"));
     }
 
-    /// @dev Agenda (propose) a troca de operador/custodiante/emissora nos contratos JÁ
-    /// implantados. `issuerWallet` é substituído (não aditivo); os papéis via AccessControl
-    /// são concedidos além dos já existentes (aditivo — o deployer original continua com os
-    /// papéis dele, isso não é uma migração, é uma reatribuição para fins de demonstração).
+    /// @dev Schedules (propose) the change of operator/custodian/issuer in the ALREADY
+    /// deployed contracts. `issuerWallet` is replaced (not additive); the AccessControl roles
+    /// are granted on top of the existing ones (additive: the original deployer keeps its
+    /// roles; this is not a migration, it is a reassignment for demo purposes).
     function _proposeRewiring(Contracts memory c, Actors memory actors) internal {
         c.gateway.proposeGrantRole(c.gateway.OPERATOR_ROLE(), actors.operator);
         c.gateway.proposeGrantRole(c.gateway.CUSTODIAN_ROLE(), actors.custodian);
@@ -100,8 +100,8 @@ contract PresentationDemo is Script {
         c.assetToken.proposeSetIssuerWallet(actors.issuerWallet);
     }
 
-    /// @dev As carteiras de papel precisam de um pouco de ETH para assinar suas próprias
-    /// transações em `executeWiring`/`runDemo` — só o deployer tem saldo de partida.
+    /// @dev The role wallets need a little ETH to sign their own transactions in
+    /// `executeWiring`/`runDemo`; only the deployer has a starting balance.
     function _fundActorsForGas(Actors memory actors) internal {
         _fundIfNeeded(actors.operator);
         _fundIfNeeded(actors.custodian);
@@ -113,15 +113,15 @@ contract PresentationDemo is Script {
     function _fundIfNeeded(address to) internal {
         if (to.balance < ROLE_GAS_FUNDING_WEI) {
             (bool ok,) = to.call{value: ROLE_GAS_FUNDING_WEI}("");
-            require(ok, "funding de carteira de apresentacao falhou");
+            require(ok, "presentation wallet funding failed");
         }
     }
 
     // ── Fase 2 ──────────────────────────────────────────────────────────────────────────
 
-    /// @notice Executa a reatribuição agendada em `run()`. Só transmita depois que
-    /// `TIMELOCK_DELAY` (do deploy original) segundos tiverem realmente decorrido desde a
-    /// fase 1 deste script.
+    /// @notice Executes the reassignment scheduled in `run()`. Only broadcast after
+    /// `TIMELOCK_DELAY` (from the original deploy) seconds have really passed since
+    /// phase 1 of this script.
     function executeWiring() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         Actors memory actors = _deriveActors(deployerPrivateKey);
@@ -136,10 +136,10 @@ contract PresentationDemo is Script {
 
         vm.stopBroadcast();
 
-        console2.log("Reatribuicao concluida: papeis de apresentacao ativos nos contratos existentes.");
+        console2.log("Reassignment complete: presentation roles active on the existing contracts.");
     }
 
-    // ── Demo: cada etapa assinada pela carteira do papel correspondente ────────────────
+    // ── Demo: each step signed by the wallet of the corresponding role ──────────────────
 
     function runDemo() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -156,34 +156,34 @@ contract PresentationDemo is Script {
         _runCashbackFlow(c, actors);
 
         console2.log("");
-        console2.log("Fluxo de apresentacao concluido com sucesso.");
+        console2.log("Presentation flow completed successfully.");
     }
 
     function _runBackingFlow(Contracts memory c, Actors memory actors, uint256 quantity) internal {
         vm.startBroadcast(actors.operatorKey);
         uint256 requestId = c.gateway.requestBacking(address(c.assetToken), quantity);
-        console2.log("1) requestBacking (operador) -> requestId", requestId);
+        console2.log("1) requestBacking (operator) -> requestId", requestId);
         vm.stopBroadcast();
 
         vm.startBroadcast(actors.custodianKey);
         c.gateway.attestBacking(requestId, keccak256(abi.encode("niara-presentation-proof", requestId)), quantity);
-        console2.log("2) attestBacking (custodiante) OK -> quantidade atestada", quantity);
+        console2.log("2) attestBacking (custodian) OK -> attested quantity", quantity);
         vm.stopBroadcast();
 
         vm.startBroadcast(actors.operatorKey);
         c.gateway.mintAttested(requestId, actors.seller);
-        console2.log("3) mintAttested (operador) -> tokens emitidos para o vendedor", actors.seller);
+        console2.log("3) mintAttested (operator) -> tokens minted to the seller", actors.seller);
         vm.stopBroadcast();
     }
 
     function _fundBuyerWithUsdt(Contracts memory c, address buyer, uint256 amount) internal {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerPrivateKey);
-        // MockUSDT.mint e publico (sem controle de acesso, uso exclusivo de teste) — o
-        // deployer financia o comprador diretamente, sem precisar da chave dele.
+        // MockUSDT.mint is public (no access control, test use only), so the deployer
+        // funds the buyer directly without needing the buyer's key.
         c.usdt.mint(buyer, amount);
         vm.stopBroadcast();
-        console2.log("4) Comprador financiado com USDT de demonstracao");
+        console2.log("4) Buyer funded with demo USDT");
     }
 
     function _runSettleFlow(Contracts memory c, Actors memory actors, uint256 assetAmount, uint256 paymentAmount)
@@ -192,29 +192,29 @@ contract PresentationDemo is Script {
         vm.startBroadcast(actors.sellerKey);
         c.assetToken.approve(address(c.settlement), assetAmount);
         vm.stopBroadcast();
-        console2.log("5) Vendedor aprovou o AssetToken para a liquidacao");
+        console2.log("5) Seller approved the AssetToken for settlement");
 
         vm.startBroadcast(actors.buyerKey);
         c.usdt.approve(address(c.settlement), paymentAmount);
         vm.stopBroadcast();
-        console2.log("6) Comprador aprovou o USDT para a liquidacao");
+        console2.log("6) Buyer approved USDT for settlement");
 
         vm.startBroadcast(actors.operatorKey);
         uint256 feeCharged = c.settlement.settle(
             address(c.assetToken), address(c.usdt), actors.buyer, actors.seller, assetAmount, paymentAmount
         );
         vm.stopBroadcast();
-        console2.log("7) settle (operador) executado -> taxa cobrada", feeCharged);
+        console2.log("7) settle (operator) executed -> fee charged", feeCharged);
     }
 
     function _runCashbackFlow(Contracts memory c, Actors memory actors) internal {
         uint256 cashbackBalance = c.distributor.cashbackBalance(address(c.assetToken), address(c.usdt));
-        console2.log("8) Cashback creditado a empresa emissora (saldo antes do saque):", cashbackBalance);
+        console2.log("8) Cashback credited to the issuing company (balance before withdrawal):", cashbackBalance);
 
         vm.startBroadcast(actors.issuerKey);
         c.distributor.withdraw(address(c.assetToken), address(c.usdt));
         vm.stopBroadcast();
-        console2.log("9) withdraw (empresa emissora) executado -> cashback sacado");
+        console2.log("9) withdraw (issuing company) executed -> cashback withdrawn");
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────────────────
@@ -229,21 +229,21 @@ contract PresentationDemo is Script {
     }
 
     function _logActors(Actors memory a) internal pure {
-        console2.log("== Papeis da apresentacao (carteiras distintas) ==");
-        console2.log("Admin (deployer / governanca):", a.admin);
-        console2.log("Operador (requestBacking, mintAttested, settle):", a.operator);
-        console2.log("Custodiante (attestBacking):", a.custodian);
-        console2.log("Empresa emissora (issuerWallet, recebe o cashback):", a.issuerWallet);
-        console2.log("Vendedor (entrega o AssetToken na liquidacao):", a.seller);
-        console2.log("Comprador (paga na liquidacao):", a.buyer);
+        console2.log("== Presentation roles (distinct wallets) ==");
+        console2.log("Admin (deployer / governance):", a.admin);
+        console2.log("Operator (requestBacking, mintAttested, settle):", a.operator);
+        console2.log("Custodian (attestBacking):", a.custodian);
+        console2.log("Issuing company (issuerWallet, receives the cashback):", a.issuerWallet);
+        console2.log("Seller (delivers the AssetToken at settlement):", a.seller);
+        console2.log("Buyer (pays at settlement):", a.buyer);
         console2.log("");
     }
 
     function _logNextSteps() internal pure {
-        console2.log("== Proximo passo ==");
-        console2.log("Reatribuicao agendada (propose). Espere o timelock decorrer e rode a fase 2:");
+        console2.log("== Next step ==");
+        console2.log("Reassignment scheduled (propose). Wait for the timelock and run phase 2:");
         console2.log('forge script script/PresentationDemo.s.sol --sig "executeWiring()" --rpc-url sepolia --broadcast');
-        console2.log("Depois disso, rode a demo:");
+        console2.log("After that, run the demo:");
         console2.log('forge script script/PresentationDemo.s.sol --sig "runDemo()" --rpc-url sepolia --broadcast');
     }
 }
