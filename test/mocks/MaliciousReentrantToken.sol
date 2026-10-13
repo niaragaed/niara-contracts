@@ -3,10 +3,10 @@ pragma solidity ^0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-/// @notice Token ERC-20 malicioso para testes: ao ser transferido via `transferFrom`,
-/// tenta reentrar em um alvo configurável com um calldata arbitrário, simulando um token
-/// com hook (estilo ERC-777) usado como vetor de reentrância. Usado apenas em testes para
-/// comprovar que `nonReentrant` bloqueia o ataque.
+/// @notice Malicious ERC-20 token for tests: when transferred via `transferFrom`, it
+/// tries to re-enter a configurable target with arbitrary calldata, simulating a token
+/// with a hook (ERC-777 style) used as a reentrancy vector. Used only in tests to
+/// prove that `nonReentrant` blocks the attack.
 contract MaliciousReentrantToken is ERC20 {
     address public reentrantTarget;
     bytes public reentrantCalldata;
@@ -18,8 +18,8 @@ contract MaliciousReentrantToken is ERC20 {
         _mint(to, amount);
     }
 
-    /// @notice Arma o ataque: na próxima chamada a `transferFrom`, este contrato chamará
-    /// `reentrantTarget` com `data` antes de concluir a transferência.
+    /// @notice Arms the attack: on the next `transferFrom` call, this contract will call
+    /// `reentrantTarget` with `data` before completing the transfer.
     function arm(address target, bytes calldata data) external {
         reentrantTarget = target;
         reentrantCalldata = data;

@@ -1,158 +1,159 @@
 # CLAUDE.md — niara-contracts
 
-Instruções permanentes para o Claude Code neste repositório. Leia antes de escrever
-qualquer código.
+Standing instructions for Claude Code in this repository. Read them before writing
+any code.
 
-Este repositório é **separado** do `niara-site` (o site institucional da Niara). Não
-procure nem referencie arquivos daquele projeto a partir daqui.
+This repository is **separate** from `niara-site` (Niara's institutional site). Do not
+look for or reference files from that project here.
 
 ---
 
-## ⚠️ Contratos financeiros: segurança acima de tudo
+## ⚠️ Financial contracts: safety above everything
 
-Se algo for ambíguo, **pare e pergunte** — não improvise em código que move valor
-real. Decisões de design já tomadas (e por quê) estão documentadas no README.md,
-seção "Decisões de design".
+If anything is ambiguous, **stop and ask**. Do not improvise in code that moves real
+value. Design decisions already made (and why) are documented in README.md, section
+"Design decisions".
 
-- **Nunca commitar chave privada, `.env` real ou qualquer segredo.** `.env.example`
-  existe só para documentar o formato; preencher valores reais fica local, fora do
-  git.
-- **Nenhum deploy em nenhuma rede sem pedido explícito do usuário** — nem testnet, nem
-  mainnet. Este repositório, por enquanto, é só código e testes locais (`forge build`
-  / `forge test`).
-- **Toda função pública/externa precisa de teste.** Se adicionar uma função nova sem
-  teste correspondente, o trabalho não está pronto.
-- **Mint sem atestação de lastro é proibido por invariante estrutural**, não por
-  controle de acesso: `AssetToken.mint` verifica `totalSupply() + amount <=
-  IBackingGateway(backingGateway).totalAttested(address(this))` diretamente, mesmo
-  que `MINTER_ROLE` seja concedido a um endereço fora do `BackingGateway`. Qualquer
-  mudança nessa função exige o teste de invariante correspondente continuar passando
-  (`test_Invariant_MintBeyondAttestedIsImpossibleRegardlessOfCaller` em
-  `test/BackingGateway.t.sol`, e os testes de `test/AssetToken.t.sol`).
-- **Nunca remover ou enfraquecer `nonReentrant`, `SafeERC20` ou os teto rígidos de bps**
+- **Never commit a private key, a real `.env` or any secret.** `.env.example` exists
+  only to document the format; real values stay local, outside git.
+- **No deployment to any network without an explicit request from the user**, neither
+  testnet nor mainnet. For now this repository is code and local tests only
+  (`forge build` / `forge test`).
+- **Every public/external function needs a test.** If you add a new function without a
+  matching test, the work is not done.
+- **Minting without attested backing is forbidden by a structural invariant**, not by
+  access control: `AssetToken.mint` checks `totalSupply() + amount <=
+  IBackingGateway(backingGateway).totalAttested(address(this))` directly, even if
+  `MINTER_ROLE` is granted to an address outside the `BackingGateway`. Any change to
+  that function requires the matching invariant test to keep passing
+  (`test_Invariant_MintBeyondAttestedIsImpossibleRegardlessOfCaller` in
+  `test/BackingGateway.t.sol`, and the tests in `test/AssetToken.t.sol`).
+- **Never remove or weaken `nonReentrant`, `SafeERC20` or the hard bps caps**
   (`NiaraSettlement.MAX_FEE_BPS = 100`, `CashbackDistributor.MAX_CASHBACK_BPS =
-  10_000`) sem discutir explicitamente com o usuário — são invariantes de segurança
-  centrais do modelo, não detalhes de implementação.
-- **Mudanças em papéis, taxa, cashback ou carteiras de referência passam pelo timelock**
-  (`TimelockedAccessControl`: propose → aguardar `timelockDelay` → execute). Não
-  adicione atalhos que apliquem essas mudanças imediatamente.
+  10_000`) without discussing it explicitly with the user. They are core security
+  invariants of the model, not implementation details.
+- **Changes to roles, fee, cashback or reference wallets go through the timelock**
+  (`TimelockedAccessControl`: propose → wait `timelockDelay` → execute). Do not add
+  shortcuts that apply these changes immediately.
 
-## Tokens com hook: checks-effects-interactions é obrigatório
+## Tokens with hooks: checks-effects-interactions is mandatory
 
-**Premissa de design:** o protocolo pretende aceitar tokens de pagamento e ativos com
-hooks (ERC-777, ERC-1363), não apenas ERC-20 simples. Todo `transfer`,
-`transferFrom`, `mint` ou `burn` deve ser tratado como uma chamada externa que pode
-devolver o controle a um contrato hostil no meio da operação.
+**Design premise:** the protocol intends to accept payment tokens and assets with hooks
+(ERC-777, ERC-1363), not only plain ERC-20. Every `transfer`, `transferFrom`, `mint`
+or `burn` must be treated as an external call that can hand control to a hostile
+contract in the middle of the operation.
 
-Por causa disso, **checks-effects-interactions é regra obrigatória para qualquer
-código novo**: toda atualização de estado *e toda emissão de evento* precede a chamada
-externa. Nunca o contrário.
+Because of that, **checks-effects-interactions is a mandatory rule for any new code**:
+every state update *and every event emission* comes before the external call. Never the
+other way around.
 
-- **`nonReentrant` sozinho não basta.** Ele impede reentrância na mesma função, mas não
-  impede reentrância **cruzada** — um hook chamando outra função do contrato durante a
-  chamada externa — nem corrige a **ordem dos logs**: com o `emit` depois do transfer,
-  um indexador off-chain vê o `Transfer` (ou os eventos da reentrância) antes do evento
-  da operação que os originou, quebrando invariantes assumidas fora da cadeia.
-- **`nonReentrant` é sempre o primeiro modifier**, antes de `onlyRole` e
-  `whenNotPaused`. Modifiers executam na ordem declarada; o guard não deve depender da
-  ordem dos demais. Isso é verificável: os testes `..._RevertsViaGuard` deliberadamente
-  *não* concedem o papel ao contrato hostil, então só passam se o erro observado for
-  `ReentrancyGuardReentrantCall` e não `AccessControlUnauthorizedAccount`.
+- **`nonReentrant` alone is not enough.** It prevents re-entry into the same function,
+  but not **cross-function** re-entry (a hook calling another function of the contract
+  during the external call), and it does not fix the **log order**: with the `emit`
+  after the transfer, an off-chain indexer sees the `Transfer` (or the re-entry's
+  events) before the event of the operation that caused them, breaking invariants
+  assumed off-chain.
+- **`nonReentrant` is always the first modifier**, before `onlyRole` and
+  `whenNotPaused`. Modifiers run in declaration order; the guard must not depend on the
+  order of the others. This is verifiable: the `..._RevertsViaGuard` tests deliberately
+  *do not* grant the role to the hostile contract, so they only pass if the observed
+  error is `ReentrancyGuardReentrantCall` and not `AccessControlUnauthorizedAccount`.
 
-As quatro funções com chamada externa seguem esse padrão, cada uma com comentário no
-código explicando o porquê:
+The four functions with external calls follow this pattern, each with a code comment
+explaining why:
 
-- `NiaraSettlement.settle` — `emit Settled` antes dos três `safeTransferFrom`.
-- `BackingGateway.mintAttested` — `req.minted = true` e `emit BackingMinted` antes de
+- `NiaraSettlement.settle`: `emit Settled` before the three `safeTransferFrom`.
+- `BackingGateway.mintAttested`: `req.minted = true` and `emit BackingMinted` before
   `IAssetToken.mint`.
-- `BackingGateway.redemptionAttest` — status `SETTLED`, `proofHash`, a baixa em
-  `totalAttested` e `emit RedemptionAttested` antes de `IAssetToken.burn`.
-- `BackingGateway.cancelRedemptionRequest` — status `CANCELLED` e
-  `emit RedemptionRequestCancelled` antes do `safeTransfer` de devolução.
+- `BackingGateway.redemptionAttest`: `SETTLED` status, `proofHash`, the decrease in
+  `totalAttested` and `emit RedemptionAttested` before `IAssetToken.burn`.
+- `BackingGateway.cancelRedemptionRequest`: `CANCELLED` status and
+  `emit RedemptionRequestCancelled` before the `safeTransfer` that returns the tokens.
 
-**Cada uma tem um teste de ordem de logs travando a regressão** (`vm.recordLogs` +
-`assertLt` entre o índice do evento e o do primeiro `Transfer`) — não remova nem
-enfraqueça esses testes ao mexer nas funções:
+**Each one has a log-order test locking in the regression** (`vm.recordLogs` +
+`assertLt` between the event index and the first `Transfer` index). Do not remove or
+weaken these tests when changing those functions:
 
 - `test_Settle_EmitsSettledBeforeExternalTransfers` (`test/NiaraSettlement.t.sol`)
 - `test_MintAttested_EmitsBackingMintedBeforeExternalTransfer`
 - `test_RedemptionAttest_EmitsRedemptionAttestedBeforeExternalTransfer`
 - `test_CancelRedemptionRequest_EmitsCancelledBeforeExternalTransfer`
-  (os três últimos em `test/BackingGateway.t.sol`)
+  (the last three in `test/BackingGateway.t.sol`)
 
-Ao adicionar uma função nova com chamada externa, adicione o teste de ordem
-equivalente. Para simular o ativo hostil, use `test/mocks/MaliciousHookToken.sol`, que
-**registra** o resultado da reentrância (`reentrantSucceeded` /
-`reentrantReturnData`) em vez de abortar — o `MaliciousReentrantToken` mais antigo faz
-`require(success)` e reverte a transação inteira, o que serve para provar bloqueio mas
-impede inspecionar o estado que a reentrância enxergou.
+When adding a new function with an external call, add the equivalent order test. To
+simulate the hostile asset, use `test/mocks/MaliciousHookToken.sol`, which **records**
+the result of the re-entry (`reentrantSucceeded` / `reentrantReturnData`) instead of
+aborting. The older `MaliciousReentrantToken` does `require(success)` and reverts the
+whole transaction, which proves blocking but prevents inspecting the state the re-entry
+saw.
 
-**Exceção documentada:** em `settle`, `cashbackDistributor.recordFee` continua *depois*
-da transferência da taxa, porque o distribuidor contabiliza uma taxa que precisa já
-estar em seu saldo. É chamada interna ao protocolo e qualquer falha reverte a transação
-inteira, evento incluído. Está comentada no código — se precisar mexer nessa ordem,
-discuta antes.
+**Documented exception:** in `settle`, `cashbackDistributor.recordFee` stays *after*
+the fee transfer, because the distributor accounts for a fee that must already be in
+its balance. It is an internal protocol call and any failure reverts the whole
+transaction, event included. It is commented in the code; if you need to change that
+order, discuss it first.
 
-## Parâmetro pendente de definição
+## Parameter still to be defined
 
-`CashbackDistributor.cashbackBps` está em **1000 bps (10% da taxa)**, valor
-provisório — ver comentário no código: *"A DEFINIR — 1% da taxa equivale a 0,005% do
-volume, provavelmente insuficiente. Ver whitepaper, seção 4."* Não trate esse número
-como final; se o usuário pedir para ajustá-lo, é esperado.
+`CashbackDistributor.cashbackBps` is at **1000 bps (10% of the fee)**, a provisional
+value. See the code comment: *"TO BE DEFINED: 1% of the fee equals 0.005% of volume,
+probably not enough. See the whitepaper, section 4."* Do not treat this number as
+final; if the user asks to adjust it, that is expected.
 
 ---
 
 ## Stack
 
 - Foundry (forge/cast/anvil), Solidity `^0.8.24`.
-- OpenZeppelin Contracts v5.1.0 (`lib/openzeppelin-contracts`, instalado via zip de
-  release, não como submódulo git — não rodar `forge update` nessa lib sem revisar
-  antes; não há histórico git dentro dela).
-- Remappings em `remappings.txt` e replicados em `foundry.toml`.
-- Scripts de deploy em `script/`: `Deploy.s.sol` (fase 1 `run()` deploy+propose, fase 2
-  `executeWiring()` após o timelock decorrer de verdade) e `Demo.s.sol` (fluxo completo
-  em transações reais). Só usados mediante pedido explícito de deploy — nunca disparar
-  `--broadcast` por conta própria; ver seção "Deploy em testnet" do README.
+- OpenZeppelin Contracts v5.1.0 (`lib/openzeppelin-contracts`, installed from a release
+  zip, not as a git submodule; do not run `forge update` on that lib without reviewing
+  first, since there is no git history inside it).
+- Remappings in `remappings.txt`, mirrored in `foundry.toml`.
+- Deploy scripts in `script/`: `Deploy.s.sol` (phase 1 `run()` deploy + propose, phase 2
+  `executeWiring()` after the timelock has really elapsed) and `Demo.s.sol` (full flow
+  as real transactions). Only used on an explicit deploy request: never trigger
+  `--broadcast` on your own; see the README section "Testnet deployment".
 
-## Convenções
+## Conventions
 
-- Comentários de código em português (convenção também usada no `niara-site`).
-- NatSpec (`@notice`/`@dev`/`@param`/`@return`) em toda função pública/externa nova.
-- Erros customizados (`error X()` + `revert X()`), não `require(cond, "string")`,
-  exceto onde já usado por bibliotecas externas (OpenZeppelin).
-- Padrão de timelock: `proposeX(...)` agenda (`_scheduleAction`), `executeX(...)`
-  consome (`_consumeAction`) e aplica a mudança. O `actionId` é
-  `keccak256(abi.encode("NOME_DA_ACAO", ...parâmetros))` — se adicionar uma nova ação
-  sensível, siga esse padrão em vez de inventar um novo mecanismo.
-- **Cuidado com testes usando `vm.prank` seguido de uma chamada que leia uma constante
-  do próprio contrato na mesma linha** (ex.: `token.MINTER_ROLE()` dentro de um
-  `abi.encodeWithSelector(...)` logo após `vm.prank`): isso é uma chamada externa que
-  consome o prank antes da chamada testada. Sempre resolva papéis (`bytes32`) em
-  variáveis antes do prank. Ver comentário no topo de `test/AssetToken.t.sol`.
+- **Language: English for everything** (code, identifiers, comments, NatSpec, docs,
+  test names, script output and commit messages).
+- NatSpec (`@notice`/`@dev`/`@param`/`@return`) on every new public/external function.
+- Custom errors (`error X()` + `revert X()`), not `require(cond, "string")`, except
+  where already used by external libraries (OpenZeppelin).
+- Timelock pattern: `proposeX(...)` schedules (`_scheduleAction`), `executeX(...)`
+  consumes (`_consumeAction`) and applies the change. The `actionId` is
+  `keccak256(abi.encode("ACTION_NAME", ...params))`. If you add a new sensitive
+  action, follow this pattern instead of inventing a new mechanism.
+- **Beware of tests using `vm.prank` followed by a call that reads a constant of the
+  contract itself on the same line** (e.g. `token.MINTER_ROLE()` inside an
+  `abi.encodeWithSelector(...)` right after `vm.prank`): that is an external call that
+  consumes the prank before the call under test. Always resolve roles (`bytes32`) into
+  variables before the prank. See the comment at the top of `test/AssetToken.t.sol`.
 
-## Fluxo de trabalho
+## Workflow
 
-1. Antes de codar, ler os arquivos envolvidos — não presumir.
-2. `forge build` e `forge test -vv` ao final de cada mudança; corrigir o que aparecer.
-3. Commit local ao final de cada tarefa, mensagem em português, padrão `feat:` /
+1. Before coding, read the files involved; do not assume.
+2. `forge build` and `forge test -vv` at the end of each change; fix whatever shows up.
+3. Local commit at the end of each task, message in English, following `feat:` /
    `fix:` / `refactor:` / `chore:` / `test:`.
-4. Nunca `--force`, nunca reescrever histórico, nunca push sem ser pedido, nunca criar
-   repositório remoto sem ser pedido.
-5. Se algo quebrar ou ficar ambíguo: **parar e explicar**, não improvisar.
+4. Never `--force`, never rewrite history, never push unless asked, never create a
+   remote repository unless asked.
+5. If something breaks or becomes ambiguous: **stop and explain**, do not improvise.
 
-Identidade Git deste repositório: a mesma configurada localmente pelo usuário (sem
-`--global`, sem sobrescrever).
+Git identity for this repository: the one the user configured locally (no `--global`,
+no overriding).
 
 ---
 
-## Pendências conhecidas
+## Known open items
 
-- Deploy em Sepolia concluído (2026-07-22): as duas fases (`run()` + `executeWiring()`)
-  e o `script/Demo.s.sol` já rodaram com `--broadcast` de verdade, com confirmação
-  explícita do usuário em cada etapa. Endereços e transações documentados no README,
-  seção "Deploy em testnet" / "Transações da demonstração". Qualquer novo deploy
-  (redeploy, outra rede) continua exigindo pedido explícito — nunca disparar
-  `--broadcast` por conta própria.
-- Parâmetro `cashbackBps` (ver acima) — provisório.
-- Nenhuma auditoria externa foi feita. Não descrever este código como auditado em
-  nenhuma documentação futura.
+- Sepolia deployment completed (2026-07-22): both phases (`run()` + `executeWiring()`)
+  and `script/Demo.s.sol` ran with a real `--broadcast`, with the user's explicit
+  confirmation at each step. Addresses and transactions are documented in the README,
+  sections "Testnet deployment" / "Demo transactions". Any new deployment (redeploy,
+  another network) still requires an explicit request: never trigger `--broadcast` on
+  your own.
+- `cashbackBps` parameter (see above): provisional.
+- No external audit has been done. Do not describe this code as audited in any future
+  documentation.

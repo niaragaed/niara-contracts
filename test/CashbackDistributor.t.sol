@@ -50,7 +50,7 @@ contract CashbackDistributorTest is Test {
         distributor.executeGrantRole(role, account);
     }
 
-    /// @dev Simula o NiaraSettlement: transfere a taxa para o distributor e então registra.
+    /// @dev Simulates NiaraSettlement: transfers the fee to the distributor and then records it.
     function _recordFee(AssetToken asset, uint256 feeAmount) internal {
         usdt.mint(address(distributor), feeAmount);
         vm.prank(settlementCaller);
@@ -92,7 +92,7 @@ contract CashbackDistributorTest is Test {
         assertEq(distributor.protocolBalance(address(usdt)), feeAmount);
     }
 
-    // ── withdraw (emissor) ─────────────────────────────────────────────────────────────
+    // ── withdraw (issuer) ──────────────────────────────────────────────────────────────
 
     function test_Withdraw_OnlyIssuerWallet() public {
         _recordFee(equityToken, 1_000e6);
@@ -185,7 +185,7 @@ contract CashbackDistributorTest is Test {
         assertEq(distributor.protocolBalance(address(usdt)), 0);
     }
 
-    // ── cashbackBps: teto rígido e timelock ────────────────────────────────────────────
+    // ── cashbackBps: hard cap and timelock ─────────────────────────────────────────────
 
     function test_CashbackBps_CannotExceedCap() public {
         uint16 tooHigh = distributor.MAX_CASHBACK_BPS() + 1;
@@ -213,11 +213,11 @@ contract CashbackDistributorTest is Test {
         assertEq(distributor.cashbackBps(), 2_000);
     }
 
-    /// @notice `executeSetCashbackBps` valida o teto ANTES de consumir a proposta
-    /// pendente — esse guard dispara mesmo sem nenhuma `proposeSetCashbackBps` ter sido
-    /// feita (que já bloquearia o agendamento de um valor acima do teto). Chamado
-    /// diretamente para cobrir essa checagem defensiva, hoje inalcançável pelo fluxo
-    /// normal propose→execute.
+    /// @notice `executeSetCashbackBps` validates the cap BEFORE consuming the pending
+    /// proposal; this guard fires even without any `proposeSetCashbackBps` having been
+    /// made (which would already block scheduling a value above the cap). Called
+    /// directly to cover this defensive check, currently unreachable through the
+    /// normal propose→execute flow.
     function test_ExecuteCashbackBps_DefensiveCapCheck_RevertsWithoutNeedingProposal() public {
         uint16 tooHigh = distributor.MAX_CASHBACK_BPS() + 1;
         vm.prank(admin);
@@ -225,7 +225,7 @@ contract CashbackDistributorTest is Test {
         distributor.executeSetCashbackBps(tooHigh);
     }
 
-    // ── Guardas de endereço zero ───────────────────────────────────────────────────────
+    // ── Zero address guards ────────────────────────────────────────────────────────────
 
     function test_Constructor_RevertsForZeroAdmin() public {
         vm.expectRevert(CashbackDistributor.ZeroAddress.selector);
