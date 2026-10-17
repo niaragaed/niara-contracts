@@ -20,3 +20,7 @@ node_modules/
 .idea/
 .DS_Store
 Thumbs.db
+
+# local Claude Code state; only the shared settings are versioned
+/.claude/*
+!/.claude/settings.json
