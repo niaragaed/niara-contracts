@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-/// @notice USDT mock com 6 casas decimais, para uso exclusivo em testes.
+/// @notice USDT mock with 6 decimals, for test use only.
 contract MockUSDT is ERC20 {
     constructor() ERC20("Mock Tether USD", "mUSDT") {}
 

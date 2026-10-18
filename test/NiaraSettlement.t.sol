@@ -79,7 +79,7 @@ contract NiaraSettlementTest is Test {
         wbtc.approve(address(settlement), type(uint256).max);
     }
 
-    // ── Helpers de governança com timelock ────────────────────────────────────────────
+    // ── Timelocked governance helpers ─────────────────────────────────────────────────
 
     function _settlementGrantRole(bytes32 role, address account) internal {
         vm.prank(admin);
@@ -113,7 +113,7 @@ contract NiaraSettlementTest is Test {
         assetToken.executeSetBackingGateway(newGateway);
     }
 
-    // ── Liquidação atômica ─────────────────────────────────────────────────────────────
+    // ── Atomic settlement ──────────────────────────────────────────────────────────────
 
     function test_Settle_OnlyOperator() public {
         vm.prank(seller);
@@ -153,7 +153,7 @@ contract NiaraSettlementTest is Test {
     }
 
     function test_Settle_FeeMathExact() public {
-        // feeBps padrão = 50 (0,5%). 123_456_789 * 50 / 10000 = 617_283 (truncado).
+        // Default feeBps = 50 (0.5%). 123_456_789 * 50 / 10000 = 617_283 (truncated).
         uint256 paymentAmount = 123_456_789;
         vm.prank(operator);
         uint256 feeCharged = settlement.settle(address(assetToken), address(usdt), buyer, seller, 1 ether, paymentAmount);
@@ -204,8 +204,8 @@ contract NiaraSettlementTest is Test {
         settlement.settle(address(0), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
-    /// @notice Arredondamento: quantias mínimas não podem truncar a taxa a zero enquanto
-    /// feeBps > 0 — isso permitiria negociar sem pagar taxa via micro-transações.
+    /// @notice Rounding: tiny amounts cannot truncate the fee to zero while
+    /// feeBps > 0; otherwise one could trade fee-free through micro-transactions.
     function test_Settle_RevertsWhenPaymentAmountTooSmallForFeePrecision() public {
         // feeBps = 50 → paymentAmount=1 gera fee = 0 por truncamento (1*50/10000 = 0).
         vm.prank(operator);
@@ -232,7 +232,7 @@ contract NiaraSettlementTest is Test {
         settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
-    // ── Taxa: teto rígido e timelock ───────────────────────────────────────────────────
+    // ── Fee: hard cap and timelock ─────────────────────────────────────────────────────
 
     function _setFeeBps(uint16 newFeeBps) internal {
         vm.prank(admin);
@@ -280,14 +280,14 @@ contract NiaraSettlementTest is Test {
         assertEq(address(settlement.cashbackDistributor()), address(newDistributor));
     }
 
-    // ── Reentrância ────────────────────────────────────────────────────────────────────
+    // ── Reentrancy ─────────────────────────────────────────────────────────────────────
 
     function test_Settle_ReentrancyViaMaliciousAssetToken_Reverts() public {
         MaliciousReentrantToken evilAsset = new MaliciousReentrantToken();
         evilAsset.mint(seller, 1_000 ether);
 
-        // Concede o papel de operador ao próprio contrato malicioso, isolando a garantia
-        // sob teste (nonReentrant) da checagem de controle de acesso.
+        // Grants the operator role to the malicious contract itself, isolating the guarantee
+        // under test (nonReentrant) from the access-control check.
         _settlementGrantRole(settlementOperatorRole, address(evilAsset));
 
         vm.prank(seller);
@@ -304,7 +304,7 @@ contract NiaraSettlementTest is Test {
         vm.expectRevert();
         settlement.settle(address(evilAsset), address(usdt), buyer, seller, 10 ether, 1_000e6);
 
-        // Nada deve ter se movido: a transação inteira reverteu.
+        // Nothing should have moved: the whole transaction reverted.
         assertEq(usdt.balanceOf(seller), sellerBalanceBefore);
         assertEq(evilAsset.balanceOf(buyer), 0);
     }
@@ -332,17 +332,17 @@ contract NiaraSettlementTest is Test {
         assertEq(assetToken.balanceOf(seller), sellerAssetBalanceBefore);
     }
 
-    /// @dev Extrai o selector de um retorno bruto (ex.: o erro de uma chamada revertida).
+    /// @dev Extracts the selector from raw return data (e.g. the error of a reverted call).
     function _selectorOf(bytes memory data) internal pure returns (bytes4 sel) {
-        require(data.length >= 4, "retorno sem selector");
+        require(data.length >= 4, "return data has no selector");
         assembly {
             sel := mload(add(data, 32))
         }
     }
 
-    /// @notice Checks-effects-interactions: `Settled` precisa ser emitido antes de qualquer
-    /// transferência, para que um indexador off-chain nunca veja um `Transfer` desta
-    /// liquidação (ou de uma reentrância disparada por ele) antes do próprio `Settled`.
+    /// @notice Checks-effects-interactions: `Settled` must be emitted before any
+    /// transfer, so an off-chain indexer never sees a `Transfer` from this settlement
+    /// (or from a re-entry it triggered) before the `Settled` itself.
     function test_Settle_EmitsSettledBeforeExternalTransfers() public {
         vm.recordLogs();
 
@@ -362,15 +362,15 @@ contract NiaraSettlementTest is Test {
             }
         }
 
-        assertTrue(settledIndex != type(uint256).max, "Settled nao emitido");
-        assertTrue(firstTransferIndex != type(uint256).max, "nenhum Transfer emitido");
+        assertTrue(settledIndex != type(uint256).max, "Settled not emitted");
+        assertTrue(firstTransferIndex != type(uint256).max, "no Transfer emitted");
         assertLt(settledIndex, firstTransferIndex);
         assertEq(settledIndex, 0);
     }
 
-    /// @notice Reentrância cruzada a partir de um token de pagamento com hook: a chamada
-    /// reentrante morre no guard (que é o primeiro modifier) antes mesmo do controle de
-    /// acesso, e a liquidação legítima conclui com estado íntegro.
+    /// @notice Cross-function reentrancy from a payment token with a hook: the re-entrant
+    /// call dies at the guard (the first modifier) even before access control, and the
+    /// legitimate settlement completes with consistent state.
     function test_Settle_CrossFunctionReentrancyFromHookIsBlockedByGuard() public {
         MaliciousHookToken evilPayment = new MaliciousHookToken();
         evilPayment.mint(buyer, 1_000_000e6);
@@ -378,8 +378,8 @@ contract NiaraSettlementTest is Test {
         vm.prank(buyer);
         evilPayment.approve(address(settlement), type(uint256).max);
 
-        // O token hostil NÃO recebe SETTLEMENT_OPERATOR_ROLE: se `nonReentrant` não fosse o
-        // primeiro modifier, o erro observado seria o de controle de acesso.
+        // The hostile token does NOT get SETTLEMENT_OPERATOR_ROLE: if `nonReentrant` were not
+        // the first modifier, the observed error would be the access-control one.
         evilPayment.armOnTransferFrom(
             address(settlement),
             abi.encodeWithSelector(
@@ -401,7 +401,7 @@ contract NiaraSettlementTest is Test {
             _selectorOf(evilPayment.reentrantReturnData()) != IAccessControl.AccessControlUnauthorizedAccount.selector
         );
 
-        // Apenas a liquidação legítima moveu valor — a reentrante não moveu nada.
+        // Only the legitimate settlement moved value; the re-entrant one moved nothing.
         assertEq(feeCharged, 5e6);
         assertEq(assetToken.balanceOf(seller), sellerAssetBefore - 10 ether);
         assertEq(assetToken.balanceOf(buyer), 10 ether);
@@ -451,7 +451,7 @@ contract NiaraSettlementTest is Test {
         assertEq(assetToken.balanceOf(buyer), 10 ether);
     }
 
-    // ── Guardas de endereço zero ───────────────────────────────────────────────────────
+    // ── Zero address guards ────────────────────────────────────────────────────────────
 
     function test_Constructor_RevertsForZeroAdmin() public {
         vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
@@ -481,12 +481,12 @@ contract NiaraSettlementTest is Test {
         settlement.proposeSetCashbackDistributor(address(0));
     }
 
-    // ── Guarda defensiva de teto (redundante ao teto já checado em propose) ───────────
+    // ── Defensive cap guard (redundant with the cap already checked in propose) ────────
 
-    /// @notice `executeSetFeeBps` valida o teto ANTES de consumir a proposta pendente —
-    /// esse guard dispara mesmo sem nenhuma `proposeSetFeeBps` ter sido feita (que já
-    /// bloquearia o agendamento de um valor acima do teto). Chamado diretamente para
-    /// cobrir essa checagem defensiva, hoje inalcançável pelo fluxo normal propose→execute.
+    /// @notice `executeSetFeeBps` validates the cap BEFORE consuming the pending proposal;
+    /// this guard fires even without any `proposeSetFeeBps` having been made (which would
+    /// already block scheduling a value above the cap). Called directly to cover this
+    /// defensive check, currently unreachable through the normal propose→execute flow.
     function test_ExecuteSetFeeBps_DefensiveCapCheck_RevertsWithoutNeedingProposal() public {
         uint16 tooHigh = settlement.MAX_FEE_BPS() + 1;
         vm.prank(admin);

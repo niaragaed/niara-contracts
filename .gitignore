@@ -1,4 +1,4 @@
-# Segredos — nunca commitar
+# Secrets: never commit
 .env
 *.pem
 *.key
@@ -12,7 +12,7 @@ broadcast/
 lcov.info
 *.lock.json
 
-# Node (caso ferramentas auxiliares sejam adicionadas)
+# Node (in case helper tools are added)
 node_modules/
 
 # Editor / OS
@@ -20,3 +20,7 @@ node_modules/
 .idea/
 .DS_Store
 Thumbs.db
+
+# local Claude Code state; only the shared settings are versioned
+/.claude/*
+!/.claude/settings.json

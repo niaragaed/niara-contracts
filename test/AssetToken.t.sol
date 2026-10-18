@@ -8,12 +8,12 @@ import {MockBackingGateway} from "./mocks/MockBackingGateway.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
-// NOTA IMPORTANTE SOBRE OS TESTES: `token.ALGO_ROLE()` é uma chamada externa (staticcall).
-// Se ela aparecer na mesma linha, como argumento, de uma chamada logo após um
-// vm.prank/vm.expectRevert destinado a OUTRA chamada, ela "rouba" o prank/expectRevert —
-// o cheatcode se aplica à primeiríssima chamada externa seguinte, não à chamada que
-// visualmente parece ser a testada. Por isso todo bytes32 de papel é resolvido uma única
-// vez em variáveis no setUp, fora de qualquer prank, e reutilizado nos testes.
+// IMPORTANT NOTE ABOUT THESE TESTS: `token.SOME_ROLE()` is an external call (staticcall).
+// If it appears on the same line, as an argument, of a call right after a
+// vm.prank/vm.expectRevert meant for ANOTHER call, it "steals" the prank/expectRevert:
+// the cheatcode applies to the very next external call, not to the call that
+// visually looks like the one under test. That is why every role bytes32 is resolved once
+// into variables in setUp, outside any prank, and reused in the tests.
 contract AssetTokenTest is Test {
     AssetToken public token;
     MockBackingGateway public gateway;
@@ -57,7 +57,7 @@ contract AssetTokenTest is Test {
         _grantRole(burnerRole, burner);
     }
 
-    // ── Helpers de governança com timelock ────────────────────────────────────────────
+    // ── Timelocked governance helpers ─────────────────────────────────────────────────
 
     function _setBackingGateway(address newGateway) internal {
         vm.prank(admin);
@@ -110,7 +110,7 @@ contract AssetTokenTest is Test {
         assertFalse(fund.cashbackEligible());
     }
 
-    // ── Invariante de lastro no mint ───────────────────────────────────────────────────
+    // ── Backing invariant on mint ─────────────────────────────────────────────────────
 
     function test_Mint_RevertsWithoutBackingGatewaySet() public {
         AssetToken freshToken = new AssetToken(
@@ -130,7 +130,7 @@ contract AssetTokenTest is Test {
     }
 
     function test_Mint_RevertsWhenNoAttestation() public {
-        // totalAttested nunca foi setado (fica em zero) — mint de qualquer quantidade > 0 deve reverter.
+        // totalAttested was never set (stays at zero), so minting any amount > 0 must revert.
         vm.prank(minter);
         vm.expectRevert(abi.encodeWithSelector(AssetToken.MintExceedsAttestedBacking.selector, 1 ether, 0));
         token.mint(alice, 1 ether);
@@ -197,7 +197,7 @@ contract AssetTokenTest is Test {
     }
 
     function test_Pause_ByCustodianRole() public {
-        // admin também detém CUSTODIAN_ROLE por padrão neste setUp
+        // admin also holds CUSTODIAN_ROLE by default in this setUp
         vm.prank(admin);
         token.pause();
         assertTrue(token.paused());
@@ -284,8 +284,8 @@ contract AssetTokenTest is Test {
     }
 
     function test_ExecuteSetIssuerWallet_RevertsForZeroAddress() public {
-        // Defesa em profundidade: mesmo sem proposta válida possível para address(0), a
-        // execução revalida o endereço antes de qualquer efeito.
+        // Defense in depth: even though no valid proposal is possible for address(0), the
+        // execution revalidates the address before any effect.
         vm.prank(admin);
         vm.expectRevert(AssetToken.ZeroAddress.selector);
         token.executeSetIssuerWallet(address(0));
@@ -314,8 +314,8 @@ contract AssetTokenTest is Test {
     }
 
     function test_ExecuteSetBackingGateway_RevertsForZeroAddress() public {
-        // Defesa em profundidade: idem `executeSetIssuerWallet` — um address(0) executado
-        // faria todo `mint` reverter até nova proposta cumprir o timelock inteiro.
+        // Defense in depth: same as `executeSetIssuerWallet`; an executed address(0)
+        // would make every `mint` revert until a new proposal went through the whole timelock.
         vm.prank(admin);
         vm.expectRevert(AssetToken.ZeroAddress.selector);
         token.executeSetBackingGateway(address(0));
@@ -323,7 +323,7 @@ contract AssetTokenTest is Test {
         assertEq(token.backingGateway(), address(gateway));
     }
 
-    // ── Papéis: grantRole/revokeRole diretos desabilitados ────────────────────────────
+    // ── Roles: direct grantRole/revokeRole disabled ───────────────────────────────────
 
     function test_DirectGrantRole_AlwaysReverts() public {
         vm.prank(admin);

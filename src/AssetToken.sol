@@ -7,15 +7,15 @@ import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol"
 import {IBackingGateway} from "./interfaces/IBackingGateway.sol";
 
 /// @title AssetToken
-/// @notice ERC-20 representando um ativo real tokenizado, com lastro 1:1 sob custódia
-/// regulada. Nunca é cunhado além do lastro atestado por um BackingGateway (ver
-/// invariante em `mint`).
-/// @dev A moeda de origem/emissão do ativo tokenizado não é definida aqui — este contrato
-/// representa o ativo em si (ex.: uma ação, ETF, commodity ou moeda tokenizada), não uma
-/// posição de liquidação. Usa 18 casas decimais (padrão ERC-20), suficiente para frações do
-/// ativo subjacente.
+/// @notice ERC-20 representing a tokenized real-world asset, backed 1:1 under regulated
+/// custody. It is never minted beyond the backing attested by a BackingGateway (see the
+/// invariant in `mint`).
+/// @dev The tokenized asset's origin/issuance currency is not defined here: this contract
+/// represents the asset itself (e.g. a tokenized stock, ETF, commodity or currency), not a
+/// settlement position. It uses 18 decimals (ERC-20 standard), enough for fractions of the
+/// underlying asset.
 contract AssetToken is ERC20, Pausable, TimelockedAccessControl {
-    /// @notice Classe do ativo representado por este token.
+    /// @notice Class of the asset represented by this token.
     enum AssetClass {
         EQUITY,
         ETF,
@@ -29,28 +29,28 @@ contract AssetToken is ERC20, Pausable, TimelockedAccessControl {
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant CUSTODIAN_ROLE = keccak256("CUSTODIAN_ROLE");
 
-    /// @notice Ticker/ISIN ou outra referência do ativo real subjacente.
+    /// @notice Ticker/ISIN or other reference of the underlying real-world asset.
     string public assetReference;
 
-    /// @notice Classe do ativo (imutável — corporate actions que mudem a classe exigem
-    /// um novo AssetToken, não uma migração deste).
+    /// @notice Asset class (immutable: corporate actions that change the class require
+    /// a new AssetToken, not a migration of this one).
     AssetClass public immutable assetClass;
 
-    /// @notice País de origem do ativo (ex.: "US", "BR").
+    /// @notice Asset's country of origin (e.g. "US", "BR").
     string public countryOfOrigin;
 
-    /// @notice Verdadeiro para EQUITY e ETF — CURRENCY, COMMODITY e FUND nunca são
-    /// elegíveis a cashback ao emissor (imutável, decorre da classe do ativo).
+    /// @notice True for EQUITY and ETF. CURRENCY, COMMODITY and FUND are never
+    /// eligible for issuer cashback (immutable, derived from the asset class).
     bool public immutable cashbackEligible;
 
-    /// @notice Carteira da empresa emissora, destinatária do cashback. Alterável apenas
-    /// pelo admin, sujeito a timelock.
+    /// @notice Wallet of the issuing company, recipient of the cashback. Changeable only
+    /// by the admin, subject to the timelock.
     address public issuerWallet;
 
-    /// @notice Endereço do BackingGateway autorizado a atestar lastro para este token.
-    /// `mint` consulta `totalAttested` deste endereço a cada chamada — trocar este
-    /// endereço é tão sensível quanto trocar o próprio critério de lastro, por isso
-    /// também é sujeito a timelock.
+    /// @notice Address of the BackingGateway authorized to attest backing for this token.
+    /// `mint` reads `totalAttested` from this address on every call, so changing this
+    /// address is as sensitive as changing the backing criterion itself; that is why it
+    /// is also subject to the timelock.
     address public backingGateway;
 
     event Minted(address indexed to, uint256 amount, uint256 totalAttestedAtMint);
@@ -65,16 +65,16 @@ contract AssetToken is ERC20, Pausable, TimelockedAccessControl {
     error BackingGatewayNotSet();
     error NotAuthorizedToPause();
 
-    /// @param name_ Nome do token (ex.: "Apple Inc. — Niara Tokenized Equity").
-    /// @param symbol_ Símbolo do token (ex.: "nAAPL").
-    /// @param assetReference_ Ticker/ISIN do ativo real.
-    /// @param assetClass_ Classe do ativo.
-    /// @param countryOfOrigin_ País de origem do ativo.
-    /// @param issuerWallet_ Carteira inicial da empresa emissora.
-    /// @param admin_ Titular inicial de DEFAULT_ADMIN_ROLE, PAUSER_ROLE e CUSTODIAN_ROLE
-    /// (recomendado: um multisig).
-    /// @param timelockDelay_ Atraso inicial (segundos) entre proposta e execução de
-    /// mudanças sensíveis.
+    /// @param name_ Token name (e.g. "Apple Inc. — Niara Tokenized Equity").
+    /// @param symbol_ Token symbol (e.g. "nAAPL").
+    /// @param assetReference_ Ticker/ISIN of the real-world asset.
+    /// @param assetClass_ Asset class.
+    /// @param countryOfOrigin_ Asset's country of origin.
+    /// @param issuerWallet_ Initial wallet of the issuing company.
+    /// @param admin_ Initial holder of DEFAULT_ADMIN_ROLE, PAUSER_ROLE and CUSTODIAN_ROLE
+    /// (recommended: a multisig).
+    /// @param timelockDelay_ Initial delay (seconds) between proposal and execution of
+    /// sensitive changes.
     constructor(
         string memory name_,
         string memory symbol_,
@@ -101,12 +101,12 @@ contract AssetToken is ERC20, Pausable, TimelockedAccessControl {
         _grantRole(CUSTODIAN_ROLE, admin_);
     }
 
-    /// @notice Cunha `amount` de tokens para `to`, desde que o total emitido resultante
-    /// não exceda o lastro atestado pelo BackingGateway configurado.
-    /// @dev Esta checagem é estrutural: mesmo que MINTER_ROLE seja concedido a um endereço
-    /// diferente do BackingGateway "oficial", ainda assim é impossível cunhar além do que o
-    /// BackingGateway configurado reporta como atestado — a trava vive neste contrato, não
-    /// apenas no controle de acesso de quem chama.
+    /// @notice Mints `amount` tokens to `to`, as long as the resulting total supply
+    /// does not exceed the backing attested by the configured BackingGateway.
+    /// @dev This check is structural: even if MINTER_ROLE is granted to an address other
+    /// than the "official" BackingGateway, it is still impossible to mint beyond what the
+    /// configured BackingGateway reports as attested. The lock lives in this contract, not
+    /// only in the caller's access control.
     function mint(address to, uint256 amount) external onlyRole(MINTER_ROLE) whenNotPaused {
         if (backingGateway == address(0)) revert BackingGatewayNotSet();
         uint256 attested = IBackingGateway(backingGateway).totalAttested(address(this));
@@ -116,16 +116,16 @@ contract AssetToken is ERC20, Pausable, TimelockedAccessControl {
         emit Minted(to, amount, attested);
     }
 
-    /// @notice Queima `amount` de tokens de `from`. Usado pelo BackingGateway no caminho
-    /// de resgate, após a liberação do ativo real ser atestada.
+    /// @notice Burns `amount` tokens from `from`. Used by the BackingGateway on the
+    /// redemption path, after the release of the real-world asset is attested.
     function burn(address from, uint256 amount) external onlyRole(BURNER_ROLE) {
         _burn(from, amount);
         emit Burned(from, amount);
     }
 
-    /// @notice Pausa transferências, mint e burn. PAUSER_ROLE ou CUSTODIAN_ROLE podem
-    /// acionar — o custodiante, que enxerga o estado real da custódia, pode travar o
-    /// token imediatamente ao detectar um problema, sem esperar o admin.
+    /// @notice Pauses transfers, mint and burn. PAUSER_ROLE or CUSTODIAN_ROLE can
+    /// trigger it: the custodian, who sees the real state of custody, can lock the
+    /// token immediately when it detects a problem, without waiting for the admin.
     function pause() external {
         if (!hasRole(PAUSER_ROLE, msg.sender) && !hasRole(CUSTODIAN_ROLE, msg.sender)) {
             revert NotAuthorizedToPause();
@@ -133,9 +133,9 @@ contract AssetToken is ERC20, Pausable, TimelockedAccessControl {
         _pause();
     }
 
-    /// @notice Remove a pausa. Decisão deliberada: apenas PAUSER_ROLE (governança), nunca
-    /// CUSTODIAN_ROLE sozinho — travar é uma ação unilateral de emergência, destravar exige
-    /// o processo de governança normal.
+    /// @notice Removes the pause. Deliberate decision: only PAUSER_ROLE (governance), never
+    /// CUSTODIAN_ROLE alone. Locking is a unilateral emergency action; unlocking requires
+    /// the normal governance process.
     function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
     }
@@ -151,9 +151,10 @@ contract AssetToken is ERC20, Pausable, TimelockedAccessControl {
         emit IssuerWalletChangeProposed(newIssuerWallet, executeAfter);
     }
 
-    /// @notice Executa uma proposta de mudança da carteira do emissor após o timelock.
-    /// @dev Revalida o endereço aqui, e não apenas na proposta: um `address(0)` executado
-    /// travaria o destino do cashback até uma nova proposta cumprir o timelock inteiro.
+    /// @notice Executes a proposed issuer wallet change after the timelock.
+    /// @dev Revalidates the address here, not only at proposal time: an executed
+    /// `address(0)` would lock the cashback destination until a new proposal went through
+    /// the whole timelock.
     function executeSetIssuerWallet(address newIssuerWallet) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (newIssuerWallet == address(0)) revert ZeroAddress();
         bytes32 actionId = keccak256(abi.encode("SET_ISSUER_WALLET", newIssuerWallet));
@@ -174,10 +175,10 @@ contract AssetToken is ERC20, Pausable, TimelockedAccessControl {
         emit BackingGatewayChangeProposed(newBackingGateway, executeAfter);
     }
 
-    /// @notice Executa uma proposta de mudança do BackingGateway após o timelock.
-    /// @dev Revalida o endereço aqui, e não apenas na proposta: um `address(0)` executado
-    /// faria todo `mint` reverter com `BackingGatewayNotSet` até uma nova proposta cumprir
-    /// o timelock inteiro.
+    /// @notice Executes a proposed BackingGateway change after the timelock.
+    /// @dev Revalidates the address here, not only at proposal time: an executed
+    /// `address(0)` would make every `mint` revert with `BackingGatewayNotSet` until a new
+    /// proposal went through the whole timelock.
     function executeSetBackingGateway(address newBackingGateway) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (newBackingGateway == address(0)) revert ZeroAddress();
         bytes32 actionId = keccak256(abi.encode("SET_BACKING_GATEWAY", newBackingGateway));

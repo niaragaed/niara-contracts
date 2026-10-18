@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// @notice Mock de BackingGateway com `totalAttested` ajustável livremente, usado para
-/// isolar os testes de AssetToken da lógica real de BackingGateway.
+/// @notice BackingGateway mock with a freely adjustable `totalAttested`, used to
+/// isolate the AssetToken tests from the real BackingGateway logic.
 contract MockBackingGateway {
     mapping(address => uint256) public totalAttested;
 

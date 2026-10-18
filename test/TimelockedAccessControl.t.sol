@@ -104,7 +104,7 @@ contract TimelockedAccessControlTest is Test {
         vm.prank(admin);
         harness.cancelAction(actionId);
 
-        // Depois de cancelada, a mesma proposta pode ser refeita sem reverter.
+        // After cancellation, the same proposal can be made again without reverting.
         vm.prank(admin);
         harness.proposeSetTimelockDelay(newDelay);
     }
@@ -129,8 +129,8 @@ contract TimelockedAccessControlTest is Test {
     }
 
     function test_RenounceRole_DoesNotRequireTimelock() public {
-        // renounceRole segue liberado sem timelock: abrir mão do próprio papel é seguro e
-        // pode precisar ser imediato numa emergência.
+        // renounceRole stays available without a timelock: giving up your own role is safe and
+        // may need to be immediate in an emergency.
         vm.prank(admin);
         harness.renounceRole(DEFAULT_ADMIN_ROLE, admin);
         assertFalse(harness.hasRole(DEFAULT_ADMIN_ROLE, admin));

@@ -1,0 +1,44 @@
+# Fails when a commit or a pull request description credits an AI tool (Co-Authored-By/Claude-Session
+# trailers, an AI author/committer, "Generated with Claude Code" footers). See "No AI attribution" in
+# CLAUDE.md.
+name: No AI attribution
+
+on:
+  push:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Commit history (messages, authors, committers)
+        run: |
+          pattern='co-authored-by:.*(claude|anthropic)|claude-session:|generated (with|by) \[?claude|claude\.ai/code|noreply@anthropic\.com'
+          found=0
+          if git log --format='%B' HEAD | grep -inE "$pattern"; then found=1; fi
+          if git log --format='%h author=%an <%ae> committer=%cn <%ce>' HEAD \
+              | grep -iE '(author|committer)=claude <|anthropic\.com>'; then found=1; fi
+          if [ "$found" = 1 ]; then
+            echo "::error::A commit credits an AI tool. Remove the trailer/footer and use the project identity (git config user.name/user.email)."
+            exit 1
+          fi
+
+      - name: Pull request title and description
+        if: github.event_name == 'pull_request'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s\n%s\n' "$TITLE" "$BODY" | grep -inE 'generated (with|by) \[?claude|claude\.ai/code|co-authored-by:.*(claude|anthropic)'; then
+            echo "::error::The pull request description credits an AI tool. Edit it on GitHub and remove that line."
+            exit 1
+          fi

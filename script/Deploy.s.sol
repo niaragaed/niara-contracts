@@ -10,26 +10,26 @@ import {MockUSDT} from "../test/mocks/MockUSDT.sol";
 import {MockWBTC} from "../test/mocks/MockWBTC.sol";
 
 /// @title DeployNiara
-/// @notice Script de deploy em DUAS FASES — reflete a exigência real de timelock do
-/// protocolo (`TimelockedAccessControl.MIN_TIMELOCK_DELAY` = 1h): não há atalho para pular
-/// essa espera, nem em testnet (ver CLAUDE.md, "Mudanças em papéis... passam pelo timelock").
+/// @notice TWO-PHASE deploy script. It reflects the protocol's real timelock
+/// requirement (`TimelockedAccessControl.MIN_TIMELOCK_DELAY` = 1h): there is no shortcut
+/// to skip that wait, not even on testnet (see CLAUDE.md, "Role changes... go through the timelock").
 ///
-/// FASE 1 — `run()`: implanta os quatro contratos + mocks de USDT/WBTC e AGENDA (propose)
-/// toda a fiação sensível entre eles (papéis e `backingGateway`). Sempre seguro de
-/// transmitir — não depende de nenhum tempo ter decorrido.
+/// PHASE 1, `run()`: deploys the four contracts + USDT/WBTC mocks and SCHEDULES (propose)
+/// all the sensitive wiring between them (roles and `backingGateway`). Always safe to
+/// broadcast: it does not depend on any time having passed.
 ///
-/// FASE 2 — `executeWiring()`: CONSOME (execute) as propostas da fase 1. Só pode ser
-/// transmitida com sucesso depois que `TIMELOCK_DELAY` segundos realmente decorrerem
-/// on-chain a partir da fase 1 — não há como simular essa espera contra uma rede real.
-/// Lê os endereços implantados na fase 1 de variáveis de ambiente `DEPLOYED_*`.
+/// PHASE 2, `executeWiring()`: CONSUMES (execute) the phase 1 proposals. It can only be
+/// broadcast successfully after `TIMELOCK_DELAY` seconds have really passed on-chain
+/// since phase 1; there is no way to simulate that wait against a real network.
+/// It reads the addresses deployed in phase 1 from `DEPLOYED_*` environment variables.
 ///
-/// Todos os parâmetros vêm de variáveis de ambiente — nenhum valor sensível ou específico
-/// de rede fica hardcoded neste arquivo.
+/// All parameters come from environment variables: no sensitive or network-specific
+/// value is hardcoded in this file.
 contract DeployNiara is Script {
     uint256 internal constant DEFAULT_TIMELOCK_DELAY = 1 hours;
 
-    /// @dev Agrupada em struct para evitar "stack too deep" em `run()` — um único ponteiro
-    /// de memória em vez de uma dezena de variáveis simultâneas na stack.
+    /// @dev Grouped in a struct to avoid "stack too deep" in `run()`: a single memory
+    /// pointer instead of a dozen simultaneous stack variables.
     struct Config {
         address admin;
         address operator;
@@ -66,8 +66,8 @@ contract DeployNiara is Script {
         _logWiringInstructions(cfg.timelockDelay);
     }
 
-    /// @notice FASE 2 — executa a fiação agendada em `run()`. Só transmita depois que
-    /// `TIMELOCK_DELAY` segundos tiverem realmente decorrido desde a fase 1.
+    /// @notice PHASE 2: executes the wiring scheduled in `run()`. Only broadcast after
+    /// `TIMELOCK_DELAY` seconds have really passed since phase 1.
     function executeWiring() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
@@ -91,7 +91,7 @@ contract DeployNiara is Script {
 
         vm.stopBroadcast();
 
-        console2.log("Fiacao concluida: papeis concedidos e backingGateway configurado.");
+        console2.log("Wiring complete: roles granted and backingGateway configured.");
     }
 
     // ── Fase 1: helpers ─────────────────────────────────────────────────────────────────
@@ -126,8 +126,8 @@ contract DeployNiara is Script {
         distributor = new CashbackDistributor(cfg.admin, cfg.timelockDelay);
         settlement = new NiaraSettlement(cfg.admin, address(distributor), cfg.timelockDelay);
         gateway = new BackingGateway(cfg.admin, cfg.timelockDelay);
-        // AssetClass fixada em EQUITY: o script de demonstração (Demo.s.sol) depende de um
-        // ativo elegível a cashback para exercitar o passo "cashback creditado".
+        // AssetClass fixed to EQUITY: the demo script (Demo.s.sol) needs a cashback-eligible
+        // asset to exercise the "cashback credited" step.
         assetToken = new AssetToken(
             cfg.assetName,
             cfg.assetSymbol,
@@ -140,9 +140,9 @@ contract DeployNiara is Script {
         );
     }
 
-    /// @dev Agenda (propose) toda a fiação sensível. `cfg.admin` precisa assinar estas
-    /// chamadas — por isso ADMIN_ADDRESS deve corresponder ao endereço de PRIVATE_KEY, a
-    /// menos que a fase 2 seja transmitida por outra carteira que também assine por `admin`.
+    /// @dev Schedules (propose) all the sensitive wiring. `cfg.admin` must sign these
+    /// calls, so ADMIN_ADDRESS must match the PRIVATE_KEY address, unless phase 2 is
+    /// broadcast by another wallet that also signs as `admin`.
     function _proposeWiring(
         CashbackDistributor distributor,
         NiaraSettlement settlement,
@@ -167,7 +167,7 @@ contract DeployNiara is Script {
         console2.log("Operator:", cfg.operator);
         console2.log("Custodian:", cfg.custodian);
         console2.log("Issuer wallet:", cfg.issuerWallet);
-        console2.log("Timelock delay (segundos):", cfg.timelockDelay);
+        console2.log("Timelock delay (seconds):", cfg.timelockDelay);
     }
 
     function _logDeployedAddresses(
@@ -179,7 +179,7 @@ contract DeployNiara is Script {
         AssetToken assetToken
     ) internal pure {
         console2.log("");
-        console2.log("== Enderecos implantados (copie para o .env local antes da fase 2) ==");
+        console2.log("== Deployed addresses (copy into your local .env before phase 2) ==");
         console2.log(string.concat("DEPLOYED_USDT_ADDRESS=", vm.toString(address(usdt))));
         console2.log(string.concat("DEPLOYED_WBTC_ADDRESS=", vm.toString(address(wbtc))));
         console2.log(string.concat("DEPLOYED_DISTRIBUTOR_ADDRESS=", vm.toString(address(distributor))));
@@ -190,12 +190,12 @@ contract DeployNiara is Script {
     }
 
     function _logWiringInstructions(uint256 timelockDelay) internal pure {
-        console2.log("== Proximo passo ==");
+        console2.log("== Next step ==");
         console2.log(
             string.concat(
-                "Papeis e backingGateway agendados (propose). Espere ",
+                "Roles and backingGateway scheduled (propose). Wait ",
                 vm.toString(timelockDelay),
-                " segundos e rode a fase 2:"
+                 " seconds and run phase 2:"
             )
         );
         console2.log('forge script script/Deploy.s.sol --sig "executeWiring()" --rpc-url sepolia --broadcast');

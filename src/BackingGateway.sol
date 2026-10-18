@@ -8,20 +8,20 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol";
 import {IAssetToken} from "./interfaces/IAssetToken.sol";
 
-// Este contrato NÃO executa ordens em bolsa. Ele registra pedidos e atestações.
-// A execução é responsabilidade de agente off-chain autorizado.
-// A recompra de ações pela própria companhia emissora é atividade regulada e NÃO
-// está implementada aqui — o modelo assume aquisição em mercado por custodiante.
+// This contract does NOT execute exchange orders. It records requests and attestations.
+// Execution is the responsibility of an authorized off-chain agent.
+// Share buybacks by the issuing company itself are a regulated activity and are NOT
+// implemented here: the model assumes market acquisition by a custodian.
 
 /// @title BackingGateway
-/// @notice Coordena on-chain o processo de lastro de um AssetToken. Nenhum smart contract
-/// consegue executar ordens em bolsa tradicional — este contrato apenas registra pedidos
-/// (`requestBacking`) e atestações de um custodiante autorizado (`attestBacking`), e só
-/// então libera a cunhagem (`mintAttested`). O caminho inverso (`redemptionRequest` /
-/// `redemptionAttest`) queima o token e libera o ativo real.
-/// @dev `totalAttested[asset]` é a fonte da verdade que o próprio AssetToken consulta em
-/// `mint` para impor `totalSupply <= totalAtestado`. Este contrato deve deter MINTER_ROLE e
-/// BURNER_ROLE no(s) AssetToken(s) que coordena.
+/// @notice Coordinates an AssetToken's backing process on-chain. No smart contract can
+/// execute orders on a traditional exchange: this contract only records requests
+/// (`requestBacking`) and attestations from an authorized custodian (`attestBacking`), and
+/// only then allows minting (`mintAttested`). The reverse path (`redemptionRequest` /
+/// `redemptionAttest`) burns the token and releases the real-world asset.
+/// @dev `totalAttested[asset]` is the source of truth that the AssetToken itself reads in
+/// `mint` to enforce `totalSupply <= totalAttested`. This contract must hold MINTER_ROLE and
+/// BURNER_ROLE on the AssetToken(s) it coordinates.
 contract BackingGateway is TimelockedAccessControl, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -54,7 +54,7 @@ contract BackingGateway is TimelockedAccessControl, Pausable, ReentrancyGuard {
         RequestStatus status;
     }
 
-    /// @notice Total atestado (em custódia) por ativo. Teto rígido para `AssetToken.mint`.
+    /// @notice Total attested (in custody) per asset. Hard cap for `AssetToken.mint`.
     mapping(address asset => uint256) public totalAttested;
 
     mapping(uint256 => BackingRequest) public backingRequests;
@@ -85,11 +85,11 @@ contract BackingGateway is TimelockedAccessControl, Pausable, ReentrancyGuard {
         _grantRole(PAUSER_ROLE, admin_);
     }
 
-    // ── Lastro (emissão) ────────────────────────────────────────────────────────────────
+    // ── Backing (issuance) ──────────────────────────────────────────────────────────────
 
-    /// @notice Registra um pedido de aquisição de lastro para `asset`. Emite um evento a
-    /// ser consumido por um agente off-chain autorizado, que executa a compra no mercado
-    /// tradicional. Não move nenhum fundo on-chain.
+    /// @notice Records a request to acquire backing for `asset`. Emits an event to be
+    /// consumed by an authorized off-chain agent, which executes the purchase on the
+    /// traditional market. Moves no funds on-chain.
     function requestBacking(address asset, uint256 quantity)
         external
         onlyRole(OPERATOR_ROLE)
@@ -113,9 +113,9 @@ contract BackingGateway is TimelockedAccessControl, Pausable, ReentrancyGuard {
         emit BackingRequested(requestId, asset, quantity, msg.sender);
     }
 
-    /// @notice Confirma que o ativo foi adquirido e está em custódia. Só CUSTODIAN_ROLE
-    /// pode chamar. Aumenta `totalAttested[asset]` em `quantityAcquired` — o teto que
-    /// `AssetToken.mint` respeita.
+    /// @notice Confirms the asset was acquired and is in custody. Only CUSTODIAN_ROLE
+    /// can call it. Increases `totalAttested[asset]` by `quantityAcquired`, the cap that
+    /// `AssetToken.mint` respects.
     function attestBacking(uint256 requestId, bytes32 proofHash, uint256 quantityAcquired)
         external
         onlyRole(CUSTODIAN_ROLE)
@@ -136,28 +136,28 @@ contract BackingGateway is TimelockedAccessControl, Pausable, ReentrancyGuard {
         emit BackingAttested(requestId, req.asset, proofHash, quantityAcquired);
     }
 
-    /// @notice Cunha, para `to`, a quantidade atestada de um pedido já SETTLED. Só pode
-    /// ocorrer uma vez por pedido. A trava definitiva contra emissão sem lastro vive em
-    /// `AssetToken.mint`, não aqui — esta função apenas evita cunhar duas vezes o mesmo
-    /// pedido.
+    /// @notice Mints to `to` the attested quantity of a request that is already SETTLED.
+    /// Can happen only once per request. The definitive lock against unbacked issuance lives
+    /// in `AssetToken.mint`, not here; this function only prevents minting the same
+    /// request twice.
     function mintAttested(uint256 requestId, address to) external nonReentrant onlyRole(OPERATOR_ROLE) whenNotPaused {
         if (to == address(0)) revert ZeroAddress();
         BackingRequest storage req = backingRequests[requestId];
         if (req.status != RequestStatus.SETTLED) revert RequestNotSettled(requestId);
         if (req.minted) revert AlreadyMinted(requestId);
 
-        // Checks-effects-interactions: `minted` e o evento são gravados ANTES do mint.
-        // Se o AssetToken tiver hook (ERC-777/ERC-1363) e reentrar em outra função deste
-        // contrato durante `mint`, essa reentrância já lê `minted == true` — não existe
-        // janela em que o pedido apareça como não cunhado enquanto a cunhagem corre.
+        // Checks-effects-interactions: `minted` and the event are written BEFORE the mint.
+        // If the AssetToken has a hook (ERC-777/ERC-1363) and re-enters another function of this
+        // contract during `mint`, that re-entry already reads `minted == true`: there is no
+        // window in which the request appears unminted while minting is in progress.
         req.minted = true;
         emit BackingMinted(requestId, req.asset, to, req.quantityAcquired);
 
         IAssetToken(req.asset).mint(to, req.quantityAcquired);
     }
 
-    /// @notice Cancela um pedido de lastro ainda pendente. Nenhum fundo foi movido nesta
-    /// etapa, então cancelar é apenas uma mudança de status.
+    /// @notice Cancels a backing request that is still pending. No funds were moved at
+    /// this stage, so cancelling is just a status change.
     function cancelBackingRequest(uint256 requestId) external onlyRole(OPERATOR_ROLE) {
         BackingRequest storage req = backingRequests[requestId];
         if (req.status != RequestStatus.PENDING) revert RequestNotPending(requestId);
@@ -167,10 +167,10 @@ contract BackingGateway is TimelockedAccessControl, Pausable, ReentrancyGuard {
 
     // ── Resgate (queima) ────────────────────────────────────────────────────────────────
 
-    /// @notice Qualquer detentor pode solicitar o resgate dos próprios tokens pelo ativo
-    /// real. Os tokens ficam custodiados por este contrato (não são queimados ainda) até a
-    /// atestação da liberação do ativo real, para permitir cancelamento caso a liberação
-    /// off-chain não se concretize.
+    /// @notice Any holder can request redemption of their own tokens for the real-world
+    /// asset. The tokens are held in custody by this contract (not burned yet) until the
+    /// release of the real-world asset is attested, to allow cancellation if the off-chain
+    /// release does not happen.
     function redemptionRequest(address asset, uint256 quantity) external nonReentrant whenNotPaused returns (uint256 requestId) {
         if (asset == address(0)) revert ZeroAddress();
         if (quantity == 0) revert ZeroQuantity();
@@ -189,17 +189,17 @@ contract BackingGateway is TimelockedAccessControl, Pausable, ReentrancyGuard {
         emit RedemptionRequested(requestId, asset, msg.sender, quantity);
     }
 
-    /// @notice Confirma que o ativo real foi liberado off-chain. Só então os tokens
-    /// custodiados são queimados e `totalAttested[asset]` é reduzido na mesma quantidade.
+    /// @notice Confirms the real-world asset was released off-chain. Only then are the
+    /// custodied tokens burned and `totalAttested[asset]` reduced by the same quantity.
     function redemptionAttest(uint256 requestId, bytes32 proofHash) external nonReentrant onlyRole(CUSTODIAN_ROLE) whenNotPaused {
         RedemptionRequest storage req = redemptionRequests[requestId];
         if (req.status != RequestStatus.PENDING) revert RequestNotPending(requestId);
 
-        // Checks-effects-interactions: status final, prova e `totalAttested` são gravados
-        // e o evento emitido ANTES da queima. Uma reentrância vinda de um hook do
-        // AssetToken durante `burn` já encontra o pedido em SETTLED — `cancelRedemptionRequest`,
-        // por exemplo, reverte com `RequestNotPending` em vez de devolver tokens de um
-        // resgate que está sendo liquidado.
+        // Checks-effects-interactions: final status, proof and `totalAttested` are written
+        // and the event emitted BEFORE the burn. A re-entry from an AssetToken hook during
+        // `burn` already finds the request SETTLED; `cancelRedemptionRequest`, for example,
+        // reverts with `RequestNotPending` instead of returning tokens from a redemption that
+        // is being settled.
         req.status = RequestStatus.SETTLED;
         req.proofHash = proofHash;
         totalAttested[req.asset] -= req.quantity;
@@ -208,24 +208,24 @@ contract BackingGateway is TimelockedAccessControl, Pausable, ReentrancyGuard {
         IAssetToken(req.asset).burn(address(this), req.quantity);
     }
 
-    /// @notice Cancela um pedido de resgate pendente e devolve os tokens custodiados ao
-    /// solicitante — usado quando a liberação off-chain do ativo real não pôde ocorrer.
+    /// @notice Cancels a pending redemption request and returns the custodied tokens to
+    /// the requester. Used when the off-chain release of the real-world asset could not happen.
     function cancelRedemptionRequest(uint256 requestId) external nonReentrant onlyRole(CUSTODIAN_ROLE) {
         RedemptionRequest storage req = redemptionRequests[requestId];
         if (req.status != RequestStatus.PENDING) revert RequestNotPending(requestId);
 
-        // Checks-effects-interactions: status CANCELLED e evento são gravados ANTES da
-        // devolução dos tokens custodiados. Se `req.asset` tiver hook (ERC-777/ERC-1363) e
-        // reentrar em outra função deste contrato durante o transfer, essa reentrância já
-        // encontra o pedido em CANCELLED — `redemptionAttest`, por exemplo, reverte com
-        // `RequestNotPending` em vez de queimar tokens de um resgate já cancelado.
+        // Checks-effects-interactions: CANCELLED status and the event are written BEFORE the
+        // custodied tokens are returned. If `req.asset` has a hook (ERC-777/ERC-1363) and
+        // re-enters another function of this contract during the transfer, that re-entry already
+        // finds the request CANCELLED; `redemptionAttest`, for example, reverts with
+        // `RequestNotPending` instead of burning tokens from an already cancelled redemption.
         req.status = RequestStatus.CANCELLED;
         emit RedemptionRequestCancelled(requestId, req.requester, req.quantity);
 
         IERC20(req.asset).safeTransfer(req.requester, req.quantity);
     }
 
-    // ── Emergência ──────────────────────────────────────────────────────────────────────
+    // ── Emergency ───────────────────────────────────────────────────────────────────────
 
     /// @notice Pausa requestBacking, attestBacking, mintAttested e redemptionRequest.
     function pause() external onlyRole(PAUSER_ROLE) {
