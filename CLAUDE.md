@@ -6,6 +6,8 @@ any code.
 This repository is **separate** from `niara-site` (Niara's institutional site). Do not
 look for or reference files from that project here.
 
+**Multichain exchange:** `EXCHANGE-MULTICHAIN-DESIGN.md` is the source of truth for the multichain exchange (listing, issuance, settlement, P2P escrow) on EVM and Solana.
+
 ---
 
 ## ⚠️ Financial contracts: safety above everything
