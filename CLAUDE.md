@@ -7,6 +7,9 @@ This repository is **separate** from `niara-site` (Niara's institutional site). 
 look for or reference files from that project here.
 
 **Multichain exchange:** `EXCHANGE-MULTICHAIN-DESIGN.md` is the source of truth for the multichain exchange (listing, issuance, settlement, P2P escrow) on EVM and Solana.
+It is a tracked **copy** of the spec in the Solana repo (`github.com/niaragaed/niara-exchange-solana`):
+keep it tracked here, sync it from there, and send EVM-side edits (e.g. §4.1 and the
+"EVM vs Solana differences" table in §4.2) back to that repo so the two copies don't drift.
 
 ---
 
@@ -61,7 +64,7 @@ other way around.
   *do not* grant the role to the hostile contract, so they only pass if the observed
   error is `ReentrancyGuardReentrantCall` and not `AccessControlUnauthorizedAccount`.
 
-The four functions with external calls follow this pattern, each with a code comment
+The five functions with external calls follow this pattern, each with a code comment
 explaining why:
 
 - `NiaraSettlement.settle`: `emit Settled` before the three `safeTransferFrom`.
@@ -71,6 +74,8 @@ explaining why:
   `totalAttested` and `emit RedemptionAttested` before `IAssetToken.burn`.
 - `BackingGateway.cancelRedemptionRequest`: `CANCELLED` status and
   `emit RedemptionRequestCancelled` before the `safeTransfer` that returns the tokens.
+- `ListingRegistry.approveIssuance`: batch `Executed`, `resolvedAt` and
+  `emit IssuanceExecuted` before `NativeAssetToken.mint`.
 
 **Each one has a log-order test locking in the regression** (`vm.recordLogs` +
 `assertLt` between the event index and the first `Transfer` index). Do not remove or
@@ -80,7 +85,9 @@ weaken these tests when changing those functions:
 - `test_MintAttested_EmitsBackingMintedBeforeExternalTransfer`
 - `test_RedemptionAttest_EmitsRedemptionAttestedBeforeExternalTransfer`
 - `test_CancelRedemptionRequest_EmitsCancelledBeforeExternalTransfer`
-  (the last three in `test/BackingGateway.t.sol`)
+  (these three in `test/BackingGateway.t.sol`)
+- `test_ApproveIssuance_EmitsIssuanceExecutedBeforeExternalTransfer`
+  (`test/ListingRegistry.t.sol`)
 
 When adding a new function with an external call, add the equivalent order test. To
 simulate the hostile asset, use `test/mocks/MaliciousHookToken.sol`, which **records**
