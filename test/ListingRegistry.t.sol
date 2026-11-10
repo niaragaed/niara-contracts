@@ -9,6 +9,7 @@ import {IListingRegistry} from "../src/interfaces/IListingRegistry.sol";
 import {TimelockedAccessControl} from "../src/governance/TimelockedAccessControl.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract ListingRegistryTest is Test {
     ListingRegistry public registry;
@@ -882,6 +883,120 @@ contract ListingRegistryTest is Test {
         assertEq(equity.totalSupply(), 20 ether);
         assertEq(uint8(_batchStatus(first)), uint8(ListingRegistry.IssuanceStatus.Rejected));
         assertEq(uint8(_batchStatus(second)), uint8(ListingRegistry.IssuanceStatus.Executed));
+    }
+
+    // ── Pause (spec §3.3 "Pause principle") ────────────────────────────────────────────
+
+    function _pause() internal {
+        vm.prank(admin);
+        registry.pause();
+    }
+
+    function test_Pause_AdminHoldsPauserRole() public view {
+        assertTrue(registry.hasRole(registry.PAUSER_ROLE(), admin));
+        assertFalse(registry.hasRole(registry.PAUSER_ROLE(), authority));
+        assertFalse(registry.paused());
+    }
+
+    function test_Pause_OnlyPauserRole() public {
+        bytes32 pauserRole = registry.PAUSER_ROLE();
+        vm.prank(authority);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, authority, pauserRole)
+        );
+        registry.pause();
+    }
+
+    function test_Unpause_OnlyPauserRole() public {
+        _pause();
+        bytes32 pauserRole = registry.PAUSER_ROLE();
+        vm.prank(issuer);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, issuer, pauserRole)
+        );
+        registry.unpause();
+    }
+
+    function test_Pause_RevertsWhenAlreadyPaused() public {
+        _pause();
+        vm.prank(admin);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        registry.pause();
+    }
+
+    function test_Unpause_RevertsWhenNotPaused() public {
+        vm.prank(admin);
+        vm.expectRevert(Pausable.ExpectedPause.selector);
+        registry.unpause();
+    }
+
+    function test_ApproveIssuance_BlockedWhilePaused_ResumesAfterUnpause() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        uint256 batchNo = _requestIssuance(10 ether);
+        _pause();
+
+        vm.prank(authority);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        registry.approveIssuance(address(equity), batchNo);
+        assertEq(equity.totalSupply(), 0);
+
+        vm.prank(admin);
+        registry.unpause();
+        vm.prank(authority);
+        registry.approveIssuance(address(equity), batchNo);
+        assertEq(equity.totalSupply(), 10 ether);
+    }
+
+    /// @notice Modifier order: access control is checked before the pause, so a caller
+    /// without the role gets the access-control error even while paused.
+    function test_ApproveIssuance_WhilePaused_RoleCheckedFirst() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        uint256 batchNo = _requestIssuance(10 ether);
+        _pause();
+
+        vm.prank(issuer);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, issuer, listingAuthorityRole)
+        );
+        registry.approveIssuance(address(equity), batchNo);
+    }
+
+    /// @notice Check order mirrors Solana: batch status before listing status.
+    function test_ApproveIssuance_BatchCheckedBeforeListing() public {
+        _toStatus(IListingRegistry.ListingStatus.Pending);
+        vm.prank(authority);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.BatchNotRequested.selector, address(equity), 5));
+        registry.approveIssuance(address(equity), 5);
+    }
+
+    /// @notice Everything that does not mint stays available while paused: listing
+    /// actions, requestIssuance, rejectIssuance, and holder burns.
+    function test_Pause_DoesNotBlockNonMintingActions() public {
+        // Seed a balance before pausing so a burn can be tried.
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        uint256 minted = _requestIssuance(10 ether);
+        vm.prank(authority);
+        registry.approveIssuance(address(equity), minted);
+
+        _pause();
+
+        uint256 toReject = _requestIssuance(1 ether);
+        _reject(toReject);
+        _suspend(address(equity));
+        _approve(address(equity));
+
+        NativeAssetToken bond = _create(issuer, IListingRegistry.AssetClass.FixedIncome);
+        _submit(bond);
+        _delist(address(bond));
+        vm.prank(authority);
+        registry.listCurrency(address(usdt));
+
+        vm.prank(investor);
+        equity.burnWithReason(1 ether, NativeAssetToken.BurnReason.Redemption, keccak256("r"));
+
+        assertTrue(registry.paused());
+        assertEq(equity.totalSupply(), 9 ether);
+        assertTrue(registry.isApproved(address(usdt)));
     }
 
     /// @notice Full native lifecycle at registry level: issue, list, request, approve,

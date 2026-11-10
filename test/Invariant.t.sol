@@ -183,7 +183,7 @@ contract InvariantTest is Test {
     }
 
     function _handlerSelectors() internal pure returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](18);
+        selectors = new bytes4[](19);
         selectors[0] = Handler.requestBacking.selector;
         selectors[1] = Handler.attestBacking.selector;
         selectors[2] = Handler.mintAttested.selector;
@@ -202,6 +202,7 @@ contract InvariantTest is Test {
         selectors[15] = Handler.approveIssuance.selector;
         selectors[16] = Handler.burnNative.selector;
         selectors[17] = Handler.rejectIssuance.selector;
+        selectors[18] = Handler.toggleRegistryPause.selector;
     }
 
     function _grantRoleOn(address target, bytes32 role, address account) internal {
@@ -303,6 +304,12 @@ contract InvariantTest is Test {
             seededNativeBondSupply + handler.ghost_nativeIssued(address(nativeBond))
                 - handler.ghost_nativeBurned(address(nativeBond))
         );
+    }
+
+    /// @notice No batch executes unless the listing is Approved and the registry is not
+    /// paused (spec invariant 11, second half).
+    function invariant_NoIssuanceWhilePausedOrNotApproved() public view {
+        assertEq(handler.ghost_illegalIssuances(), 0);
     }
 
     /// @notice Delisted is final: once delisted, a token never leaves that status.

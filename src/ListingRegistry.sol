@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol";
 import {IListingRegistry} from "./interfaces/IListingRegistry.sol";
@@ -24,11 +25,18 @@ import {NativeAssetToken} from "./NativeAssetToken.sol";
 /// Issuance: the registry is the only minter of every factory token. The issuer requests a
 /// batch (`requestIssuance`), the listing authority approves it (`approveIssuance`) and the
 /// registry mints it, so neither the issuer nor Niara can mint alone.
+///
+/// Pause (spec §3.3, "Pause principle"): while paused, only `approveIssuance` is blocked,
+/// since minting is the highest-impact action there is. Listing actions, `requestIssuance`
+/// and `rejectIssuance` (neither mints) stay available.
 /// @dev Role changes (including LISTING_AUTHORITY_ROLE) go through the inherited
 /// timelock. Status changes and issuance approvals are operational and take effect
-/// immediately, like the Solana `approve_listing` / `suspend_listing` / `delist`.
-contract ListingRegistry is IListingRegistry, TimelockedAccessControl, ReentrancyGuard {
+/// immediately, like the Solana `approve_listing` / `suspend_listing` / `delist`. Pause is
+/// not timelocked: a circuit breaker must act immediately. Unlike Solana's single
+/// `Config.paused`, this pause covers the registry only; NiaraSettlement has its own.
+contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable, ReentrancyGuard {
     bytes32 public constant LISTING_AUTHORITY_ROLE = keccak256("LISTING_AUTHORITY_ROLE");
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
     enum IssuanceStatus {
         None,
@@ -91,7 +99,7 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
     error BatchNotRequested(address token, uint256 batchNo);
     error EmptyDocHash();
 
-    /// @param admin_ Holder of DEFAULT_ADMIN_ROLE (role changes, timelock).
+    /// @param admin_ Holder of DEFAULT_ADMIN_ROLE (role changes, timelock) and PAUSER_ROLE.
     /// @param listingAuthority_ Initial holder of LISTING_AUTHORITY_ROLE.
     /// @param timelockDelay_ Delay (seconds) between proposal and execution of role changes.
     constructor(address admin_, address listingAuthority_, uint256 timelockDelay_)
@@ -100,7 +108,20 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
         if (admin_ == address(0) || listingAuthority_ == address(0)) revert ZeroAddress();
         factory = new AssetTokenFactory(address(this));
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
+        _grantRole(PAUSER_ROLE, admin_);
         _grantRole(LISTING_AUTHORITY_ROLE, listingAuthority_);
+    }
+
+    // ── Pause ───────────────────────────────────────────────────────────────────────────
+
+    /// @notice Pauses issuance execution (`approveIssuance`) in an emergency.
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+
+    /// @notice Removes the pause.
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
     }
 
     // ── Listings ────────────────────────────────────────────────────────────────────────
@@ -235,17 +256,20 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
     }
 
     /// @notice The listing authority approves a requested batch and the registry mints it.
-    /// Executable only while the listing is `Approved`.
+    /// Executable only while the listing is `Approved` and the registry is not paused.
+    /// @dev Check order mirrors Solana's `approve_issuance`: pause, then batch status, then
+    /// listing status.
     /// @param token Factory token.
     /// @param batchNo Batch to approve.
     function approveIssuance(address token, uint256 batchNo)
         external
         nonReentrant
         onlyRole(LISTING_AUTHORITY_ROLE)
+        whenNotPaused
     {
-        if (_listings[token].status != ListingStatus.Approved) revert ListingNotApproved(token);
         IssuanceBatch storage batch = issuanceBatches[token][batchNo];
         if (batch.status != IssuanceStatus.Requested) revert BatchNotRequested(token, batchNo);
+        if (_listings[token].status != ListingStatus.Approved) revert ListingNotApproved(token);
 
         // Checks-effects-interactions: the batch is marked executed and `IssuanceExecuted` is
         // emitted before the mint call, so the batch can never be minted twice and an

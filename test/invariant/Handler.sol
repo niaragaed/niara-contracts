@@ -76,6 +76,10 @@ contract Handler is Test {
     /// @notice True once a token has been delisted (Delisted must then be permanent).
     mapping(address token => bool) public ghost_everDelisted;
 
+    /// @notice Batches executed while the registry was paused or the listing was not
+    /// Approved. Must stay zero (spec invariant 11, second half).
+    uint256 public ghost_illegalIssuances;
+
     /// @notice Historical sum of fees recorded in the CashbackDistributor, per settlement
     /// currency (never decreases).
     mapping(address paymentToken => uint256) public ghost_sumFeesRecorded;
@@ -424,6 +428,11 @@ contract Handler is Test {
         vm.prank(listingAuthority);
         registry.approveIssuance(address(token), batchNo);
         ghost_nativeIssued[address(token)] += amount;
+        // Reached only if approveIssuance did not revert: record any execution that
+        // happened while paused or on a non-Approved listing (must never happen).
+        bool listingApproved =
+            registry.getListing(address(token)).status == IListingRegistry.ListingStatus.Approved;
+        if (registry.paused() || !listingApproved) ghost_illegalIssuances++;
     }
 
     /// @notice The listing authority rejects a batch (existing or not, open or resolved).
@@ -507,6 +516,17 @@ contract Handler is Test {
             settlement.unpause();
         } else {
             settlement.pause();
+        }
+    }
+
+    /// @notice Toggles the ListingRegistry pause (blocks approveIssuance only).
+    function toggleRegistryPause() external {
+        bool isPaused = registry.paused();
+        vm.prank(admin);
+        if (isPaused) {
+            registry.unpause();
+        } else {
+            registry.pause();
         }
     }
 
