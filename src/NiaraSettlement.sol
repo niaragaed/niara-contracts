@@ -7,12 +7,19 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol";
 import {ICashbackDistributor} from "./interfaces/ICashbackDistributor.sol";
+import {IListingRegistry} from "./interfaces/IListingRegistry.sol";
 
 /// @title NiaraSettlement
 /// @notice Atomic settlement between buyer and seller: in the same transaction it moves the
 /// AssetToken from seller to buyer, the payment (USDT or WBTC) from buyer to seller, and
 /// retains the protocol fee, in the settlement currency itself, with no swap, no DEX and
 /// no oracle. Any failure reverts everything.
+///
+/// Order-book mode only: the asset must have an `Approved` `Equity` listing and the payment
+/// token an `Approved` `Currency` listing in the ListingRegistry
+/// (EXCHANGE-MULTICHAIN-DESIGN.md, section 1). Every transfer is checked by balance delta,
+/// so a token that delivers less than requested (fee-on-transfer) can never break
+/// `paymentAmount == sellerProceeds + feeCharged`.
 /// @dev Never holds the parties' balances: it works entirely through `allowance`, moving only
 /// the exact amount of each execution. `settle` is restricted to SETTLEMENT_OPERATOR_ROLE:
 /// although moving funds depends only on allowance, letting any address trigger settlements
@@ -36,6 +43,10 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
     /// @notice Contract that receives the fee and credits cashback to the issuer when eligible.
     ICashbackDistributor public cashbackDistributor;
 
+    /// @notice Registry that decides which assets and payment tokens can settle. Immutable:
+    /// replacing it means deploying a new NiaraSettlement.
+    IListingRegistry public immutable listingRegistry;
+
     event Settled(
         address indexed assetToken,
         address indexed paymentToken,
@@ -55,12 +66,23 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
     error ZeroAmount();
     error FeeExceedsCap(uint16 feeBps);
     error PaymentAmountTooSmallForFeePrecision();
+    error AssetListingNotApproved(address assetToken);
+    error AssetNotEquity(address assetToken);
+    error PaymentTokenNotApprovedCurrency(address paymentToken);
+    error TransferAmountMismatch(address token, uint256 expected, uint256 received);
 
-    constructor(address admin_, address cashbackDistributor_, uint256 timelockDelay_)
+    /// @param admin_ Holder of DEFAULT_ADMIN_ROLE and PAUSER_ROLE.
+    /// @param cashbackDistributor_ CashbackDistributor that receives the fee.
+    /// @param listingRegistry_ ListingRegistry that gates which assets and currencies settle.
+    /// @param timelockDelay_ Delay (seconds) between proposal and execution of sensitive changes.
+    constructor(address admin_, address cashbackDistributor_, address listingRegistry_, uint256 timelockDelay_)
         TimelockedAccessControl(timelockDelay_)
     {
-        if (admin_ == address(0) || cashbackDistributor_ == address(0)) revert ZeroAddress();
+        if (admin_ == address(0) || cashbackDistributor_ == address(0) || listingRegistry_ == address(0)) {
+            revert ZeroAddress();
+        }
         cashbackDistributor = ICashbackDistributor(cashbackDistributor_);
+        listingRegistry = IListingRegistry(listingRegistry_);
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(PAUSER_ROLE, admin_);
@@ -88,6 +110,17 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         if (buyer == seller) revert BuyerEqualsSeller();
         if (assetAmount == 0 || paymentAmount == 0) revert ZeroAmount();
 
+        // Trading mode is fixed by asset class: only Approved Equity listings settle here
+        // (FixedIncome/Credit/Currency trade P2P), and only against an Approved Currency.
+        IListingRegistry.Listing memory assetListing = listingRegistry.getListing(assetToken);
+        if (assetListing.status != IListingRegistry.ListingStatus.Approved) revert AssetListingNotApproved(assetToken);
+        if (assetListing.assetClass != IListingRegistry.AssetClass.Equity) revert AssetNotEquity(assetToken);
+        IListingRegistry.Listing memory paymentListing = listingRegistry.getListing(paymentToken);
+        if (
+            paymentListing.status != IListingRegistry.ListingStatus.Approved
+                || paymentListing.assetClass != IListingRegistry.AssetClass.Currency
+        ) revert PaymentTokenNotApprovedCurrency(paymentToken);
+
         feeCharged = (paymentAmount * feeBps) / BPS_DENOMINATOR;
         // If the fee is active (feeBps > 0), tiny amounts cannot truncate the fee to
         // zero; otherwise one could trade fee-free with small enough amounts.
@@ -103,15 +136,28 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         // event is the only effect to order here.
         emit Settled(assetToken, paymentToken, buyer, seller, assetAmount, paymentAmount, feeCharged);
 
-        IERC20(assetToken).safeTransferFrom(seller, buyer, assetAmount);
-        IERC20(paymentToken).safeTransferFrom(buyer, seller, sellerProceeds);
+        _safeTransferFromExact(IERC20(assetToken), seller, buyer, assetAmount);
+        _safeTransferFromExact(IERC20(paymentToken), buyer, seller, sellerProceeds);
         if (feeCharged > 0) {
-            IERC20(paymentToken).safeTransferFrom(buyer, address(cashbackDistributor), feeCharged);
+            _safeTransferFromExact(IERC20(paymentToken), buyer, address(cashbackDistributor), feeCharged);
             // `recordFee` comes after the transfer out of necessity: the distributor accounts
             // for a fee that must already be in its balance. Any failure here reverts the whole
             // transaction, including the event above.
             cashbackDistributor.recordFee(assetToken, paymentToken, feeCharged);
         }
+    }
+
+    /// @dev `safeTransferFrom` plus a balance-delta check on the receiver: reverts unless
+    /// `to` received exactly `amount`. Each leg is measured on its own (balance read right
+    /// before and right after its transfer), so legs that share a receiver cannot mask each
+    /// other. `balanceOf` is a view call (STATICCALL), so the reads cannot emit or change
+    /// state and do not affect the checks-effects-interactions order above.
+    function _safeTransferFromExact(IERC20 token, address from, address to, uint256 amount) private {
+        uint256 balanceBefore = token.balanceOf(to);
+        token.safeTransferFrom(from, to, amount);
+        uint256 balanceAfter = token.balanceOf(to);
+        uint256 received = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0;
+        if (received != amount) revert TransferAmountMismatch(address(token), amount, received);
     }
 
     /// @notice Proposes a new fee (bps). Subject to the immutable cap `MAX_FEE_BPS` and to the timelock.

@@ -6,6 +6,7 @@ import {AssetToken} from "../src/AssetToken.sol";
 import {BackingGateway} from "../src/BackingGateway.sol";
 import {NiaraSettlement} from "../src/NiaraSettlement.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
+import {ListingRegistry} from "../src/ListingRegistry.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {MockWBTC} from "./mocks/MockWBTC.sol";
 import {Handler} from "./invariant/Handler.sol";
@@ -21,11 +22,13 @@ contract InvariantTest is Test {
     BackingGateway public gateway;
     NiaraSettlement public settlement;
     CashbackDistributor public distributor;
+    ListingRegistry public registry;
     MockUSDT public usdt;
     MockWBTC public wbtc;
     Handler public handler;
 
     address public admin = makeAddr("admin");
+    address public listingAuthority = makeAddr("listingAuthority");
     address public issuerEquity = makeAddr("issuerEquity");
     address public issuerCommodity = makeAddr("issuerCommodity");
     address public operator = makeAddr("operator");
@@ -42,7 +45,8 @@ contract InvariantTest is Test {
 
     function _deployContracts() internal {
         distributor = new CashbackDistributor(admin, TIMELOCK_DELAY);
-        settlement = new NiaraSettlement(admin, address(distributor), TIMELOCK_DELAY);
+        registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
+        settlement = new NiaraSettlement(admin, address(distributor), address(registry), TIMELOCK_DELAY);
         gateway = new BackingGateway(admin, TIMELOCK_DELAY);
         assetEquity = new AssetToken(
             "Apple Inc. - Niara Tokenized Equity",

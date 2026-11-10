@@ -5,8 +5,12 @@ import {Test, Vm} from "forge-std/Test.sol";
 import {NiaraSettlement} from "../src/NiaraSettlement.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
 import {AssetToken} from "../src/AssetToken.sol";
-import {TimelockedAccessControl} from "../src/governance/TimelockedAccessControl.sol";
+import {ListingRegistry} from "../src/ListingRegistry.sol";
+import {AssetTokenFactory} from "../src/AssetTokenFactory.sol";
+import {NativeAssetToken} from "../src/NativeAssetToken.sol";
+import {IListingRegistry} from "../src/interfaces/IListingRegistry.sol";
 import {MockBackingGateway} from "./mocks/MockBackingGateway.sol";
+import {MockFeeOnTransferToken} from "./mocks/MockFeeOnTransferToken.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {MockWBTC} from "./mocks/MockWBTC.sol";
 import {MaliciousReentrantToken} from "./mocks/MaliciousReentrantToken.sol";
@@ -19,18 +23,20 @@ import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.so
 contract NiaraSettlementTest is Test {
     NiaraSettlement public settlement;
     CashbackDistributor public distributor;
-    AssetToken public assetToken;
-    MockBackingGateway public gateway;
+    ListingRegistry public registry;
+    NativeAssetToken public assetToken;
     MockUSDT public usdt;
     MockWBTC public wbtc;
 
     address public admin = makeAddr("admin");
+    address public listingAuthority = makeAddr("listingAuthority");
     address public issuer = makeAddr("issuer");
     address public operator = makeAddr("operator");
     address public buyer = makeAddr("buyer");
     address public seller = makeAddr("seller");
 
     uint256 public constant TIMELOCK_DELAY = 2 days;
+    bytes32 public constant DOC_HASH = keccak256("acme-offering-document");
 
     bytes32 public settlementOperatorRole;
     bytes32 public pauserRole;
@@ -38,7 +44,8 @@ contract NiaraSettlementTest is Test {
 
     function setUp() public {
         distributor = new CashbackDistributor(admin, TIMELOCK_DELAY);
-        settlement = new NiaraSettlement(admin, address(distributor), TIMELOCK_DELAY);
+        registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
+        settlement = new NiaraSettlement(admin, address(distributor), address(registry), TIMELOCK_DELAY);
 
         settlementOperatorRole = settlement.SETTLEMENT_OPERATOR_ROLE();
         pauserRole = settlement.PAUSER_ROLE();
@@ -47,27 +54,14 @@ contract NiaraSettlementTest is Test {
         _distributorGrantRole(settlementRoleOnDistributor, address(settlement));
         _settlementGrantRole(settlementOperatorRole, operator);
 
-        gateway = new MockBackingGateway();
-        assetToken = new AssetToken(
-            "Apple Inc. - Niara Tokenized Equity",
-            "nAAPL",
-            "AAPL",
-            AssetToken.AssetClass.EQUITY,
-            "US",
-            issuer,
-            admin,
-            TIMELOCK_DELAY
-        );
-        bytes32 assetMinterRole = assetToken.MINTER_ROLE();
-        _assetTokenGrantRole(assetMinterRole, admin);
-        _assetTokenSetBackingGateway(address(gateway));
-        gateway.setTotalAttested(address(assetToken), 1_000_000 ether);
-
-        vm.prank(admin);
-        assetToken.mint(seller, 1_000 ether);
+        // Native Equity instrument: issued by the issuer, listed, approved, and a 1,000-unit
+        // batch issued to the seller through the registry.
+        assetToken = _issueListedNative(IListingRegistry.AssetClass.Equity, seller, 1_000 ether);
 
         usdt = new MockUSDT();
         wbtc = new MockWBTC();
+        _listCurrency(address(usdt));
+        _listCurrency(address(wbtc));
         usdt.mint(buyer, 1_000_000e6);
         wbtc.mint(buyer, 1_000e8);
 
@@ -97,20 +91,32 @@ contract NiaraSettlementTest is Test {
         distributor.executeGrantRole(role, account);
     }
 
-    function _assetTokenGrantRole(bytes32 role, address account) internal {
-        vm.prank(admin);
-        assetToken.proposeGrantRole(role, account);
-        vm.warp(block.timestamp + TIMELOCK_DELAY);
-        vm.prank(admin);
-        assetToken.executeGrantRole(role, account);
+    // ── Listing helpers ────────────────────────────────────────────────────────────────
+
+    /// @dev Creates a native instrument, submits and approves its listing, and issues
+    /// `amount` to `to` through an approved batch.
+    function _issueListedNative(IListingRegistry.AssetClass assetClass, address to, uint256 amount)
+        internal
+        returns (NativeAssetToken token)
+    {
+        // Resolve the factory BEFORE the prank: `registry.factory()` is itself an external
+        // call and would consume it (see the note at the top of test/AssetToken.t.sol).
+        AssetTokenFactory factory = registry.factory();
+        vm.prank(issuer);
+        token = NativeAssetToken(factory.createAssetToken("Acme Corp", "ACME", assetClass, DOC_HASH));
+        vm.prank(issuer);
+        registry.submitListing(address(token));
+        vm.prank(listingAuthority);
+        registry.approveListing(address(token));
+        vm.prank(issuer);
+        uint256 batchId = registry.requestIssuance(address(token), amount, to, DOC_HASH);
+        vm.prank(listingAuthority);
+        registry.approveIssuance(address(token), batchId);
     }
 
-    function _assetTokenSetBackingGateway(address newGateway) internal {
-        vm.prank(admin);
-        assetToken.proposeSetBackingGateway(newGateway);
-        vm.warp(block.timestamp + TIMELOCK_DELAY);
-        vm.prank(admin);
-        assetToken.executeSetBackingGateway(newGateway);
+    function _listCurrency(address token) internal {
+        vm.prank(listingAuthority);
+        registry.listCurrency(token);
     }
 
     // ── Atomic settlement ──────────────────────────────────────────────────────────────
@@ -282,36 +288,38 @@ contract NiaraSettlementTest is Test {
 
     // ── Reentrancy ─────────────────────────────────────────────────────────────────────
 
-    function test_Settle_ReentrancyViaMaliciousAssetToken_Reverts() public {
-        MaliciousReentrantToken evilAsset = new MaliciousReentrantToken();
+    /// @notice The asset-side hook vector is closed structurally: a hostile asset token is
+    /// not a factory token, so it can never be listed, and `settle` rejects it at the listing
+    /// gate before any transfer (the hook never fires).
+    function test_Settle_MaliciousAssetTokenIsRejectedByListingGate() public {
+        MaliciousHookToken evilAsset = new MaliciousHookToken();
         evilAsset.mint(seller, 1_000 ether);
 
-        // Grants the operator role to the malicious contract itself, isolating the guarantee
-        // under test (nonReentrant) from the access-control check.
-        _settlementGrantRole(settlementOperatorRole, address(evilAsset));
+        vm.prank(issuer);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.NotFactoryToken.selector, address(evilAsset)));
+        registry.submitListing(address(evilAsset));
 
         vm.prank(seller);
         evilAsset.approve(address(settlement), type(uint256).max);
-
-        bytes memory reentrantCall = abi.encodeWithSelector(
-            settlement.settle.selector, address(evilAsset), address(usdt), buyer, seller, 10 ether, 1_000e6
+        evilAsset.armOnTransferFrom(
+            address(settlement),
+            abi.encodeWithSelector(
+                settlement.settle.selector, address(assetToken), address(usdt), buyer, seller, 1 ether, 100e6
+            )
         );
-        evilAsset.arm(address(settlement), reentrantCall);
-
-        uint256 sellerBalanceBefore = usdt.balanceOf(seller);
 
         vm.prank(operator);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(evilAsset)));
         settlement.settle(address(evilAsset), address(usdt), buyer, seller, 10 ether, 1_000e6);
 
-        // Nothing should have moved: the whole transaction reverted.
-        assertEq(usdt.balanceOf(seller), sellerBalanceBefore);
+        assertFalse(evilAsset.reentered());
         assertEq(evilAsset.balanceOf(buyer), 0);
     }
 
     function test_Settle_ReentrancyViaMaliciousPaymentToken_Reverts() public {
         MaliciousReentrantToken evilPayment = new MaliciousReentrantToken();
         evilPayment.mint(buyer, 1_000_000e6);
+        _listCurrency(address(evilPayment));
 
         _settlementGrantRole(settlementOperatorRole, address(evilPayment));
 
@@ -374,6 +382,7 @@ contract NiaraSettlementTest is Test {
     function test_Settle_CrossFunctionReentrancyFromHookIsBlockedByGuard() public {
         MaliciousHookToken evilPayment = new MaliciousHookToken();
         evilPayment.mint(buyer, 1_000_000e6);
+        _listCurrency(address(evilPayment));
 
         vm.prank(buyer);
         evilPayment.approve(address(settlement), type(uint256).max);
@@ -455,12 +464,270 @@ contract NiaraSettlementTest is Test {
 
     function test_Constructor_RevertsForZeroAdmin() public {
         vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
-        new NiaraSettlement(address(0), address(distributor), TIMELOCK_DELAY);
+        new NiaraSettlement(address(0), address(distributor), address(registry), TIMELOCK_DELAY);
     }
 
     function test_Constructor_RevertsForZeroCashbackDistributor() public {
         vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
-        new NiaraSettlement(admin, address(0), TIMELOCK_DELAY);
+        new NiaraSettlement(admin, address(0), address(registry), TIMELOCK_DELAY);
+    }
+
+    function test_Constructor_RevertsForZeroListingRegistry() public {
+        vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
+        new NiaraSettlement(admin, address(distributor), address(0), TIMELOCK_DELAY);
+    }
+
+    function test_Constructor_SetsListingRegistry() public view {
+        assertEq(address(settlement.listingRegistry()), address(registry));
+    }
+
+    // ── Listing gate: asset must be an Approved Equity listing ─────────────────────────
+
+    function test_Settle_RevertsForUnlistedAsset() public {
+        MockUSDT unlisted = new MockUSDT();
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(unlisted)));
+        settlement.settle(address(unlisted), address(usdt), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    function test_Settle_RevertsForPendingAsset() public {
+        AssetTokenFactory factory = registry.factory();
+        vm.prank(issuer);
+        address pending = factory.createAssetToken("Pending", "PND", IListingRegistry.AssetClass.Equity, DOC_HASH);
+        vm.prank(issuer);
+        registry.submitListing(pending);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, pending));
+        settlement.settle(pending, address(usdt), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    function test_Settle_RevertsForSuspendedAsset() public {
+        vm.prank(listingAuthority);
+        registry.suspendListing(address(assetToken));
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(assetToken)));
+        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    function test_Settle_ResumesAfterReapproval() public {
+        vm.prank(listingAuthority);
+        registry.suspendListing(address(assetToken));
+        vm.prank(listingAuthority);
+        registry.approveListing(address(assetToken));
+
+        vm.prank(operator);
+        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        assertEq(assetToken.balanceOf(buyer), 10 ether);
+    }
+
+    function test_Settle_RevertsForDelistedAsset() public {
+        vm.prank(listingAuthority);
+        registry.delist(address(assetToken));
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(assetToken)));
+        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    function test_Settle_RevertsForApprovedFixedIncome() public {
+        NativeAssetToken bond = _issueListedNative(IListingRegistry.AssetClass.FixedIncome, seller, 100 ether);
+        vm.prank(seller);
+        bond.approve(address(settlement), type(uint256).max);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetNotEquity.selector, address(bond)));
+        settlement.settle(address(bond), address(usdt), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    function test_Settle_RevertsForApprovedCredit() public {
+        NativeAssetToken loan = _issueListedNative(IListingRegistry.AssetClass.Credit, seller, 100 ether);
+        vm.prank(seller);
+        loan.approve(address(settlement), type(uint256).max);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetNotEquity.selector, address(loan)));
+        settlement.settle(address(loan), address(usdt), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    /// @notice An Approved Currency is not an order-book asset: USDT cannot be the "asset"
+    /// leg (Currency trades P2P), so it can never reach the cashback path through settle.
+    function test_Settle_RevertsForCurrencyAsAsset() public {
+        usdt.mint(seller, 1_000e6);
+        vm.prank(seller);
+        usdt.approve(address(settlement), type(uint256).max);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetNotEquity.selector, address(usdt)));
+        settlement.settle(address(usdt), address(wbtc), buyer, seller, 10e6, 1e8);
+        assertEq(distributor.cashbackBalance(address(usdt), address(wbtc)), 0);
+    }
+
+    /// @notice A backed AssetToken (BackingGateway path) is not a factory token, so it cannot
+    /// be listed and cannot settle in v1.
+    function test_Settle_RevertsForBackedAssetToken() public {
+        MockBackingGateway gateway = new MockBackingGateway();
+        AssetToken backed = new AssetToken(
+            "Apple Inc. - Niara Tokenized Equity",
+            "nAAPL",
+            "AAPL",
+            AssetToken.AssetClass.EQUITY,
+            "US",
+            issuer,
+            admin,
+            TIMELOCK_DELAY
+        );
+        gateway.setTotalAttested(address(backed), 1 ether);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(backed)));
+        settlement.settle(address(backed), address(usdt), buyer, seller, 1 ether, 1_000e6);
+    }
+
+    // ── Listing gate: payment token must be an Approved Currency listing ───────────────
+
+    function test_Settle_RevertsForUnlistedPaymentToken() public {
+        MockUSDT unlisted = new MockUSDT();
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(NiaraSettlement.PaymentTokenNotApprovedCurrency.selector, address(unlisted))
+        );
+        settlement.settle(address(assetToken), address(unlisted), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    function test_Settle_RevertsForSuspendedCurrency() public {
+        vm.prank(listingAuthority);
+        registry.suspendListing(address(usdt));
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.PaymentTokenNotApprovedCurrency.selector, address(usdt)));
+        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    function test_Settle_RevertsForDelistedCurrency() public {
+        vm.prank(listingAuthority);
+        registry.delist(address(usdt));
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.PaymentTokenNotApprovedCurrency.selector, address(usdt)));
+        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    /// @notice An Approved non-Currency listing (here another Equity) is not a valid
+    /// payment token.
+    function test_Settle_RevertsForApprovedEquityAsPaymentToken() public {
+        NativeAssetToken other = _issueListedNative(IListingRegistry.AssetClass.Equity, buyer, 1_000 ether);
+        vm.prank(buyer);
+        other.approve(address(settlement), type(uint256).max);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.PaymentTokenNotApprovedCurrency.selector, address(other)));
+        settlement.settle(address(assetToken), address(other), buyer, seller, 10 ether, 100 ether);
+    }
+
+    // ── Balance-delta check ────────────────────────────────────────────────────────────
+
+    /// @notice A listed fee-on-transfer payment token can never break
+    /// `paymentAmount == sellerProceeds + feeCharged`: the seller leg delivers less than
+    /// requested and the whole settlement reverts.
+    function test_Settle_RevertsForFeeOnTransferPaymentToken() public {
+        MockFeeOnTransferToken fot = new MockFeeOnTransferToken(100); // 1% burned per transfer
+        fot.mint(buyer, 1_000_000e6);
+        _listCurrency(address(fot));
+        vm.prank(buyer);
+        fot.approve(address(settlement), type(uint256).max);
+
+        uint256 paymentAmount = 1_000e6;
+        uint256 fee = (paymentAmount * settlement.feeBps()) / 10_000;
+        uint256 sellerProceeds = paymentAmount - fee;
+        uint256 delivered = sellerProceeds - (sellerProceeds * 100) / 10_000;
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                NiaraSettlement.TransferAmountMismatch.selector, address(fot), sellerProceeds, delivered
+            )
+        );
+        settlement.settle(address(assetToken), address(fot), buyer, seller, 10 ether, paymentAmount);
+
+        assertEq(fot.balanceOf(seller), 0);
+        assertEq(assetToken.balanceOf(buyer), 0);
+    }
+
+    /// @notice If a token leaves the receiver with a lower balance than before, the received
+    /// amount counts as zero and the settlement reverts.
+    function test_Settle_RevertsWhenReceiverBalanceDecreases() public {
+        MockFeeOnTransferToken shrink = new MockFeeOnTransferToken(0);
+        shrink.mint(buyer, 1_000_000e6);
+        shrink.mint(seller, 1_000_000e6);
+        shrink.setDrainReceiver(true);
+        _listCurrency(address(shrink));
+        vm.prank(buyer);
+        shrink.approve(address(settlement), type(uint256).max);
+
+        uint256 paymentAmount = 1_000e6;
+        uint256 sellerProceeds = paymentAmount - (paymentAmount * settlement.feeBps()) / 10_000;
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(NiaraSettlement.TransferAmountMismatch.selector, address(shrink), sellerProceeds, 0)
+        );
+        settlement.settle(address(assetToken), address(shrink), buyer, seller, 10 ether, paymentAmount);
+    }
+
+    /// @notice With `feeBps = 0` the fee leg is skipped and a fee-on-transfer token still
+    /// fails on the seller leg.
+    function test_Settle_FeeOnTransferRevertsEvenWithZeroFee() public {
+        _setFeeBps(0);
+        MockFeeOnTransferToken fot = new MockFeeOnTransferToken(50);
+        fot.mint(buyer, 1_000_000e6);
+        _listCurrency(address(fot));
+        vm.prank(buyer);
+        fot.approve(address(settlement), type(uint256).max);
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(NiaraSettlement.TransferAmountMismatch.selector, address(fot), 1_000e6, 995e6)
+        );
+        settlement.settle(address(assetToken), address(fot), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    /// @notice Fuzz: for any successful settlement, what the seller and the distributor
+    /// received sums exactly to `paymentAmount`.
+    function testFuzz_Settle_PaymentEqualsSellerPlusFee(uint256 paymentAmount, uint256 assetAmount) public {
+        paymentAmount = bound(paymentAmount, 200, 1_000_000e6); // 200 * 50 / 10000 = 1 (non-zero fee)
+        assetAmount = bound(assetAmount, 1, 1_000 ether);
+
+        uint256 sellerBefore = usdt.balanceOf(seller);
+        uint256 distributorBefore = usdt.balanceOf(address(distributor));
+        uint256 buyerBefore = usdt.balanceOf(buyer);
+
+        vm.prank(operator);
+        uint256 fee = settlement.settle(address(assetToken), address(usdt), buyer, seller, assetAmount, paymentAmount);
+
+        uint256 sellerGot = usdt.balanceOf(seller) - sellerBefore;
+        uint256 distributorGot = usdt.balanceOf(address(distributor)) - distributorBefore;
+        assertEq(sellerGot + distributorGot, paymentAmount);
+        assertEq(distributorGot, fee);
+        assertEq(buyerBefore - usdt.balanceOf(buyer), paymentAmount);
+        assertEq(assetToken.balanceOf(buyer), assetAmount);
+    }
+
+    /// @notice Cashback still flows to the native issuer through the unchanged distributor.
+    function test_Settle_CreditsCashbackToNativeIssuer() public {
+        vm.prank(operator);
+        uint256 fee = settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+
+        uint256 expectedCashback = (fee * distributor.cashbackBps()) / 10_000;
+        assertGt(expectedCashback, 0);
+        assertEq(distributor.cashbackBalance(address(assetToken), address(usdt)), expectedCashback);
+        // Currency listings never accrue cashback.
+        assertEq(distributor.cashbackBalance(address(usdt), address(usdt)), 0);
+
+        vm.prank(issuer);
+        distributor.withdraw(address(assetToken), address(usdt));
+        assertEq(usdt.balanceOf(issuer), expectedCashback);
     }
 
     function test_Settle_RevertsOnZeroBuyer() public {

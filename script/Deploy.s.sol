@@ -6,6 +6,7 @@ import {AssetToken} from "../src/AssetToken.sol";
 import {BackingGateway} from "../src/BackingGateway.sol";
 import {NiaraSettlement} from "../src/NiaraSettlement.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
+import {ListingRegistry} from "../src/ListingRegistry.sol";
 import {MockUSDT} from "../test/mocks/MockUSDT.sol";
 import {MockWBTC} from "../test/mocks/MockWBTC.sol";
 
@@ -124,7 +125,13 @@ contract DeployNiara is Script {
         wbtc = new MockWBTC();
 
         distributor = new CashbackDistributor(cfg.admin, cfg.timelockDelay);
-        settlement = new NiaraSettlement(cfg.admin, address(distributor), cfg.timelockDelay);
+        // NiaraSettlement now requires a ListingRegistry (admin also holds the listing
+        // authority here). This script predates the registry: `settle` with the backed
+        // AssetToken below reverts (it is not a factory token, so it cannot be listed).
+        // The v1 deploy scripts, with chainid guards, are rewritten in Week 2.
+        ListingRegistry registry = new ListingRegistry(cfg.admin, cfg.admin, cfg.timelockDelay);
+        console2.log(string.concat("DEPLOYED_LISTING_REGISTRY_ADDRESS=", vm.toString(address(registry))));
+        settlement = new NiaraSettlement(cfg.admin, address(distributor), address(registry), cfg.timelockDelay);
         gateway = new BackingGateway(cfg.admin, cfg.timelockDelay);
         // AssetClass fixed to EQUITY: the demo script (Demo.s.sol) needs a cashback-eligible
         // asset to exercise the "cashback credited" step.
