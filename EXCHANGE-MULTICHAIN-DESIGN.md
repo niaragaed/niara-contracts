@@ -561,7 +561,7 @@ both listing paths (§4.1), issuance batches numbered from 1 with
 | Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
 | Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, per-currency `FeeLedger`, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; no ledger accounts, no sweep | Pre-existing EVM distributor, unchanged |
 | Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; no pause | Pre-existing EVM distributor, unchanged |
-| Settlement timestamps on batches | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
+| Batch timestamps | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
 
 ---
 
