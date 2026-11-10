@@ -7,13 +7,17 @@ import {BackingGateway} from "../src/BackingGateway.sol";
 import {NiaraSettlement} from "../src/NiaraSettlement.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
 import {ListingRegistry} from "../src/ListingRegistry.sol";
+import {AssetTokenFactory} from "../src/AssetTokenFactory.sol";
+import {NativeAssetToken} from "../src/NativeAssetToken.sol";
+import {IListingRegistry} from "../src/interfaces/IListingRegistry.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {MockWBTC} from "./mocks/MockWBTC.sol";
 import {Handler} from "./invariant/Handler.sol";
 
 /// @notice Stateful fuzzing invariant tests (Foundry `invariant_*`): the `Handler`
 /// runs random sequences of request/attest/mint/burn (via redemptionAttest)/settle/
-/// redeem, triggered by different actors (operator, custodian, settlementOperator and three
+/// redeem, listing status changes and native issuance/burns, triggered by different actors
+/// (operator, custodian, settlementOperator, listing authority, native issuer and three
 /// traders), and the functions below check that the protocol's core invariants hold
 /// after EVERY call in the sequence, not only in hand-written scenarios.
 contract InvariantTest is Test {
@@ -23,12 +27,16 @@ contract InvariantTest is Test {
     NiaraSettlement public settlement;
     CashbackDistributor public distributor;
     ListingRegistry public registry;
+    NativeAssetToken public nativeEquity;
+    NativeAssetToken public nativeBond;
     MockUSDT public usdt;
     MockWBTC public wbtc;
+    MockUSDT public unlistedPayment;
     Handler public handler;
 
     address public admin = makeAddr("admin");
     address public listingAuthority = makeAddr("listingAuthority");
+    address public nativeIssuer = makeAddr("nativeIssuer");
     address public issuerEquity = makeAddr("issuerEquity");
     address public issuerCommodity = makeAddr("issuerCommodity");
     address public operator = makeAddr("operator");
@@ -36,6 +44,9 @@ contract InvariantTest is Test {
     address public settlementOperator = makeAddr("settlementOperator");
 
     uint256 public constant TIMELOCK_DELAY = 2 days;
+
+    uint256 public seededNativeEquitySupply;
+    uint256 public seededNativeBondSupply;
 
     function setUp() public {
         _deployContracts();
@@ -70,6 +81,49 @@ contract InvariantTest is Test {
         );
         usdt = new MockUSDT();
         wbtc = new MockWBTC();
+        unlistedPayment = new MockUSDT();
+
+        // Native instruments: one per trading mode. Resolve the factory before pranking.
+        AssetTokenFactory factory = registry.factory();
+        vm.prank(nativeIssuer);
+        nativeEquity = NativeAssetToken(
+            factory.createAssetToken("Acme Shares", "ACME", IListingRegistry.AssetClass.Equity, keccak256("acme"))
+        );
+        vm.prank(nativeIssuer);
+        nativeBond = NativeAssetToken(
+            factory.createAssetToken("Acme 2030 Bond", "ACME30", IListingRegistry.AssetClass.FixedIncome, keccak256("b"))
+        );
+    }
+
+    /// @dev Lists both native instruments (Approved) and both currencies, and seeds each
+    /// actor with an initial native batch so the fuzzer reaches productive settlements.
+    /// `unlistedPayment` is never listed.
+    function _listAndSeed(address[] memory actors) internal {
+        _submitAndApprove(nativeEquity);
+        _submitAndApprove(nativeBond);
+        vm.prank(listingAuthority);
+        registry.listCurrency(address(usdt));
+        vm.prank(listingAuthority);
+        registry.listCurrency(address(wbtc));
+
+        for (uint256 i = 0; i < actors.length; i++) {
+            _seedBatch(nativeEquity, actors[i], 1_000 ether);
+            _seedBatch(nativeBond, actors[i], 1_000 ether);
+        }
+    }
+
+    function _submitAndApprove(NativeAssetToken token) internal {
+        vm.prank(nativeIssuer);
+        registry.submitListing(address(token));
+        vm.prank(listingAuthority);
+        registry.approveListing(address(token));
+    }
+
+    function _seedBatch(NativeAssetToken token, address to, uint256 amount) internal {
+        vm.prank(nativeIssuer);
+        uint256 batchId = registry.requestIssuance(address(token), amount, to, keccak256("seed"));
+        vm.prank(listingAuthority);
+        registry.approveIssuance(address(token), batchId);
     }
 
     function _wireRoles() internal {
@@ -93,6 +147,10 @@ contract InvariantTest is Test {
         actors[1] = makeAddr("actor2");
         actors[2] = makeAddr("actor3");
 
+        _listAndSeed(actors);
+        seededNativeEquitySupply = nativeEquity.totalSupply();
+        seededNativeBondSupply = nativeBond.totalSupply();
+
         handler = new Handler(
             Handler.Config({
                 assetEquity: assetEquity,
@@ -107,6 +165,14 @@ contract InvariantTest is Test {
                 custodian: custodian,
                 settlementOperator: settlementOperator,
                 admin: admin
+            }),
+            Handler.NativeConfig({
+                registry: registry,
+                nativeEquity: nativeEquity,
+                nativeBond: nativeBond,
+                unlistedPayment: unlistedPayment,
+                listingAuthority: listingAuthority,
+                nativeIssuer: nativeIssuer
             })
         );
 
@@ -117,7 +183,7 @@ contract InvariantTest is Test {
     }
 
     function _handlerSelectors() internal pure returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](13);
+        selectors = new bytes4[](17);
         selectors[0] = Handler.requestBacking.selector;
         selectors[1] = Handler.attestBacking.selector;
         selectors[2] = Handler.mintAttested.selector;
@@ -131,6 +197,10 @@ contract InvariantTest is Test {
         selectors[10] = Handler.toggleGatewayPause.selector;
         selectors[11] = Handler.toggleSettlementPause.selector;
         selectors[12] = Handler.toggleAssetPause.selector;
+        selectors[13] = Handler.setListingStatus.selector;
+        selectors[14] = Handler.requestIssuance.selector;
+        selectors[15] = Handler.approveIssuance.selector;
+        selectors[16] = Handler.burnNative.selector;
     }
 
     function _grantRoleOn(address target, bytes32 role, address account) internal {
@@ -176,7 +246,79 @@ contract InvariantTest is Test {
     function invariant_SettlementNeverRetainsFunds() public view {
         assertEq(assetEquity.balanceOf(address(settlement)), 0);
         assertEq(assetCommodity.balanceOf(address(settlement)), 0);
+        assertEq(nativeEquity.balanceOf(address(settlement)), 0);
+        assertEq(nativeBond.balanceOf(address(settlement)), 0);
         assertEq(usdt.balanceOf(address(settlement)), 0);
         assertEq(wbtc.balanceOf(address(settlement)), 0);
+        assertEq(unlistedPayment.balanceOf(address(settlement)), 0);
+    }
+
+    // ── Listing invariants (EXCHANGE-MULTICHAIN-DESIGN.md, 3.9: #3, #8, #9, #10) ──────
+
+    /// @notice No settlement ever succeeds unless the asset is an Approved Equity listing and
+    /// the payment token an Approved Currency listing (covers non-approved, non-Equity,
+    /// backed/unlisted assets, and unlisted or non-Currency payment tokens).
+    function invariant_NoSettlementOnNonApprovedOrNonEquityListing() public view {
+        assertEq(handler.ghost_illegalSettlements(), 0);
+    }
+
+    /// @notice Assets that can never pass the gate have never accrued any cashback: the
+    /// FixedIncome instrument (P2P class) and the backed tokens (not listable).
+    function invariant_NonEquityAndUnlistedAssetsNeverAccrueCashback() public view {
+        address[3] memory payments = [address(usdt), address(wbtc), address(unlistedPayment)];
+        for (uint256 i = 0; i < payments.length; i++) {
+            assertEq(distributor.cashbackBalance(address(nativeBond), payments[i]), 0);
+            assertEq(distributor.cashbackBalance(address(assetEquity), payments[i]), 0);
+            assertEq(distributor.cashbackBalance(address(assetCommodity), payments[i]), 0);
+        }
+    }
+
+    /// @notice A Currency listing never accrues cashback, and is never cashback-eligible,
+    /// even after suspend / re-approve cycles.
+    function invariant_CurrencyNeverAccruesCashback() public view {
+        address[2] memory currencies = [address(usdt), address(wbtc)];
+        address[3] memory payments = [address(usdt), address(wbtc), address(unlistedPayment)];
+        for (uint256 c = 0; c < currencies.length; c++) {
+            assertFalse(registry.getListing(currencies[c]).cashbackEligible);
+            assertEq(uint8(registry.getListing(currencies[c]).assetClass), uint8(IListingRegistry.AssetClass.Currency));
+            for (uint256 p = 0; p < payments.length; p++) {
+                assertEq(distributor.cashbackBalance(currencies[c], payments[p]), 0);
+            }
+        }
+        assertEq(handler.ghost_cashbackCreditedToCurrency(), 0);
+    }
+
+    /// @notice Native supply only moves through approved issuance batches and holder burns:
+    /// totalSupply == seeded + Σ executed batches − Σ burned. Neither the issuer nor the
+    /// listing authority can mint outside a requested-and-approved batch.
+    function invariant_NativeSupplyEqualsIssuedMinusBurned() public view {
+        assertEq(
+            nativeEquity.totalSupply(),
+            seededNativeEquitySupply + handler.ghost_nativeIssued(address(nativeEquity))
+                - handler.ghost_nativeBurned(address(nativeEquity))
+        );
+        assertEq(
+            nativeBond.totalSupply(),
+            seededNativeBondSupply + handler.ghost_nativeIssued(address(nativeBond))
+                - handler.ghost_nativeBurned(address(nativeBond))
+        );
+    }
+
+    /// @notice Delisted is final: once delisted, a token never leaves that status.
+    function invariant_DelistedIsFinal() public view {
+        address[4] memory tokens = [address(nativeEquity), address(nativeBond), address(usdt), address(wbtc)];
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (handler.ghost_everDelisted(tokens[i])) {
+                assertEq(uint8(registry.getListing(tokens[i]).status), uint8(IListingRegistry.ListingStatus.Delisted));
+            }
+        }
+    }
+
+    /// @notice Listing class is fixed for life: status changes never alter the class.
+    function invariant_ListingClassNeverChanges() public view {
+        assertEq(uint8(registry.getListing(address(nativeEquity)).assetClass), uint8(IListingRegistry.AssetClass.Equity));
+        assertEq(
+            uint8(registry.getListing(address(nativeBond)).assetClass), uint8(IListingRegistry.AssetClass.FixedIncome)
+        );
     }
 }

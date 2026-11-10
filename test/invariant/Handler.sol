@@ -7,6 +7,10 @@ import {AssetToken} from "../../src/AssetToken.sol";
 import {BackingGateway} from "../../src/BackingGateway.sol";
 import {NiaraSettlement} from "../../src/NiaraSettlement.sol";
 import {CashbackDistributor} from "../../src/CashbackDistributor.sol";
+import {ListingRegistry} from "../../src/ListingRegistry.sol";
+import {NativeAssetToken} from "../../src/NativeAssetToken.sol";
+import {IListingRegistry} from "../../src/interfaces/IListingRegistry.sol";
+import {IAssetToken} from "../../src/interfaces/IAssetToken.sol";
 import {MockUSDT} from "../mocks/MockUSDT.sol";
 import {MockWBTC} from "../mocks/MockWBTC.sol";
 
@@ -43,8 +47,34 @@ contract Handler is Test {
     address public settlementOperator;
     address public admin;
 
+    // Native (v1) side: registry, two factory instruments (one per trading mode), the
+    // listing authority, the native issuer, and a payment token that is never listed.
+    ListingRegistry public registry;
+    NativeAssetToken public nativeEquity;
+    NativeAssetToken public nativeBond;
+    MockUSDT public unlistedPayment;
+    address public listingAuthority;
+    address public nativeIssuer;
+
     uint256[] public backingRequestIds;
     uint256[] public redemptionRequestIds;
+
+    /// @notice Successful settlements whose asset was not an Approved Equity listing, or
+    /// whose payment token was not an Approved Currency listing. Must stay zero.
+    uint256 public ghost_illegalSettlements;
+
+    /// @notice Successful settlements (sanity: shows the fuzzer reaches the happy path).
+    uint256 public ghost_successfulSettlements;
+
+    /// @notice Historical cashback credited with a Currency listing as the asset. Must stay zero.
+    uint256 public ghost_cashbackCreditedToCurrency;
+
+    /// @notice Per native token: total minted through approved issuance batches / total burned.
+    mapping(address token => uint256) public ghost_nativeIssued;
+    mapping(address token => uint256) public ghost_nativeBurned;
+
+    /// @notice True once a token has been delisted (Delisted must then be permanent).
+    mapping(address token => bool) public ghost_everDelisted;
 
     /// @notice Historical sum of fees recorded in the CashbackDistributor, per settlement
     /// currency (never decreases).
@@ -72,7 +102,23 @@ contract Handler is Test {
         address admin;
     }
 
-    constructor(Config memory config) {
+    /// @dev Native-side configuration, in its own struct for the same stack reason.
+    struct NativeConfig {
+        ListingRegistry registry;
+        NativeAssetToken nativeEquity;
+        NativeAssetToken nativeBond;
+        MockUSDT unlistedPayment;
+        address listingAuthority;
+        address nativeIssuer;
+    }
+
+    constructor(Config memory config, NativeConfig memory nativeConfig) {
+        registry = nativeConfig.registry;
+        nativeEquity = nativeConfig.nativeEquity;
+        nativeBond = nativeConfig.nativeBond;
+        unlistedPayment = nativeConfig.unlistedPayment;
+        listingAuthority = nativeConfig.listingAuthority;
+        nativeIssuer = nativeConfig.nativeIssuer;
         assetEquity = config.assetEquity;
         assetCommodity = config.assetCommodity;
         gateway = config.gateway;
@@ -229,64 +275,176 @@ contract Handler is Test {
     ) external {
         address buyer = _actorAt(buyerSeed);
         address seller = _chaos(sellerSeed) ? buyer : _distinctActor(sellerSeed, buyer);
-        AssetToken asset = _pickAsset(assetSeed);
-        address paymentToken = _pickPaymentToken(paymentSeed);
+        address asset = _pickSettleAsset(assetSeed);
+        address paymentToken = _pickSettlePayment(paymentSeed);
 
         uint256 assetAmount = _pickAssetAmount(asset, seller, assetAmountSeed);
         if (assetAmount == 0) return;
         uint256 paymentAmount = _pickPaymentAmount(paymentToken, buyer, paymentAmountSeed);
 
         vm.prank(seller);
-        asset.approve(address(settlement), assetAmount);
+        IERC20(asset).approve(address(settlement), assetAmount);
         vm.prank(buyer);
         IERC20(paymentToken).approve(address(settlement), paymentAmount);
 
-        uint256 cashbackBefore = distributor.cashbackBalance(address(asset), paymentToken);
+        uint256 cashbackBefore = distributor.cashbackBalance(asset, paymentToken);
         vm.prank(settlementOperator);
-        uint256 feeCharged = settlement.settle(address(asset), paymentToken, buyer, seller, assetAmount, paymentAmount);
+        uint256 feeCharged = settlement.settle(asset, paymentToken, buyer, seller, assetAmount, paymentAmount);
         _recordSettleGhosts(asset, paymentToken, feeCharged, cashbackBefore);
     }
 
-    function _pickAssetAmount(AssetToken asset, address seller, uint256 seed) internal view returns (uint256) {
+    /// @dev Spans every listing situation: backed tokens (never listable), the native
+    /// Equity (order-book class), the native FixedIncome (P2P class) and a Currency used
+    /// as the asset leg. Only the native Equity, while Approved, may ever settle.
+    function _pickSettleAsset(uint256 seed) internal view returns (address) {
+        uint256 pick = seed % 6;
+        if (pick == 0) return address(assetEquity);
+        if (pick == 1) return address(assetCommodity);
+        if (pick == 2) return address(nativeBond);
+        if (pick == 3) return address(usdt);
+        return address(nativeEquity); // weighted: most settles target the legal asset.
+    }
+
+    /// @dev Listed currencies most of the time; sometimes a never-listed token or a
+    /// non-Currency listing (the native Equity) as payment.
+    function _pickSettlePayment(uint256 seed) internal view returns (address) {
+        uint256 pick = seed % 8;
+        if (pick == 0) return address(unlistedPayment);
+        if (pick == 1) return address(nativeEquity);
+        return pick % 2 == 0 ? address(usdt) : address(wbtc);
+    }
+
+    function _pickAssetAmount(address asset, address seller, uint256 seed) internal view returns (uint256) {
         if (_chaos(seed)) return seed % 2_000_000 ether; // may exceed the real balance/approval, or be zero.
-        uint256 sellerBalance = asset.balanceOf(seller);
+        uint256 sellerBalance = IERC20(asset).balanceOf(seller);
         if (sellerBalance == 0) return 0;
         return bound(seed, 1, sellerBalance);
     }
 
     function _pickPaymentAmount(address paymentToken, address buyer, uint256 seed) internal returns (uint256) {
         // Ensures the buyer has enough liquidity most of the time, so the fuzzed call is not
-        // wasted on a no-op for lack of balance; the mock allows free minting, test use only.
+        // wasted on a no-op for lack of balance; the mocks allow free minting, test use only.
+        // The native Equity cannot be minted freely: the buyer pays with what it holds.
         if (paymentToken == address(usdt)) {
             usdt.mint(buyer, 1_000_000e6);
-        } else {
+        } else if (paymentToken == address(wbtc)) {
             wbtc.mint(buyer, 1_000e8);
+        } else if (paymentToken == address(unlistedPayment)) {
+            unlistedPayment.mint(buyer, 1_000_000e6);
         }
 
         if (_chaos(seed)) return seed % 2_000_000e8; // may exceed the newly funded balance, or be zero.
         uint256 buyerBalance = IERC20(paymentToken).balanceOf(buyer);
+        if (buyerBalance == 0) return seed % 1_000e6; // nothing held: likely reverts, still explored.
         return bound(seed, 1, buyerBalance);
     }
 
-    function _recordSettleGhosts(AssetToken asset, address paymentToken, uint256 feeCharged, uint256 cashbackBefore)
+    function _recordSettleGhosts(address asset, address paymentToken, uint256 feeCharged, uint256 cashbackBefore)
         internal
     {
         ghost_sumFeesRecorded[paymentToken] += feeCharged;
-        uint256 cashbackAfter = distributor.cashbackBalance(address(asset), paymentToken);
-        ghost_sumCashbackCredited[paymentToken] += (cashbackAfter - cashbackBefore);
+        uint256 credited = distributor.cashbackBalance(asset, paymentToken) - cashbackBefore;
+        ghost_sumCashbackCredited[paymentToken] += credited;
+        ghost_successfulSettlements++;
+
+        // Reached only if settle did NOT revert. The registry cannot change inside settle, so
+        // reading the listings now reflects what settle saw.
+        IListingRegistry.Listing memory assetListing = registry.getListing(asset);
+        IListingRegistry.Listing memory paymentListing = registry.getListing(paymentToken);
+        bool assetOk = assetListing.status == IListingRegistry.ListingStatus.Approved
+            && assetListing.assetClass == IListingRegistry.AssetClass.Equity;
+        bool paymentOk = paymentListing.status == IListingRegistry.ListingStatus.Approved
+            && paymentListing.assetClass == IListingRegistry.AssetClass.Currency;
+        if (!assetOk || !paymentOk) ghost_illegalSettlements++;
+        bool assetIsCurrency = assetListing.status != IListingRegistry.ListingStatus.None
+            && assetListing.assetClass == IListingRegistry.AssetClass.Currency;
+        if (assetIsCurrency) ghost_cashbackCreditedToCurrency += credited;
+    }
+
+    // ── Listings and native issuance ────────────────────────────────────────────────────
+
+    /// @dev Tokens whose listing status the fuzzer drives (the two native instruments and
+    /// the two listed currencies).
+    function _pickListedToken(uint256 seed) internal view returns (address) {
+        uint256 pick = seed % 4;
+        if (pick == 0) return address(nativeEquity);
+        if (pick == 1) return address(nativeBond);
+        if (pick == 2) return address(usdt);
+        return address(wbtc);
+    }
+
+    /// @notice Approve / suspend / delist through the listing authority. Delisting is final,
+    /// so it is kept rare (1 in 50 calls); otherwise one early delist would end all
+    /// productive sequences. Illegal transitions are attempted too and simply revert.
+    function setListingStatus(uint256 tokenSeed, uint256 actionSeed) external {
+        address token = _pickListedToken(tokenSeed);
+        vm.prank(listingAuthority);
+        if (actionSeed % 50 == 0) {
+            registry.delist(token);
+            ghost_everDelisted[token] = true;
+        } else if (actionSeed % 2 == 0) {
+            registry.approveListing(token);
+        } else {
+            registry.suspendListing(token);
+        }
+    }
+
+    function _pickNative(uint256 seed) internal view returns (NativeAssetToken) {
+        return seed % 2 == 0 ? nativeEquity : nativeBond;
+    }
+
+    /// @notice The native issuer requests a batch to a random actor. A fraction of calls
+    /// comes from a non-issuer, or with a zero amount, on purpose.
+    function requestIssuance(uint256 tokenSeed, uint256 amountSeed, uint256 actorSeed) external {
+        NativeAssetToken token = _pickNative(tokenSeed);
+        address caller = _chaos(actorSeed) ? _actorAt(actorSeed) : nativeIssuer;
+        uint256 amount = _chaos(amountSeed) ? 0 : bound(amountSeed, 1, 1_000_000 ether);
+
+        vm.prank(caller);
+        registry.requestIssuance(address(token), amount, _actorAt(actorSeed), keccak256(abi.encode(amountSeed)));
+    }
+
+    /// @notice The listing authority approves a batch (existing or not, executed or not).
+    function approveIssuance(uint256 tokenSeed, uint256 batchSeed) external {
+        NativeAssetToken token = _pickNative(tokenSeed);
+        uint256 count = registry.nextBatchId(address(token));
+        uint256 batchId = (count == 0 || _chaos(batchSeed)) ? batchSeed % (count + 2) : batchSeed % count;
+        (uint256 amount,,,) = registry.issuanceBatches(address(token), batchId);
+
+        vm.prank(listingAuthority);
+        registry.approveIssuance(address(token), batchId);
+        ghost_nativeIssued[address(token)] += amount;
+    }
+
+    /// @notice A holder burns part of its native balance with a random reason.
+    function burnNative(uint256 tokenSeed, uint256 actorSeed, uint256 amountSeed) external {
+        NativeAssetToken token = _pickNative(tokenSeed);
+        address holder = _actorAt(actorSeed);
+        uint256 balance = token.balanceOf(holder);
+        uint256 amount;
+        if (_chaos(amountSeed) || balance == 0) {
+            amount = amountSeed % 2; // zero (ZeroAmount) or 1 possibly without a balance.
+        } else {
+            amount = bound(amountSeed, 1, balance);
+        }
+
+        vm.prank(holder);
+        token.burnWithReason(amount, NativeAssetToken.BurnReason(amountSeed % 2), bytes32(amountSeed));
+        ghost_nativeBurned[address(token)] += amount;
     }
 
     // ── Saques ──────────────────────────────────────────────────────────────────────────
 
     function withdrawCashback(uint256 assetSeed, uint256 paymentSeed) external {
-        AssetToken asset = _pickAsset(assetSeed);
+        // The native Equity is the only asset that can actually accrue cashback in v1.
+        address asset = assetSeed % 3 == 0 ? address(_pickAsset(assetSeed / 3)) : address(nativeEquity);
         address paymentToken = _pickPaymentToken(paymentSeed);
-        address issuer = asset.issuerWallet();
+        address issuer = IAssetToken(asset).issuerWallet();
 
         // No available-balance guard on purpose: most of the time there is nothing to
         // withdraw yet, exercising NothingToWithdraw organically.
         vm.prank(issuer);
-        distributor.withdraw(address(asset), paymentToken);
+        distributor.withdraw(asset, paymentToken);
     }
 
     function withdrawProtocolFees(uint256 paymentSeed, uint256 amountSeed) external {
