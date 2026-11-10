@@ -514,6 +514,29 @@ Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
 Note: verify whether the July 2026 Sepolia deployment of niara-contracts is still
 live and documented; v1 needs a **new deployment anyway** (new registry + factory).
 
+### 4.1 Listing events for the Register indexer
+
+A listing becomes tradable at exactly one event on every chain: **`ListingApproved`**.
+Both paths emit it, on Solana and on EVM; there is **no separate currency event**
+(no `CurrencyListed`). The indexer tells currencies apart by `asset_class` /
+`assetClass == Currency`, which always comes with `cashback_eligible == false`, a
+zero `doc_hash` and no issuer (`Pubkey::default()` / `address(0)`).
+
+| Listing path | Solana instruction → event | EVM (`ListingRegistry`) function → event |
+|---|---|---|
+| Issuer submits (`Pending`) | `submit_listing` → `ListingSubmitted { listing, asset_mint, issuer, asset_class, doc_hash }` | `submitListing` → `ListingSubmitted(token, issuer, assetClass, docHash)` |
+| Niara approves an issuer listing (`Pending` → `Approved`) | `approve_listing` → `ListingApproved` | `approveListing` → `ListingApproved` |
+| Niara lists a currency (created `Approved`) | `list_currency` → `ListingApproved` | `listCurrency` → `ListingApproved` |
+| Reinstatement (`Suspended` → `Approved`, any class) | `approve_listing` → `ListingApproved` (new `approved_at`) | `approveListing` → `ListingApproved` (new `approvedAt`) |
+| Suspension (`Approved` → `Suspended`) | `suspend_listing` → `ListingSuspended { listing, asset_mint }` | `suspendListing` → `ListingSuspended(token)` |
+| Delisting (final) | `delist` → `ListingDelisted { listing, asset_mint }` | `delist` → `ListingDelisted(token, previousStatus)` |
+
+`ListingApproved` carries the same fields on both chains: Solana
+`{ listing, asset_mint, issuer, asset_class, cashback_eligible, doc_hash, approved_at }`,
+EVM `ListingApproved(address indexed token, address indexed issuer, AssetClass assetClass,
+bool cashbackEligible, bytes32 docHash, uint64 approvedAt)` (EVM has no separate listing
+account, so `token` plays the role of both `listing` and `asset_mint`).
+
 ---
 
 ## 5. Off-chain (Supabase `niara-exchange-dev`)
@@ -541,13 +564,17 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
   approve listing → issuer requests an issuance batch → (admin) approve batch →
   place order → match → settle → issuer withdraws cashback. Chain selector: Solana / Sepolia / Base Sepolia.
 - Deploy on **Vercel**.
-- **Niara-Register:** extend the indexer to capture `ListingApproved`,
-  `Settled`, `IssuanceExecuted` and `TokensBurned` (Solana; the EVM side
-  follows when it gains issuance) on all three chains into the "Global registry" area (today empty
-  because the Exchange has not operated for real). There is **no separate
-  `CashbackCredited` event**: `Settled` carries `fee` and `cashback`, so the
-  indexer credits the issuer's cashback from `Settled` (one event per
-  settlement, nothing to correlate). Listing `doc_hash` can be
+- **Niara-Register:** extend the indexer to capture `ListingApproved`
+  (both listing paths, §4.1), `Settled`, `IssuanceExecuted` and `TokensBurned`
+  on all three chains into the "Global registry" area (today empty
+  because the Exchange has not operated for real). On EVM, `TokensBurned` is
+  emitted by each `NativeAssetToken` (not by the registry), so the indexer
+  watches every token deployed by the `AssetTokenFactory` (`AssetTokenCreated`).
+  On Solana there is **no separate `CashbackCredited` event**: `Settled` carries
+  `fee` and `cashback`, so the indexer credits the issuer's cashback from
+  `Settled` (one event per settlement, nothing to correlate). On EVM, `Settled`
+  has no `cashback` field and the `CashbackDistributor` emits `CashbackCredited`
+  in the same transaction (§4.2). Listing `doc_hash` can be
   signed and registered through Register's document signature feature.
 
 Narrative: *the Exchange operates, the Register proves it.*

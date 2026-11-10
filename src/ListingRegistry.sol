@@ -75,8 +75,19 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
     event ListingSubmitted(
         address indexed token, address indexed issuer, AssetClass assetClass, bytes32 docHash
     );
-    event CurrencyListed(address indexed token, uint64 approvedAt);
-    event ListingApproved(address indexed token, uint64 approvedAt);
+    /// @notice Emitted by both paths that make a listing tradable, mirroring Solana's
+    /// `ListingApproved`: `approveListing` (issuer listings, Pending/Suspended -> Approved)
+    /// and `listCurrency` (Currency listings, created Approved, with `issuer == address(0)`,
+    /// `cashbackEligible == false` and `docHash == 0`). The Register indexer watches this one
+    /// event on every chain and tells currencies apart by `assetClass`.
+    event ListingApproved(
+        address indexed token,
+        address indexed issuer,
+        AssetClass assetClass,
+        bool cashbackEligible,
+        bytes32 docHash,
+        uint64 approvedAt
+    );
     event ListingSuspended(address indexed token);
     event ListingDelisted(address indexed token, ListingStatus previousStatus);
     event IssuanceRequested(
@@ -169,7 +180,8 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
             docHash: bytes32(0),
             approvedAt: approvedAt
         });
-        emit CurrencyListed(token, approvedAt);
+        // Same event as approveListing (Solana's list_currency emits ListingApproved too).
+        emit ListingApproved(token, address(0), AssetClass.Currency, false, bytes32(0), approvedAt);
     }
 
     /// @notice Approves a `Pending` listing, or re-approves a `Suspended` one.
@@ -183,7 +195,9 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
         uint64 approvedAt = uint64(block.timestamp);
         listing.status = ListingStatus.Approved;
         listing.approvedAt = approvedAt;
-        emit ListingApproved(token, approvedAt);
+        emit ListingApproved(
+            token, listing.issuer, listing.assetClass, listing.cashbackEligible, listing.docHash, approvedAt
+        );
     }
 
     /// @notice Suspends an `Approved` listing (it can be re-approved later).

@@ -236,8 +236,11 @@ contract ListingRegistryTest is Test {
 
     function test_ListCurrency_CreatesApprovedCurrencyNeverCashbackEligible() public {
         vm.warp(1_000_000);
-        vm.expectEmit(true, false, false, true, address(registry));
-        emit ListingRegistry.CurrencyListed(address(usdt), 1_000_000);
+        // Same event as approveListing (mirrors Solana's list_currency).
+        vm.expectEmit(true, true, false, true, address(registry));
+        emit ListingRegistry.ListingApproved(
+            address(usdt), address(0), IListingRegistry.AssetClass.Currency, false, bytes32(0), 1_000_000
+        );
         vm.prank(authority);
         registry.listCurrency(address(usdt));
 
@@ -279,11 +282,27 @@ contract ListingRegistryTest is Test {
         registry.listCurrency(address(usdt));
     }
 
+    /// @notice Exactly one event per listing path: listCurrency emits a single
+    /// ListingApproved and nothing else (no separate currency event).
+    function test_ListCurrency_EmitsOnlyListingApproved() public {
+        vm.recordLogs();
+        vm.prank(authority);
+        registry.listCurrency(address(usdt));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1);
+        assertEq(logs[0].topics[0], keccak256("ListingApproved(address,address,uint8,bool,bytes32,uint64)"));
+    }
+
     function test_Currency_CanBeSuspendedReapprovedAndDelisted() public {
         vm.prank(authority);
         registry.listCurrency(address(usdt));
         _suspend(address(usdt));
         assertEq(uint8(_status(address(usdt))), uint8(IListingRegistry.ListingStatus.Suspended));
+        // Re-approving a currency emits the same ListingApproved shape as listCurrency.
+        vm.expectEmit(true, true, false, true, address(registry));
+        emit ListingRegistry.ListingApproved(
+            address(usdt), address(0), IListingRegistry.AssetClass.Currency, false, bytes32(0), uint64(block.timestamp)
+        );
         _approve(address(usdt));
         assertTrue(registry.isApproved(address(usdt)));
         // Re-approval never turns cashback on for a Currency.
@@ -297,8 +316,10 @@ contract ListingRegistryTest is Test {
     function test_Approve_FromPending() public {
         _submit(equity);
         vm.warp(5_000);
-        vm.expectEmit(true, false, false, true, address(registry));
-        emit ListingRegistry.ListingApproved(address(equity), 5_000);
+        vm.expectEmit(true, true, false, true, address(registry));
+        emit ListingRegistry.ListingApproved(
+            address(equity), issuer, IListingRegistry.AssetClass.Equity, true, DOC_HASH, 5_000
+        );
         _approve(address(equity));
         assertTrue(registry.isApproved(address(equity)));
         assertEq(registry.getListing(address(equity)).approvedAt, 5_000);
