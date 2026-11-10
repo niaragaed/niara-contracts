@@ -183,7 +183,7 @@ contract InvariantTest is Test {
     }
 
     function _handlerSelectors() internal pure returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](17);
+        selectors = new bytes4[](18);
         selectors[0] = Handler.requestBacking.selector;
         selectors[1] = Handler.attestBacking.selector;
         selectors[2] = Handler.mintAttested.selector;
@@ -201,6 +201,7 @@ contract InvariantTest is Test {
         selectors[14] = Handler.requestIssuance.selector;
         selectors[15] = Handler.approveIssuance.selector;
         selectors[16] = Handler.burnNative.selector;
+        selectors[17] = Handler.rejectIssuance.selector;
     }
 
     function _grantRoleOn(address target, bytes32 role, address account) internal {

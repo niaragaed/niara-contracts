@@ -416,6 +416,17 @@ contract Handler is Test {
         ghost_nativeIssued[address(token)] += amount;
     }
 
+    /// @notice The listing authority rejects a batch (existing or not, open or resolved).
+    /// Rejection never mints, so it never touches the supply ghosts.
+    function rejectIssuance(uint256 tokenSeed, uint256 batchSeed) external {
+        NativeAssetToken token = _pickNative(tokenSeed);
+        uint256 count = registry.nextBatchId(address(token));
+        uint256 batchId = (count == 0 || _chaos(batchSeed)) ? batchSeed % (count + 2) : batchSeed % count;
+
+        vm.prank(listingAuthority);
+        registry.rejectIssuance(address(token), batchId);
+    }
+
     /// @notice A holder burns part of its native balance with a random reason.
     function burnNative(uint256 tokenSeed, uint256 actorSeed, uint256 amountSeed) external {
         NativeAssetToken token = _pickNative(tokenSeed);

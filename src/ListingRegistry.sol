@@ -33,7 +33,8 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
     enum IssuanceStatus {
         None,
         Requested,
-        Executed
+        Executed,
+        Rejected
     }
 
     struct IssuanceBatch {
@@ -67,6 +68,7 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
     event IssuanceExecuted(
         address indexed token, uint256 indexed batchId, uint256 amount, address recipient, bytes32 docHash
     );
+    event IssuanceRejected(address indexed token, uint256 indexed batchId, uint256 amount, address recipient);
 
     error ZeroAddress();
     error ZeroAmount();
@@ -237,5 +239,17 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
         emit IssuanceExecuted(token, batchId, amount, recipient, batch.docHash);
 
         NativeAssetToken(token).mint(recipient, amount);
+    }
+
+    /// @notice The listing authority rejects a requested batch; nothing is minted. Allowed
+    /// in any listing status (e.g. to close requests left on a suspended or delisted
+    /// listing). The batch stays on record as `Rejected`.
+    /// @param token Factory token.
+    /// @param batchId Batch to reject.
+    function rejectIssuance(address token, uint256 batchId) external onlyRole(LISTING_AUTHORITY_ROLE) {
+        IssuanceBatch storage batch = issuanceBatches[token][batchId];
+        if (batch.status != IssuanceStatus.Requested) revert BatchNotRequested(token, batchId);
+        batch.status = IssuanceStatus.Rejected;
+        emit IssuanceRejected(token, batchId, batch.amount, batch.recipient);
     }
 }
