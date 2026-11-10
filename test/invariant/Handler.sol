@@ -404,15 +404,22 @@ contract Handler is Test {
         registry.requestIssuance(address(token), amount, _actorAt(actorSeed), keccak256(abi.encode(amountSeed)));
     }
 
+    /// @dev Batches are numbered 1..next-1. The bounded path picks one of them; the chaotic
+    /// path (or no batch yet) may pick 0 or a number past the last one.
+    function _pickBatchNo(NativeAssetToken token, uint256 seed) internal view returns (uint256) {
+        uint256 next = registry.nextBatchNo(address(token));
+        if (next <= 1 || _chaos(seed)) return seed % (next + 2);
+        return 1 + (seed % (next - 1));
+    }
+
     /// @notice The listing authority approves a batch (existing or not, executed or not).
     function approveIssuance(uint256 tokenSeed, uint256 batchSeed) external {
         NativeAssetToken token = _pickNative(tokenSeed);
-        uint256 count = registry.nextBatchId(address(token));
-        uint256 batchId = (count == 0 || _chaos(batchSeed)) ? batchSeed % (count + 2) : batchSeed % count;
-        (uint256 amount,,,) = registry.issuanceBatches(address(token), batchId);
+        uint256 batchNo = _pickBatchNo(token, batchSeed);
+        (uint256 amount,,,,,) = registry.issuanceBatches(address(token), batchNo);
 
         vm.prank(listingAuthority);
-        registry.approveIssuance(address(token), batchId);
+        registry.approveIssuance(address(token), batchNo);
         ghost_nativeIssued[address(token)] += amount;
     }
 
@@ -420,11 +427,10 @@ contract Handler is Test {
     /// Rejection never mints, so it never touches the supply ghosts.
     function rejectIssuance(uint256 tokenSeed, uint256 batchSeed) external {
         NativeAssetToken token = _pickNative(tokenSeed);
-        uint256 count = registry.nextBatchId(address(token));
-        uint256 batchId = (count == 0 || _chaos(batchSeed)) ? batchSeed % (count + 2) : batchSeed % count;
+        uint256 batchNo = _pickBatchNo(token, batchSeed);
 
         vm.prank(listingAuthority);
-        registry.rejectIssuance(address(token), batchId);
+        registry.rejectIssuance(address(token), batchNo);
     }
 
     /// @notice A holder burns part of its native balance with a random reason.

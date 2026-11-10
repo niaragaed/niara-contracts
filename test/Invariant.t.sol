@@ -121,9 +121,9 @@ contract InvariantTest is Test {
 
     function _seedBatch(NativeAssetToken token, address to, uint256 amount) internal {
         vm.prank(nativeIssuer);
-        uint256 batchId = registry.requestIssuance(address(token), amount, to, keccak256("seed"));
+        uint256 batchNo = registry.requestIssuance(address(token), amount, to, keccak256("seed"));
         vm.prank(listingAuthority);
-        registry.approveIssuance(address(token), batchId);
+        registry.approveIssuance(address(token), batchNo);
     }
 
     function _wireRoles() internal {

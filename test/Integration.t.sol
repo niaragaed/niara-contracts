@@ -104,9 +104,9 @@ contract IntegrationTest is Test {
         // 3. Issuance batch: requested by the issuer, approved by the authority, minted by
         // the registry to the seller.
         vm.prank(issuer);
-        uint256 batchId = registry.requestIssuance(address(acme), 1_000 ether, seller, keccak256("batch-1"));
+        uint256 batchNo = registry.requestIssuance(address(acme), 1_000 ether, seller, keccak256("batch-1"));
         vm.prank(listingAuthority);
-        registry.approveIssuance(address(acme), batchId);
+        registry.approveIssuance(address(acme), batchNo);
         assertEq(acme.balanceOf(seller), 1_000 ether);
 
         // 4. Atomic settlement: seller delivers 100 ACME, buyer pays 10,000 USDT.

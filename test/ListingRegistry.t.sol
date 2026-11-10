@@ -84,9 +84,9 @@ contract ListingRegistryTest is Test {
         if (target == IListingRegistry.ListingStatus.Suspended) _suspend(address(equity));
     }
 
-    function _requestIssuance(uint256 amount) internal returns (uint256 batchId) {
+    function _requestIssuance(uint256 amount) internal returns (uint256 batchNo) {
         vm.prank(issuer);
-        batchId = registry.requestIssuance(address(equity), amount, investor, BATCH_DOC);
+        batchNo = registry.requestIssuance(address(equity), amount, investor, BATCH_DOC);
     }
 
     // ── Constructor and roles ──────────────────────────────────────────────────────────
@@ -488,36 +488,84 @@ contract ListingRegistryTest is Test {
 
     function test_RequestIssuance_WhilePending() public {
         _toStatus(IListingRegistry.ListingStatus.Pending);
+        vm.warp(1_700_000_000);
 
         vm.expectEmit(true, true, false, true, address(registry));
-        emit ListingRegistry.IssuanceRequested(address(equity), 0, 1_000 ether, investor, BATCH_DOC);
-        uint256 batchId = _requestIssuance(1_000 ether);
+        emit ListingRegistry.IssuanceRequested(address(equity), 1, 1_000 ether, investor, BATCH_DOC);
+        uint256 batchNo = _requestIssuance(1_000 ether);
 
-        assertEq(batchId, 0);
-        assertEq(registry.nextBatchId(address(equity)), 1);
-        (uint256 amount, address recipient, bytes32 docHash, ListingRegistry.IssuanceStatus status) =
-            registry.issuanceBatches(address(equity), 0);
+        assertEq(batchNo, 1);
+        assertEq(registry.nextBatchNo(address(equity)), 2);
+        (
+            uint256 amount,
+            address recipient,
+            bytes32 docHash,
+            ListingRegistry.IssuanceStatus status,
+            uint64 requestedAt,
+            uint64 resolvedAt
+        ) = registry.issuanceBatches(address(equity), 1);
         assertEq(amount, 1_000 ether);
         assertEq(recipient, investor);
         assertEq(docHash, BATCH_DOC);
         assertEq(uint8(status), uint8(ListingRegistry.IssuanceStatus.Requested));
+        assertEq(requestedAt, 1_700_000_000);
+        assertEq(resolvedAt, 0);
         // Nothing is minted on request.
         assertEq(equity.totalSupply(), 0);
     }
 
-    function test_RequestIssuance_WhileApproved_SequentialIdsPerToken() public {
+    /// @notice Batch numbers start at 1 and are sequential per token, like Solana's
+    /// `next_batch_no`. The counter is 0 before `submitListing` and stays 0 for currencies.
+    function test_RequestIssuance_WhileApproved_SequentialNumbersFromOnePerToken() public {
+        assertEq(registry.nextBatchNo(address(equity)), 0);
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        assertEq(_requestIssuance(1 ether), 0);
-        assertEq(_requestIssuance(2 ether), 1);
-        assertEq(_requestIssuance(3 ether), 2);
+        assertEq(registry.nextBatchNo(address(equity)), 1);
+        assertEq(_requestIssuance(1 ether), 1);
+        assertEq(_requestIssuance(2 ether), 2);
+        assertEq(_requestIssuance(3 ether), 3);
 
         // Another token has its own counter.
         NativeAssetToken bond = _create(issuer, IListingRegistry.AssetClass.FixedIncome);
         _submit(bond);
         vm.prank(issuer);
-        assertEq(registry.requestIssuance(address(bond), 1 ether, investor, BATCH_DOC), 0);
-        assertEq(registry.nextBatchId(address(equity)), 3);
-        assertEq(registry.nextBatchId(address(bond)), 1);
+        assertEq(registry.requestIssuance(address(bond), 1 ether, investor, BATCH_DOC), 1);
+        assertEq(registry.nextBatchNo(address(equity)), 4);
+        assertEq(registry.nextBatchNo(address(bond)), 2);
+
+        vm.prank(authority);
+        registry.listCurrency(address(usdt));
+        assertEq(registry.nextBatchNo(address(usdt)), 0);
+    }
+
+    /// @notice Batch number 0 is never a batch.
+    function test_ApproveIssuance_BatchZeroNeverExists() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        _requestIssuance(1 ether);
+
+        vm.prank(authority);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.BatchNotRequested.selector, address(equity), 0));
+        registry.approveIssuance(address(equity), 0);
+    }
+
+    function test_Batch_ResolvedAtRecordedOnApproveAndReject() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        vm.warp(1_000);
+        uint256 approved = _requestIssuance(1 ether);
+        uint256 rejected = _requestIssuance(2 ether);
+
+        vm.warp(2_000);
+        vm.prank(authority);
+        registry.approveIssuance(address(equity), approved);
+        vm.warp(3_000);
+        vm.prank(authority);
+        registry.rejectIssuance(address(equity), rejected);
+
+        (,,,, uint64 requestedA, uint64 resolvedA) = registry.issuanceBatches(address(equity), approved);
+        (,,,, uint64 requestedR, uint64 resolvedR) = registry.issuanceBatches(address(equity), rejected);
+        assertEq(requestedA, 1_000);
+        assertEq(resolvedA, 2_000);
+        assertEq(requestedR, 1_000);
+        assertEq(resolvedR, 3_000);
     }
 
     function test_RequestIssuance_OnlyIssuer() public {
@@ -582,16 +630,16 @@ contract ListingRegistryTest is Test {
 
     function test_ApproveIssuance_MintsBatch() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(1_000 ether);
+        uint256 batchNo = _requestIssuance(1_000 ether);
 
         vm.expectEmit(true, true, false, true, address(registry));
-        emit ListingRegistry.IssuanceExecuted(address(equity), batchId, 1_000 ether, investor, BATCH_DOC);
+        emit ListingRegistry.IssuanceExecuted(address(equity), batchNo, 1_000 ether, investor, BATCH_DOC);
         vm.prank(authority);
-        registry.approveIssuance(address(equity), batchId);
+        registry.approveIssuance(address(equity), batchNo);
 
         assertEq(equity.balanceOf(investor), 1_000 ether);
         assertEq(equity.totalSupply(), 1_000 ether);
-        (,,, ListingRegistry.IssuanceStatus status) = registry.issuanceBatches(address(equity), batchId);
+        (,,, ListingRegistry.IssuanceStatus status,,) = registry.issuanceBatches(address(equity), batchNo);
         assertEq(uint8(status), uint8(ListingRegistry.IssuanceStatus.Executed));
     }
 
@@ -599,48 +647,48 @@ contract ListingRegistryTest is Test {
     /// approved.
     function test_ApproveIssuance_RequestedWhilePendingExecutesAfterApproval() public {
         _toStatus(IListingRegistry.ListingStatus.Pending);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
 
         vm.prank(authority);
         vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingNotApproved.selector, address(equity)));
-        registry.approveIssuance(address(equity), batchId);
+        registry.approveIssuance(address(equity), batchNo);
 
         _approve(address(equity));
         vm.prank(authority);
-        registry.approveIssuance(address(equity), batchId);
+        registry.approveIssuance(address(equity), batchNo);
         assertEq(equity.balanceOf(investor), 10 ether);
     }
 
     function test_ApproveIssuance_RevertsWhileSuspended() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
         _suspend(address(equity));
 
         vm.prank(authority);
         vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingNotApproved.selector, address(equity)));
-        registry.approveIssuance(address(equity), batchId);
+        registry.approveIssuance(address(equity), batchNo);
     }
 
     function test_ApproveIssuance_RevertsWhenDelisted() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
         _delist(address(equity));
 
         vm.prank(authority);
         vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingNotApproved.selector, address(equity)));
-        registry.approveIssuance(address(equity), batchId);
+        registry.approveIssuance(address(equity), batchNo);
         assertEq(equity.totalSupply(), 0);
     }
 
     function test_ApproveIssuance_RevertsTwice() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
         vm.prank(authority);
-        registry.approveIssuance(address(equity), batchId);
+        registry.approveIssuance(address(equity), batchNo);
 
         vm.prank(authority);
-        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.BatchNotRequested.selector, address(equity), batchId));
-        registry.approveIssuance(address(equity), batchId);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.BatchNotRequested.selector, address(equity), batchNo));
+        registry.approveIssuance(address(equity), batchNo);
         assertEq(equity.totalSupply(), 10 ether);
     }
 
@@ -653,13 +701,13 @@ contract ListingRegistryTest is Test {
 
     function test_ApproveIssuance_OnlyListingAuthority() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
 
         vm.prank(issuer);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, issuer, listingAuthorityRole)
         );
-        registry.approveIssuance(address(equity), batchId);
+        registry.approveIssuance(address(equity), batchNo);
     }
 
     /// @notice Neither side can mint alone: the issuer cannot call the token's mint, and the
@@ -686,11 +734,11 @@ contract ListingRegistryTest is Test {
     /// token's `Transfer` (the mint), so an indexer never sees the mint first.
     function test_ApproveIssuance_EmitsIssuanceExecutedBeforeExternalTransfer() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
 
         vm.recordLogs();
         vm.prank(authority);
-        registry.approveIssuance(address(equity), batchId);
+        registry.approveIssuance(address(equity), batchNo);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bytes32 executedTopic = keccak256("IssuanceExecuted(address,uint256,uint256,address,bytes32)");
@@ -710,57 +758,57 @@ contract ListingRegistryTest is Test {
 
     // ── rejectIssuance ─────────────────────────────────────────────────────────────────
 
-    function _batchStatus(uint256 batchId) internal view returns (ListingRegistry.IssuanceStatus status) {
-        (,,, status) = registry.issuanceBatches(address(equity), batchId);
+    function _batchStatus(uint256 batchNo) internal view returns (ListingRegistry.IssuanceStatus status) {
+        (,,, status,,) = registry.issuanceBatches(address(equity), batchNo);
     }
 
-    function _reject(uint256 batchId) internal {
+    function _reject(uint256 batchNo) internal {
         vm.prank(authority);
-        registry.rejectIssuance(address(equity), batchId);
+        registry.rejectIssuance(address(equity), batchNo);
     }
 
     function test_RejectIssuance_MarksRejectedAndMintsNothing() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
 
         vm.expectEmit(true, true, false, true, address(registry));
-        emit ListingRegistry.IssuanceRejected(address(equity), batchId, 10 ether, investor);
-        _reject(batchId);
+        emit ListingRegistry.IssuanceRejected(address(equity), batchNo, 10 ether, investor);
+        _reject(batchNo);
 
-        assertEq(uint8(_batchStatus(batchId)), uint8(ListingRegistry.IssuanceStatus.Rejected));
+        assertEq(uint8(_batchStatus(batchNo)), uint8(ListingRegistry.IssuanceStatus.Rejected));
         assertEq(equity.totalSupply(), 0);
     }
 
     function test_RejectIssuance_CannotApproveAfterwards() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
-        _reject(batchId);
+        uint256 batchNo = _requestIssuance(10 ether);
+        _reject(batchNo);
 
         vm.prank(authority);
-        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.BatchNotRequested.selector, address(equity), batchId));
-        registry.approveIssuance(address(equity), batchId);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.BatchNotRequested.selector, address(equity), batchNo));
+        registry.approveIssuance(address(equity), batchNo);
         assertEq(equity.totalSupply(), 0);
     }
 
     function test_RejectIssuance_RevertsTwice() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
-        _reject(batchId);
+        uint256 batchNo = _requestIssuance(10 ether);
+        _reject(batchNo);
 
         vm.prank(authority);
-        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.BatchNotRequested.selector, address(equity), batchId));
-        registry.rejectIssuance(address(equity), batchId);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.BatchNotRequested.selector, address(equity), batchNo));
+        registry.rejectIssuance(address(equity), batchNo);
     }
 
     function test_RejectIssuance_RevertsForExecutedBatch() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
         vm.prank(authority);
-        registry.approveIssuance(address(equity), batchId);
+        registry.approveIssuance(address(equity), batchNo);
 
         vm.prank(authority);
-        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.BatchNotRequested.selector, address(equity), batchId));
-        registry.rejectIssuance(address(equity), batchId);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.BatchNotRequested.selector, address(equity), batchNo));
+        registry.rejectIssuance(address(equity), batchNo);
         assertEq(equity.totalSupply(), 10 ether);
     }
 
@@ -773,38 +821,38 @@ contract ListingRegistryTest is Test {
 
     function test_RejectIssuance_OnlyListingAuthority() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
 
         vm.prank(issuer);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, issuer, listingAuthorityRole)
         );
-        registry.rejectIssuance(address(equity), batchId);
+        registry.rejectIssuance(address(equity), batchNo);
     }
 
     /// @notice Rejection works in every listing status, including the ones where approval
     /// is impossible (Pending, Suspended, Delisted), so no request is ever stuck open.
     function test_RejectIssuance_WhilePending() public {
         _toStatus(IListingRegistry.ListingStatus.Pending);
-        uint256 batchId = _requestIssuance(10 ether);
-        _reject(batchId);
-        assertEq(uint8(_batchStatus(batchId)), uint8(ListingRegistry.IssuanceStatus.Rejected));
+        uint256 batchNo = _requestIssuance(10 ether);
+        _reject(batchNo);
+        assertEq(uint8(_batchStatus(batchNo)), uint8(ListingRegistry.IssuanceStatus.Rejected));
     }
 
     function test_RejectIssuance_WhileSuspended() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
         _suspend(address(equity));
-        _reject(batchId);
-        assertEq(uint8(_batchStatus(batchId)), uint8(ListingRegistry.IssuanceStatus.Rejected));
+        _reject(batchNo);
+        assertEq(uint8(_batchStatus(batchNo)), uint8(ListingRegistry.IssuanceStatus.Rejected));
     }
 
     function test_RejectIssuance_AfterDelist() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
-        uint256 batchId = _requestIssuance(10 ether);
+        uint256 batchNo = _requestIssuance(10 ether);
         _delist(address(equity));
-        _reject(batchId);
-        assertEq(uint8(_batchStatus(batchId)), uint8(ListingRegistry.IssuanceStatus.Rejected));
+        _reject(batchNo);
+        assertEq(uint8(_batchStatus(batchNo)), uint8(ListingRegistry.IssuanceStatus.Rejected));
     }
 
     /// @notice Rejecting one batch leaves the others untouched.
@@ -825,10 +873,10 @@ contract ListingRegistryTest is Test {
     /// mint, and the holder burns with a reason.
     function test_NativeLifecycle_IssueListMintBurn() public {
         _submit(equity);
-        uint256 batchId = _requestIssuance(500 ether);
+        uint256 batchNo = _requestIssuance(500 ether);
         _approve(address(equity));
         vm.prank(authority);
-        registry.approveIssuance(address(equity), batchId);
+        registry.approveIssuance(address(equity), batchNo);
 
         vm.prank(investor);
         equity.burnWithReason(100 ether, NativeAssetToken.BurnReason.Redemption, keccak256("r-1"));

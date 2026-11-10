@@ -37,11 +37,18 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
         Rejected
     }
 
+    /// @notice One requested increase of supply. Never deleted: requested, executed and
+    /// rejected batches stay as the on-chain issuance record (mirrors Solana's
+    /// `IssuanceBatch`).
     struct IssuanceBatch {
         uint256 amount;
         address recipient;
         bytes32 docHash;
         IssuanceStatus status;
+        /// @dev Block timestamp of `requestIssuance`.
+        uint64 requestedAt;
+        /// @dev Block timestamp of `approveIssuance` / `rejectIssuance`; 0 while `Requested`.
+        uint64 resolvedAt;
     }
 
     /// @notice Factory deployed by this registry; only its tokens can be submitted.
@@ -49,11 +56,13 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
 
     mapping(address token => Listing) private _listings;
 
-    /// @notice Issuance batches per token, indexed by a sequential per-token batch id.
-    mapping(address token => mapping(uint256 batchId => IssuanceBatch)) public issuanceBatches;
+    /// @notice Issuance batches per token, indexed by batch number.
+    mapping(address token => mapping(uint256 batchNo => IssuanceBatch)) public issuanceBatches;
 
-    /// @notice Next batch id for each token (also the number of batches requested so far).
-    mapping(address token => uint256) public nextBatchId;
+    /// @notice Next batch number for each token. Like Solana's `next_batch_no`: 1 after
+    /// `submitListing` (batches are numbered from 1, sequentially, never skipped or
+    /// reused), 0 for tokens without an issuer listing (including `Currency`).
+    mapping(address token => uint256) public nextBatchNo;
 
     event ListingSubmitted(
         address indexed token, address indexed issuer, AssetClass assetClass, bytes32 docHash
@@ -63,12 +72,12 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
     event ListingSuspended(address indexed token);
     event ListingDelisted(address indexed token, ListingStatus previousStatus);
     event IssuanceRequested(
-        address indexed token, uint256 indexed batchId, uint256 amount, address recipient, bytes32 docHash
+        address indexed token, uint256 indexed batchNo, uint256 amount, address recipient, bytes32 docHash
     );
     event IssuanceExecuted(
-        address indexed token, uint256 indexed batchId, uint256 amount, address recipient, bytes32 docHash
+        address indexed token, uint256 indexed batchNo, uint256 amount, address recipient, bytes32 docHash
     );
-    event IssuanceRejected(address indexed token, uint256 indexed batchId, uint256 amount, address recipient);
+    event IssuanceRejected(address indexed token, uint256 indexed batchNo, uint256 amount, address recipient);
 
     error ZeroAddress();
     error ZeroAmount();
@@ -79,7 +88,7 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
     error InvalidStatusTransition(address token, ListingStatus from);
     error IssuanceNotAllowed(address token, ListingStatus status);
     error ListingNotApproved(address token);
-    error BatchNotRequested(address token, uint256 batchId);
+    error BatchNotRequested(address token, uint256 batchNo);
 
     /// @param admin_ Holder of DEFAULT_ADMIN_ROLE (role changes, timelock).
     /// @param listingAuthority_ Initial holder of LISTING_AUTHORITY_ROLE.
@@ -116,6 +125,8 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
             docHash: docHash,
             approvedAt: 0
         });
+        // Batch numbers start at 1 (Solana: `next_batch_no = 1` in `submit_listing`).
+        nextBatchNo[token] = 1;
         emit ListingSubmitted(token, msg.sender, assetClass, docHash);
     }
 
@@ -195,10 +206,10 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
     /// @param amount Amount to mint.
     /// @param recipient Who receives the batch.
     /// @param docHash Hash of the document backing this batch.
-    /// @return batchId Sequential per-token batch id.
+    /// @return batchNo Sequential per-token batch number, starting at 1.
     function requestIssuance(address token, uint256 amount, address recipient, bytes32 docHash)
         external
-        returns (uint256 batchId)
+        returns (uint256 batchNo)
     {
         Listing storage listing = _listings[token];
         // Currency listings have issuer == address(0), so they can never request issuance.
@@ -209,34 +220,40 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
         if (amount == 0) revert ZeroAmount();
         if (recipient == address(0)) revert ZeroAddress();
 
-        batchId = nextBatchId[token]++;
-        issuanceBatches[token][batchId] = IssuanceBatch({
-            amount: amount, recipient: recipient, docHash: docHash, status: IssuanceStatus.Requested
+        batchNo = nextBatchNo[token]++;
+        issuanceBatches[token][batchNo] = IssuanceBatch({
+            amount: amount,
+            recipient: recipient,
+            docHash: docHash,
+            status: IssuanceStatus.Requested,
+            requestedAt: uint64(block.timestamp),
+            resolvedAt: 0
         });
-        emit IssuanceRequested(token, batchId, amount, recipient, docHash);
+        emit IssuanceRequested(token, batchNo, amount, recipient, docHash);
     }
 
     /// @notice The listing authority approves a requested batch and the registry mints it.
     /// Executable only while the listing is `Approved`.
     /// @param token Factory token.
-    /// @param batchId Batch to approve.
-    function approveIssuance(address token, uint256 batchId)
+    /// @param batchNo Batch to approve.
+    function approveIssuance(address token, uint256 batchNo)
         external
         nonReentrant
         onlyRole(LISTING_AUTHORITY_ROLE)
     {
         if (_listings[token].status != ListingStatus.Approved) revert ListingNotApproved(token);
-        IssuanceBatch storage batch = issuanceBatches[token][batchId];
-        if (batch.status != IssuanceStatus.Requested) revert BatchNotRequested(token, batchId);
+        IssuanceBatch storage batch = issuanceBatches[token][batchNo];
+        if (batch.status != IssuanceStatus.Requested) revert BatchNotRequested(token, batchNo);
 
         // Checks-effects-interactions: the batch is marked executed and `IssuanceExecuted` is
         // emitted before the mint call, so the batch can never be minted twice and an
         // off-chain indexer sees IssuanceExecuted before the token's Transfer. The token is
         // a known factory implementation (no hooks), but the rule applies regardless.
         batch.status = IssuanceStatus.Executed;
+        batch.resolvedAt = uint64(block.timestamp);
         uint256 amount = batch.amount;
         address recipient = batch.recipient;
-        emit IssuanceExecuted(token, batchId, amount, recipient, batch.docHash);
+        emit IssuanceExecuted(token, batchNo, amount, recipient, batch.docHash);
 
         NativeAssetToken(token).mint(recipient, amount);
     }
@@ -245,11 +262,12 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
     /// in any listing status (e.g. to close requests left on a suspended or delisted
     /// listing). The batch stays on record as `Rejected`.
     /// @param token Factory token.
-    /// @param batchId Batch to reject.
-    function rejectIssuance(address token, uint256 batchId) external onlyRole(LISTING_AUTHORITY_ROLE) {
-        IssuanceBatch storage batch = issuanceBatches[token][batchId];
-        if (batch.status != IssuanceStatus.Requested) revert BatchNotRequested(token, batchId);
+    /// @param batchNo Batch to reject.
+    function rejectIssuance(address token, uint256 batchNo) external onlyRole(LISTING_AUTHORITY_ROLE) {
+        IssuanceBatch storage batch = issuanceBatches[token][batchNo];
+        if (batch.status != IssuanceStatus.Requested) revert BatchNotRequested(token, batchNo);
         batch.status = IssuanceStatus.Rejected;
-        emit IssuanceRejected(token, batchId, batch.amount, batch.recipient);
+        batch.resolvedAt = uint64(block.timestamp);
+        emit IssuanceRejected(token, batchNo, batch.amount, batch.recipient);
     }
 }

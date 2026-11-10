@@ -109,9 +109,9 @@ contract NiaraSettlementTest is Test {
         vm.prank(listingAuthority);
         registry.approveListing(address(token));
         vm.prank(issuer);
-        uint256 batchId = registry.requestIssuance(address(token), amount, to, DOC_HASH);
+        uint256 batchNo = registry.requestIssuance(address(token), amount, to, DOC_HASH);
         vm.prank(listingAuthority);
-        registry.approveIssuance(address(token), batchId);
+        registry.approveIssuance(address(token), batchNo);
     }
 
     function _listCurrency(address token) internal {
