@@ -612,6 +612,21 @@ contract ListingRegistryTest is Test {
         registry.requestIssuance(address(equity), 1 ether, investor, BATCH_DOC);
     }
 
+    function test_RequestIssuance_RevertsOnZeroDocHash() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        vm.prank(issuer);
+        vm.expectRevert(ListingRegistry.EmptyDocHash.selector);
+        registry.requestIssuance(address(equity), 1 ether, investor, bytes32(0));
+        assertEq(registry.nextBatchNo(address(equity)), 1);
+    }
+
+    /// @notice The listing's doc hash comes from the token, which the factory never creates
+    /// with a zero hash.
+    function test_SubmitListing_DocHashNeverZero() public {
+        _submit(equity);
+        assertTrue(registry.getListing(address(equity)).docHash != bytes32(0));
+    }
+
     function test_RequestIssuance_RevertsOnZeroAmount() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
         vm.prank(issuer);

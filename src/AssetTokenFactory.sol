@@ -27,6 +27,7 @@ contract AssetTokenFactory {
 
     error ZeroAddress();
     error UnsupportedAssetClass(IListingRegistry.AssetClass assetClass);
+    error EmptyDocHash();
 
     /// @param registry_ The ListingRegistry (minter of every token deployed here).
     constructor(address registry_) {
@@ -39,7 +40,7 @@ contract AssetTokenFactory {
     /// @param name Token name.
     /// @param symbol Token symbol.
     /// @param assetClass `Equity`, `FixedIncome` or `Credit` (`Currency` reverts).
-    /// @param docHash Hash of the offering document.
+    /// @param docHash Hash of the offering document (non-zero).
     /// @return token Address of the new instrument.
     function createAssetToken(
         string calldata name,
@@ -48,6 +49,9 @@ contract AssetTokenFactory {
         bytes32 docHash
     ) external returns (address token) {
         if (assetClass == IListingRegistry.AssetClass.Currency) revert UnsupportedAssetClass(assetClass);
+        // The offering-document hash is fixed here for the life of the instrument and copied
+        // into the listing by submitListing, so a zero hash can never reach a listing.
+        if (docHash == bytes32(0)) revert EmptyDocHash();
 
         // The only external interaction is the creation itself, whose code is fixed
         // (NativeAssetToken's constructor makes no calls), so recording the address after

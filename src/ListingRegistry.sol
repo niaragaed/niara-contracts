@@ -89,6 +89,7 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
     error IssuanceNotAllowed(address token, ListingStatus status);
     error ListingNotApproved(address token);
     error BatchNotRequested(address token, uint256 batchNo);
+    error EmptyDocHash();
 
     /// @param admin_ Holder of DEFAULT_ADMIN_ROLE (role changes, timelock).
     /// @param listingAuthority_ Initial holder of LISTING_AUTHORITY_ROLE.
@@ -205,7 +206,7 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
     /// @param token Factory token with a listing submitted by the caller.
     /// @param amount Amount to mint.
     /// @param recipient Who receives the batch.
-    /// @param docHash Hash of the document backing this batch.
+    /// @param docHash Hash of the document authorizing this batch (non-zero).
     /// @return batchNo Sequential per-token batch number, starting at 1.
     function requestIssuance(address token, uint256 amount, address recipient, bytes32 docHash)
         external
@@ -219,6 +220,7 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Reentranc
         }
         if (amount == 0) revert ZeroAmount();
         if (recipient == address(0)) revert ZeroAddress();
+        if (docHash == bytes32(0)) revert EmptyDocHash();
 
         batchNo = nextBatchNo[token]++;
         issuanceBatches[token][batchNo] = IssuanceBatch({

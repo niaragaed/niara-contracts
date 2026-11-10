@@ -17,6 +17,7 @@ contract AssetTokenFactoryTest is Test {
     address public holder = makeAddr("holder");
 
     bytes32 public constant DOC_HASH = keccak256("offering-document-v1");
+    bytes32 public constant BURN_REF = keccak256("burn-authorization-1");
 
     function setUp() public {
         factory = new AssetTokenFactory(registry);
@@ -76,6 +77,33 @@ contract AssetTokenFactoryTest is Test {
             )
         );
         factory.createAssetToken("Fake Dollar", "FUSD", IListingRegistry.AssetClass.Currency, DOC_HASH);
+    }
+
+    /// @notice Like Solana's submit_listing (EmptyDocHash): an instrument cannot exist
+    /// without an offering-document hash, so no listing can ever carry a zero hash.
+    function test_CreateAssetToken_RevertsForZeroDocHash() public {
+        vm.prank(issuer);
+        vm.expectRevert(AssetTokenFactory.EmptyDocHash.selector);
+        factory.createAssetToken("Acme", "ACME", IListingRegistry.AssetClass.Equity, bytes32(0));
+    }
+
+    function test_BurnWithReason_RevertsOnZeroReference() public {
+        NativeAssetToken token = _create(IListingRegistry.AssetClass.Equity);
+        vm.prank(registry);
+        token.mint(holder, 1 ether);
+
+        vm.prank(holder);
+        vm.expectRevert(NativeAssetToken.EmptyReference.selector);
+        token.burnWithReason(1 ether, NativeAssetToken.BurnReason.Redemption, bytes32(0));
+        assertEq(token.balanceOf(holder), 1 ether);
+    }
+
+    function testFuzz_CreateAssetToken_AnyNonZeroDocHash(bytes32 docHash) public {
+        vm.assume(docHash != bytes32(0));
+        vm.prank(issuer);
+        NativeAssetToken token =
+            NativeAssetToken(factory.createAssetToken("Acme", "ACME", IListingRegistry.AssetClass.Equity, docHash));
+        assertEq(token.docHash(), docHash);
     }
 
     function test_CreateAssetToken_EmitsEvent() public {
@@ -146,10 +174,10 @@ contract AssetTokenFactoryTest is Test {
         token.mint(holder, 10 ether);
 
         vm.expectEmit(true, false, false, true, address(token));
-        emit NativeAssetToken.TokensBurned(holder, 10 ether, NativeAssetToken.BurnReason.Cancellation, bytes32(0));
+        emit NativeAssetToken.TokensBurned(holder, 10 ether, NativeAssetToken.BurnReason.Cancellation, BURN_REF);
 
         vm.prank(holder);
-        token.burnWithReason(10 ether, NativeAssetToken.BurnReason.Cancellation, bytes32(0));
+        token.burnWithReason(10 ether, NativeAssetToken.BurnReason.Cancellation, BURN_REF);
         assertEq(token.totalSupply(), 0);
     }
 
@@ -157,7 +185,7 @@ contract AssetTokenFactoryTest is Test {
         NativeAssetToken token = _create(IListingRegistry.AssetClass.Equity);
         vm.prank(holder);
         vm.expectRevert(NativeAssetToken.ZeroAmount.selector);
-        token.burnWithReason(0, NativeAssetToken.BurnReason.Redemption, bytes32(0));
+        token.burnWithReason(0, NativeAssetToken.BurnReason.Redemption, BURN_REF);
     }
 
     function test_BurnWithReason_RevertsBeyondBalance() public {
@@ -169,7 +197,7 @@ contract AssetTokenFactoryTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, holder, 1 ether, 2 ether)
         );
-        token.burnWithReason(2 ether, NativeAssetToken.BurnReason.Redemption, bytes32(0));
+        token.burnWithReason(2 ether, NativeAssetToken.BurnReason.Redemption, BURN_REF);
     }
 
     /// @notice Only the caller's own balance can be burned: a third party (even the issuer
@@ -181,7 +209,7 @@ contract AssetTokenFactoryTest is Test {
 
         vm.prank(issuer);
         vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, issuer, 0, 5 ether));
-        token.burnWithReason(5 ether, NativeAssetToken.BurnReason.Cancellation, bytes32(0));
+        token.burnWithReason(5 ether, NativeAssetToken.BurnReason.Cancellation, BURN_REF);
 
         assertEq(token.balanceOf(holder), 5 ether);
     }

@@ -400,8 +400,11 @@ contract Handler is Test {
         address caller = _chaos(actorSeed) ? _actorAt(actorSeed) : nativeIssuer;
         uint256 amount = _chaos(amountSeed) ? 0 : bound(amountSeed, 1, 1_000_000 ether);
 
+        // Chaotic path: a zero doc hash (EmptyDocHash).
+        bytes32 docHash = _chaos(tokenSeed / 2) ? bytes32(0) : keccak256(abi.encode(amountSeed));
+
         vm.prank(caller);
-        registry.requestIssuance(address(token), amount, _actorAt(actorSeed), keccak256(abi.encode(amountSeed)));
+        registry.requestIssuance(address(token), amount, _actorAt(actorSeed), docHash);
     }
 
     /// @dev Batches are numbered 1..next-1. The bounded path picks one of them; the chaotic
@@ -445,8 +448,11 @@ contract Handler is Test {
             amount = bound(amountSeed, 1, balance);
         }
 
+        // Chaotic path: a zero reference (EmptyReference).
+        bytes32 ref = _chaos(tokenSeed / 2) ? bytes32(0) : keccak256(abi.encode(amountSeed));
+
         vm.prank(holder);
-        token.burnWithReason(amount, NativeAssetToken.BurnReason(amountSeed % 2), bytes32(amountSeed));
+        token.burnWithReason(amount, NativeAssetToken.BurnReason(amountSeed % 2), ref);
         ghost_nativeBurned[address(token)] += amount;
     }
 

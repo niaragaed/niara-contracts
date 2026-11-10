@@ -43,6 +43,7 @@ contract NativeAssetToken is ERC20 {
 
     error NotMinter();
     error ZeroAmount();
+    error EmptyReference();
 
     /// @param name_ Token name.
     /// @param symbol_ Token symbol.
@@ -81,9 +82,11 @@ contract NativeAssetToken is ERC20 {
     /// @notice Burns `amount` of the caller's own tokens, recording why.
     /// @param amount Amount to burn.
     /// @param reason `Redemption` or `Cancellation`.
-    /// @param ref Free reference for the off-chain record (e.g. a redemption id or document hash).
+    /// @param ref Non-zero reference for the off-chain record (e.g. the hash of the document
+    /// authorizing the burn, registered in Niara-Register).
     function burnWithReason(uint256 amount, BurnReason reason, bytes32 ref) external {
         if (amount == 0) revert ZeroAmount();
+        if (ref == bytes32(0)) revert EmptyReference();
         _burn(msg.sender, amount);
         emit TokensBurned(msg.sender, amount, reason, ref);
     }
