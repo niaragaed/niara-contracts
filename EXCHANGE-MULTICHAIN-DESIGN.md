@@ -537,6 +537,32 @@ EVM `ListingApproved(address indexed token, address indexed issuer, AssetClass a
 bool cashbackEligible, bytes32 docHash, uint64 approvedAt)` (EVM has no separate listing
 account, so `token` plays the role of both `listing` and `asset_mint`).
 
+### 4.2 EVM vs Solana differences (intentional)
+
+Aligned on both chains: asset classes, listing status table, `ListingApproved` on
+both listing paths (§4.1), issuance batches numbered from 1 with
+`requested_at`/`resolved_at`, `reject_issuance` in any listing status,
+`approve_issuance` blocked while paused, non-zero `doc_hash` / burn `reference`,
+`Currency` never cashback-eligible, `settle` only on `Approved` `Equity` against an
+`Approved` `Currency`. What still differs, on purpose:
+
+| Topic | Solana (`niara_exchange`) | EVM (`niara-contracts`) | Why |
+|---|---|---|---|
+| Asset token origin | Issuer creates the mint; `submit_listing` checks `supply == 0` and moves the mint authority to the program PDA | Issuer deploys through `AssetTokenFactory`; the token's only minter is the `ListingRegistry` from birth (no hand-over, no "finish metadata first" step) | An EVM token's code is fixed at deploy, so a factory gives a known implementation; on Solana the issuer's mint must be accepted and checked |
+| Asset-side safety check | Mint extension allowlist + no freeze authority, at listing and again in `settle` | Only factory tokens can be submitted (plain ERC-20: no fees, rebasing, hooks, pause) | Same goal (known token behavior), enforced by the implementation instead of by inspecting the mint |
+| Listing class and `doc_hash` | Arguments of `submit_listing` | Fixed at `createAssetToken`; `submitListing(token)` copies them from the token | Listing can never disagree with the instrument |
+| Pause scope | One `Config.paused` stops `settle`, withdrawals, `sweep_excess` and `approve_issuance` together | Per contract: `ListingRegistry.pause` stops `approveIssuance`; `NiaraSettlement.pause` stops `settle`; `CashbackDistributor` withdrawals have no pause | Existing EVM pattern (one `Pausable` per contract). An incident needs one call per contract; `PAUSER_ROLE` sits with the admin on each |
+| Batch and burn bookkeeping | `Listing.issued` / `Listing.burned` counters; `burn_with_reason` is a program instruction (`CurrencyNotIssued` for currencies) | No counters in the registry; supply = Σ `IssuanceExecuted` − Σ `TokensBurned`, derivable from events. `burnWithReason` lives on `NativeAssetToken` and emits `TokensBurned` there; currencies simply don't have it | On EVM the token is Niara's own code, so the burn path can live in it |
+| Invariant 11 | `supply ≤ issued − burned` on-chain (holders can burn directly through the token program) | `supply == Σ executed − Σ burned` strictly: `NativeAssetToken` has no other burn path | EVM token has no generic `burn` |
+| Issuance destination | Batch names a wallet; `approve_issuance` takes any token account owned by it; `IssuanceExecuted` has `destination` | Batch names an address that receives the mint; `IssuanceExecuted` has no `destination` | ERC-20 balances live at the address, no separate token account |
+| Event vs effect order | `approve_issuance` mints, then updates state and emits | `approveIssuance` marks the batch, emits `IssuanceExecuted`, then mints (checks-effects-interactions, see CLAUDE.md) | EVM external calls can re-enter; SPL token CPIs cannot |
+| Fee rounding | `fee = ceil(payment × fee_bps / 10 000)`; `ZeroSellerProceeds` if the seller would get 0 | `fee = floor(...)`, reverts `PaymentAmountTooSmallForFeePrecision` if it truncates to 0 while `feeBps > 0` | Pre-existing EVM behavior, kept unchanged; both prevent fee-free trades |
+| Replay protection | `settle(order_id)` creates `["settled", order_id]`: a match settles at most once on-chain | No match id on-chain; idempotency is the off-chain unique constraint on `match_id` (§5) | Not ported yet; candidate for the EVM settle adapter work |
+| Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
+| Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, per-currency `FeeLedger`, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; no ledger accounts, no sweep | Pre-existing EVM distributor, unchanged |
+| Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; no pause | Pre-existing EVM distributor, unchanged |
+| Settlement timestamps on batches | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
+
 ---
 
 ## 5. Off-chain (Supabase `niara-exchange-dev`)
