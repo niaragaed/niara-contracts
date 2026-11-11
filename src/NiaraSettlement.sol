@@ -91,6 +91,7 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
     error PaymentTokenNotApprovedCurrency(address paymentToken);
     error TransferAmountMismatch(address token, uint256 expected, uint256 received);
     error MatchAlreadySettled(bytes16 matchId);
+    error ZeroMatchId();
 
     /// @param admin_ Holder of DEFAULT_ADMIN_ROLE.
     /// @param cashbackDistributor_ CashbackDistributor that receives the fee.
@@ -119,7 +120,8 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
 
     /// @notice Executes the atomic settlement of an already matched order.
     /// @param matchId Off-chain match (fill) id, a 16-byte UUID. Each match settles at most
-    /// once: settling the same `matchId` again reverts `MatchAlreadySettled`.
+    /// once: settling the same `matchId` again reverts `MatchAlreadySettled`. The all-zero
+    /// id is rejected (`ZeroMatchId`): it is what an unset id looks like, never a real UUID.
     /// @param assetToken Token of the tokenized asset being traded.
     /// @param paymentToken Settlement currency; must be `feeToken` (USDT). Passed explicitly
     /// so a fee-token switch can never settle a match priced in the old token.
@@ -139,6 +141,7 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
         uint256 assetAmount,
         uint256 paymentAmount
     ) external nonReentrant onlyRole(SETTLEMENT_OPERATOR_ROLE) whenProtocolNotPaused returns (uint256 feeCharged) {
+        if (matchId == bytes16(0)) revert ZeroMatchId();
         if (settledMatches[matchId]) revert MatchAlreadySettled(matchId);
         if (assetToken == address(0) || paymentToken == address(0)) revert ZeroAddress();
         if (buyer == address(0) || seller == address(0)) revert ZeroAddress();

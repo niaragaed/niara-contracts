@@ -1001,14 +1001,25 @@ contract NiaraSettlementTest is Test {
         assertEq(assetToken.balanceOf(buyer), 20 ether);
     }
 
-    /// @notice The all-zero id is an id like any other (Solana accepts any 16 bytes too):
-    /// it settles once.
-    function test_Settle_ZeroMatchIdSettlesOnce() public {
+    /// @notice The all-zero id is what an unset id looks like, never a real match UUID: it is
+    /// rejected before anything else is checked, nothing moves and it is not marked settled.
+    function test_Settle_RevertsForZeroMatchId() public {
         vm.prank(operator);
+        vm.expectRevert(NiaraSettlement.ZeroMatchId.selector);
         settlement.settle(bytes16(0), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+
+        assertFalse(settlement.settledMatches(bytes16(0)));
+        assertEq(assetToken.balanceOf(buyer), 0);
+        assertEq(usdt.balanceOf(seller), 0);
+        assertEq(usdt.balanceOf(address(distributor)), 0);
+    }
+
+    /// @notice The smallest non-zero id is a valid id.
+    function test_Settle_SmallestNonZeroMatchIdSettles() public {
+        bytes16 one = bytes16(uint128(1));
         vm.prank(operator);
-        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.MatchAlreadySettled.selector, bytes16(0)));
-        settlement.settle(bytes16(0), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(one, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        assertTrue(settlement.settledMatches(one));
     }
 
     /// @notice Checks-effects-interactions: the match is already marked settled when the
