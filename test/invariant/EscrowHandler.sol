@@ -458,7 +458,7 @@ contract EscrowHandler is Test {
     }
 
     /// @notice Jumps to the expiry boundary of a deal (one second before, exactly at, or one
-    /// second after `expiresAt`) and tries to accept it and then to expire it right there.
+    /// second after `expiresAt`) and tries both to accept it and to expire it right there.
     /// Random clock jumps almost never land on the boundary, and that is where invariant 7
     /// can break by one second.
     function probeExpiryBoundary(uint256 dealSeed, uint256 offsetSeed) external {
@@ -467,9 +467,15 @@ contract EscrowHandler is Test {
         uint256 target = uint256(d.expiresAt) + (_mix(offsetSeed) % 3) - 1;
         if (target <= block.timestamp) return;
         vm.warp(target);
-        // Seeds whose hash is not "chaos": the right signer for both calls.
-        this.acceptDeal(dealSeed, 1);
-        this.expireDeal(dealSeed, 1);
+        // Either order: whichever is tried first meets the deal still open. The caller seed
+        // 1 is not a "chaos" seed, so `acceptDeal` is signed by the counterparty.
+        if ((_mix(offsetSeed) >> 8) % 2 == 0) {
+            this.acceptDeal(dealSeed, 1);
+            this.expireDeal(dealSeed, 1);
+        } else {
+            this.expireDeal(dealSeed, 1);
+            this.acceptDeal(dealSeed, 1);
+        }
     }
 
     function warp(uint256 secondsSeed) external {
