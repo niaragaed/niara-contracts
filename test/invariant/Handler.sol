@@ -66,6 +66,13 @@ contract Handler is Test {
     /// @notice Successful settlements (sanity: shows the fuzzer reaches the happy path).
     uint256 public ghost_successfulSettlements;
 
+    /// @notice Match ids that already settled successfully, and the count of settlements that
+    /// succeeded with an id already in this set. The count must stay zero.
+    mapping(bytes16 matchId => bool) public ghost_matchSettled;
+    bytes16[] public ghost_settledMatchIds;
+    uint256 public ghost_replayedSettlements;
+    uint128 internal matchCounter;
+
     /// @notice Successful settlements, cashback withdrawals or protocol-fee withdrawals while
     /// the protocol was paused. Must stay zero (spec §3.3, pause principle).
     uint256 public ghost_payoutsWhilePaused;
@@ -293,6 +300,20 @@ contract Handler is Test {
 
     // ── Atomic settlement ──────────────────────────────────────────────────────────────
 
+    /// @dev One settle attempt, grouped in a struct to stay clear of "stack too deep".
+    struct SettleCase {
+        bytes16 matchId;
+        address buyer;
+        address seller;
+        address asset;
+        address paymentToken;
+        uint256 assetAmount;
+        uint256 paymentAmount;
+        uint256 cashbackBefore;
+        uint256 sellerPaymentBefore;
+        uint256 buyerAssetBefore;
+    }
+
     function settle(
         uint256 buyerSeed,
         uint256 sellerSeed,
@@ -301,38 +322,64 @@ contract Handler is Test {
         uint256 assetAmountSeed,
         uint256 paymentAmountSeed
     ) external {
-        address buyer = _actorAt(buyerSeed);
-        address seller = _chaos(sellerSeed) ? buyer : _distinctActor(sellerSeed, buyer);
-        address asset = _pickSettleAsset(assetSeed);
-        address paymentToken = _pickSettlePayment(paymentSeed);
+        SettleCase memory c;
+        c.buyer = _actorAt(buyerSeed);
+        c.seller = _chaos(sellerSeed) ? c.buyer : _distinctActor(sellerSeed, c.buyer);
+        c.asset = _pickSettleAsset(assetSeed);
+        c.paymentToken = _pickSettlePayment(paymentSeed);
 
-        uint256 assetAmount = _pickAssetAmount(asset, seller, assetAmountSeed);
-        if (assetAmount == 0) return;
-        uint256 paymentAmount = _pickPaymentAmount(paymentToken, buyer, paymentAmountSeed);
+        c.assetAmount = _pickAssetAmount(c.asset, c.seller, assetAmountSeed);
+        if (c.assetAmount == 0) return;
+        c.paymentAmount = _pickPaymentAmount(c.paymentToken, c.buyer, paymentAmountSeed);
 
-        vm.prank(seller);
-        IERC20(asset).approve(address(settlement), assetAmount);
-        vm.prank(buyer);
-        IERC20(paymentToken).approve(address(settlement), paymentAmount);
+        vm.prank(c.seller);
+        IERC20(c.asset).approve(address(settlement), c.assetAmount);
+        vm.prank(c.buyer);
+        IERC20(c.paymentToken).approve(address(settlement), c.paymentAmount);
 
-        uint256 cashbackBefore = distributor.cashbackBalance(asset, paymentToken);
-        uint256 sellerPaymentBefore = IERC20(paymentToken).balanceOf(seller);
-        uint256 buyerAssetBefore = IERC20(asset).balanceOf(buyer);
+        c.matchId = _pickMatchId(buyerSeed);
+        c.cashbackBefore = distributor.cashbackBalance(c.asset, c.paymentToken);
+        c.sellerPaymentBefore = IERC20(c.paymentToken).balanceOf(c.seller);
+        c.buyerAssetBefore = IERC20(c.asset).balanceOf(c.buyer);
         vm.prank(settlementOperator);
-        uint256 feeCharged = settlement.settle(asset, paymentToken, buyer, seller, assetAmount, paymentAmount);
-        _recordSettleGhosts(asset, paymentToken, feeCharged, cashbackBefore);
+        uint256 feeCharged = settlement.settle(
+            c.matchId, c.asset, c.paymentToken, c.buyer, c.seller, c.assetAmount, c.paymentAmount
+        );
+        _recordSettleOutcome(c, feeCharged);
+    }
+
+    /// @dev Reached only if settle did not revert.
+    function _recordSettleOutcome(SettleCase memory c, uint256 feeCharged) internal {
+        if (ghost_matchSettled[c.matchId]) ghost_replayedSettlements++;
+        ghost_matchSettled[c.matchId] = true;
+        ghost_settledMatchIds.push(c.matchId);
+        _recordSettleGhosts(c.asset, c.paymentToken, feeCharged, c.cashbackBefore);
         if (registry.paused()) ghost_payoutsWhilePaused++;
-        if (registry.getListing(asset).cashbackFrozen) {
+        if (registry.getListing(c.asset).cashbackFrozen) {
             ghost_settlementsWhileFrozen++;
-            uint256 credited = distributor.cashbackBalance(asset, paymentToken) - cashbackBefore;
+            uint256 credited = distributor.cashbackBalance(c.asset, c.paymentToken) - c.cashbackBefore;
             if (credited != (feeCharged * distributor.cashbackBps()) / 10_000) ghost_frozenAccrualMismatch++;
         }
 
         // The party receiving USDT (the seller) pays the fee out of it; the other party
         // receives its leg in full.
-        bool sellerPaidFee = IERC20(paymentToken).balanceOf(seller) - sellerPaymentBefore == paymentAmount - feeCharged;
-        bool buyerGotFullLeg = IERC20(asset).balanceOf(buyer) - buyerAssetBefore == assetAmount;
+        bool sellerPaidFee =
+            IERC20(c.paymentToken).balanceOf(c.seller) - c.sellerPaymentBefore == c.paymentAmount - feeCharged;
+        bool buyerGotFullLeg = IERC20(c.asset).balanceOf(c.buyer) - c.buyerAssetBefore == c.assetAmount;
         if (!sellerPaidFee || !buyerGotFullLeg) ghost_feeNotPaidByUsdtReceiver++;
+    }
+
+    /// @dev A fresh match id most of the time; the chaotic path replays one that already
+    /// settled (must revert MatchAlreadySettled).
+    function _pickMatchId(uint256 seed) internal returns (bytes16) {
+        uint256 settled = ghost_settledMatchIds.length;
+        if (_chaos(seed / 7) && settled > 0) return ghost_settledMatchIds[seed % settled];
+        return bytes16(++matchCounter);
+    }
+
+    /// @notice Number of match ids that settled (for the invariant's per-id check).
+    function settledMatchCount() external view returns (uint256) {
+        return ghost_settledMatchIds.length;
     }
 
     /// @dev Spans every listing situation: backed tokens (never listable), the native

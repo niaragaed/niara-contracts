@@ -39,6 +39,13 @@ contract IntegrationTest is Test {
 
     uint256 public constant TIMELOCK_DELAY = 2 days;
 
+    uint128 internal matchCounter;
+
+    /// @dev A fresh match id per settlement (internal: does not consume a pending prank).
+    function _nextMatchId() internal returns (bytes16) {
+        return bytes16(++matchCounter);
+    }
+
     function setUp() public {
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
         distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
@@ -118,7 +125,7 @@ contract IntegrationTest is Test {
         usdt.approve(address(settlement), 10_000e6);
 
         vm.prank(settlementOperator);
-        uint256 feeCharged = settlement.settle(address(acme), address(usdt), buyer, seller, 100 ether, 10_000e6);
+        uint256 feeCharged = settlement.settle(_nextMatchId(), address(acme), address(usdt), buyer, seller, 100 ether, 10_000e6);
 
         uint256 expectedFee = (10_000e6 * settlement.feeBps()) / 10_000;
         assertEq(feeCharged, expectedFee);
@@ -149,7 +156,7 @@ contract IntegrationTest is Test {
         usdt.approve(address(settlement), 100e6);
         vm.prank(settlementOperator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(acme)));
-        settlement.settle(address(acme), address(usdt), buyer, seller, 1 ether, 100e6);
+        settlement.settle(_nextMatchId(), address(acme), address(usdt), buyer, seller, 1 ether, 100e6);
     }
 
     /// @notice One shared pause (spec §3.3): a single `registry.pause()` stops issuance
@@ -175,7 +182,7 @@ contract IntegrationTest is Test {
         vm.prank(buyer);
         usdt.approve(address(settlement), type(uint256).max);
         vm.prank(settlementOperator);
-        uint256 fee = settlement.settle(address(acme), address(usdt), buyer, seller, 100 ether, 10_000e6);
+        uint256 fee = settlement.settle(_nextMatchId(), address(acme), address(usdt), buyer, seller, 100 ether, 10_000e6);
         uint256 cashback = distributor.cashbackBalance(address(acme), address(usdt));
         uint256 protocolShare = distributor.protocolBalance(address(usdt));
         assertEq(cashback + protocolShare, fee);
@@ -195,7 +202,7 @@ contract IntegrationTest is Test {
 
         vm.prank(settlementOperator);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        settlement.settle(address(acme), address(usdt), buyer, seller, 1 ether, 100e6);
+        settlement.settle(_nextMatchId(), address(acme), address(usdt), buyer, seller, 1 ether, 100e6);
 
         vm.prank(issuer);
         vm.expectRevert(Pausable.EnforcedPause.selector);
@@ -218,7 +225,7 @@ contract IntegrationTest is Test {
         vm.prank(listingAuthority);
         registry.approveIssuance(address(acme), batch2);
         vm.prank(settlementOperator);
-        settlement.settle(address(acme), address(usdt), buyer, seller, 1 ether, 100e6);
+        settlement.settle(_nextMatchId(), address(acme), address(usdt), buyer, seller, 1 ether, 100e6);
         vm.prank(issuer);
         distributor.withdraw(address(acme), address(usdt));
         assertGe(usdt.balanceOf(issuer), cashback);
@@ -252,7 +259,7 @@ contract IntegrationTest is Test {
         usdt.approve(address(settlement), 10_000e6);
         vm.prank(settlementOperator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(assetToken)));
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 100 ether, 10_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 100 ether, 10_000e6);
 
         // 3. Redemption: the holder returns part of the tokens for the real-world asset.
         vm.prank(seller);

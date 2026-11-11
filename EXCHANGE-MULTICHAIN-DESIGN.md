@@ -733,7 +733,11 @@ receives the USDT, pays the fee), and the per-listing cashback freeze (§9.5; EV
 timelock, any listing status, allowed while paused, `NotCashbackEligible` /
 `CashbackAlreadyFrozen` / `CashbackNotFrozen`, `CashbackFreezeSet(token, frozen,
 listingAuthority)`; `CashbackDistributor.withdraw` reverts `CashbackFrozen` while accrual
-continues). What still differs, on purpose:
+continues), and on-chain replay protection: a match id settles at most once (EVM:
+`settle(bytes16 matchId, ...)` marks `settledMatches[matchId]` before any transfer and
+reverts `MatchAlreadySettled` on a second attempt; `Settled` carries `matchId` first, like
+Solana's `order_id`; a storage slot instead of a `SettlementRecord` account, so no rent).
+What still differs, on purpose:
 
 | Topic | Solana (`niara_exchange`) | EVM (`niara-contracts`) | Why |
 |---|---|---|---|
@@ -746,7 +750,6 @@ continues). What still differs, on purpose:
 | Issuance destination | Batch names a wallet; `approve_issuance` takes any token account owned by it; `IssuanceExecuted` has `destination` | Batch names an address that receives the mint; `IssuanceExecuted` has no `destination` | ERC-20 balances live at the address, no separate token account |
 | Event vs effect order | `approve_issuance` mints, then updates state and emits | `approveIssuance` marks the batch, emits `IssuanceExecuted`, then mints (checks-effects-interactions, see CLAUDE.md) | EVM external calls can re-enter; SPL token CPIs cannot |
 | Fee rounding | `fee = ceil(payment × fee_bps / 10 000)`; `ZeroSellerProceeds` if the seller would get 0 | `fee = floor(...)`, reverts `PaymentAmountTooSmallForFeePrecision` if it truncates to 0 while `feeBps > 0` | Pre-existing EVM behavior, kept unchanged; both prevent fee-free trades |
-| Replay protection | `settle(order_id)` creates `["settled", order_id]`: a match settles at most once on-chain | No match id on-chain; idempotency is the off-chain unique constraint on `match_id` (§5) | Not ported yet; candidate for the EVM settle adapter work |
 | Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
 | Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, one `FeeLedger` for the fee mint, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; balances are kept per (asset, token) and per token, so only USDT ever accrues, and a fee-token switch leaves old balances withdrawable; no ledger accounts, no sweep | Pre-existing EVM distributor; `settle` alone enforces the fee token |
 | Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; blocked while paused and while the listing's cashback is frozen (`Listing.cashbackFrozen`, read from the registry) | Pre-existing EVM distributor's payout shape (no amount, no destination) kept |

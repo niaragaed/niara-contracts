@@ -54,11 +54,17 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
     /// @notice Contract that receives the fee and credits cashback to the issuer when eligible.
     ICashbackDistributor public cashbackDistributor;
 
+    /// @notice Replay guard: true once the match `matchId` (the off-chain match / fill UUID,
+    /// `matches.id`) has settled. A match settles at most once, even within the delegated
+    /// allowances (Solana: the `["settled", order_id]` SettlementRecord). Never reset.
+    mapping(bytes16 matchId => bool) public settledMatches;
+
     // `listingRegistry` (inherited from ProtocolPausable, immutable) decides which assets and
     // payment tokens can settle, and holds the shared pause. Replacing it means deploying a
     // new NiaraSettlement.
 
     event Settled(
+        bytes16 matchId,
         address indexed assetToken,
         address indexed paymentToken,
         address indexed buyer,
@@ -84,6 +90,7 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
     error AssetNotEquity(address assetToken);
     error PaymentTokenNotApprovedCurrency(address paymentToken);
     error TransferAmountMismatch(address token, uint256 expected, uint256 received);
+    error MatchAlreadySettled(bytes16 matchId);
 
     /// @param admin_ Holder of DEFAULT_ADMIN_ROLE.
     /// @param cashbackDistributor_ CashbackDistributor that receives the fee.
@@ -111,6 +118,8 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
     }
 
     /// @notice Executes the atomic settlement of an already matched order.
+    /// @param matchId Off-chain match (fill) id, a 16-byte UUID. Each match settles at most
+    /// once: settling the same `matchId` again reverts `MatchAlreadySettled`.
     /// @param assetToken Token of the tokenized asset being traded.
     /// @param paymentToken Settlement currency; must be `feeToken` (USDT). Passed explicitly
     /// so a fee-token switch can never settle a match priced in the old token.
@@ -122,6 +131,7 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
     /// deducted from this amount before it reaches the seller.
     /// @return feeCharged Fee retained, in `paymentToken`.
     function settle(
+        bytes16 matchId,
         address assetToken,
         address paymentToken,
         address buyer,
@@ -129,6 +139,7 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
         uint256 assetAmount,
         uint256 paymentAmount
     ) external nonReentrant onlyRole(SETTLEMENT_OPERATOR_ROLE) whenProtocolNotPaused returns (uint256 feeCharged) {
+        if (settledMatches[matchId]) revert MatchAlreadySettled(matchId);
         if (assetToken == address(0) || paymentToken == address(0)) revert ZeroAddress();
         if (buyer == address(0) || seller == address(0)) revert ZeroAddress();
         if (buyer == seller) revert BuyerEqualsSeller();
@@ -154,13 +165,15 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
 
         uint256 sellerProceeds = paymentAmount - feeCharged;
 
-        // Checks-effects-interactions: `Settled` is emitted BEFORE any external call. A
-        // payment token with a hook (ERC-777/ERC-1363) that re-enters another function during
-        // one of the `safeTransferFrom` calls below already sees this settlement's event
-        // emitted, so off-chain indexers never observe a re-entry "before" the operation
-        // that caused it. Since `settle` holds no balance and keeps no per-order state, the
-        // event is the only effect to order here.
-        emit Settled(assetToken, paymentToken, buyer, seller, assetAmount, paymentAmount, feeCharged);
+        // Checks-effects-interactions: the match is marked settled and `Settled` is emitted
+        // BEFORE any external call. A token with a hook (ERC-777/ERC-1363) that re-enters
+        // during one of the `safeTransferFrom` calls below already sees this match settled
+        // (it can never settle twice, whatever the entry point) and this settlement's event
+        // emitted, so off-chain indexers never observe a re-entry "before" the operation that
+        // caused it. `settle` holds no balance: the replay flag and the event are the only
+        // effects to order here.
+        settledMatches[matchId] = true;
+        emit Settled(matchId, assetToken, paymentToken, buyer, seller, assetAmount, paymentAmount, feeCharged);
 
         _safeTransferFromExact(IERC20(assetToken), seller, buyer, assetAmount);
         _safeTransferFromExact(IERC20(paymentToken), buyer, seller, sellerProceeds);

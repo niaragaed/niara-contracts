@@ -74,6 +74,11 @@ configured `feeToken` (`NotFeeToken` otherwise), changed only through the timelo
 the seller, who receives the USDT, pays the fee out of it. Any failure reverts
 everything. It works entirely through `allowance` and never holds the parties' balances.
 
+Replay protection: `settle` takes the off-chain match id (`bytes16 matchId`, the
+`matches.id` UUID) first. `settledMatches[matchId]` is set before any transfer, so a
+match settles at most once (`MatchAlreadySettled`), and `Settled` carries the `matchId`.
+A settlement that reverts does not consume its id.
+
 Fee: 50 bps (0.5%) by default, with a hard, immutable cap of 100 bps (1%) that not even
 the admin can exceed. Restricted to `SETTLEMENT_OPERATOR_ROLE` (Niara's order-matching
 engine): allowance authorizes moving funds, but only the authorized operator decides

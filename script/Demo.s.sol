@@ -126,6 +126,7 @@ contract DemoNiaraFlow is Script {
 
         vm.startBroadcast(deployerPrivateKey);
         uint256 feeCharged = c.settlement.settle(
+            bytes16(keccak256("niara-demo-match-1")),
             address(c.assetToken), address(c.usdt), buyer, cfg.seller, cfg.settleAssetAmount, cfg.settlePaymentAmount
         );
         vm.stopBroadcast();

@@ -40,6 +40,10 @@ contract NiaraSettlementTest is Test {
     bytes32 public constant DOC_HASH = keccak256("acme-offering-document");
 
     bytes32 public settlementOperatorRole;
+
+    /// @dev Match id used by re-entrant calls armed in hostile tokens.
+    bytes16 internal constant REENTRANT_MATCH_ID = bytes16(keccak256("reentrant-match"));
+    uint128 internal matchCounter;
     bytes32 public settlementRoleOnDistributor;
 
     function setUp() public {
@@ -101,6 +105,11 @@ contract NiaraSettlementTest is Test {
         settlement.executeSetFeeToken(token);
     }
 
+    /// @dev A fresh match id per settlement (internal: does not consume a pending prank).
+    function _nextMatchId() internal returns (bytes16) {
+        return bytes16(++matchCounter);
+    }
+
     // ── Listing helpers ────────────────────────────────────────────────────────────────
 
     /// @dev Creates a native instrument, submits and approves its listing, and issues
@@ -136,7 +145,7 @@ contract NiaraSettlementTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, seller, settlementOperatorRole)
         );
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_TransfersAssetAndPayment_USDT() public {
@@ -144,7 +153,7 @@ contract NiaraSettlementTest is Test {
         uint256 expectedFee = (paymentAmount * settlement.feeBps()) / 10_000;
 
         vm.prank(operator);
-        uint256 feeCharged = settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, paymentAmount);
+        uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, paymentAmount);
 
         assertEq(feeCharged, expectedFee);
         assertEq(assetToken.balanceOf(buyer), 10 ether);
@@ -161,7 +170,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.NotFeeToken.selector, address(wbtc)));
-        settlement.settle(address(assetToken), address(wbtc), buyer, seller, 5 ether, 1e8);
+        settlement.settle(_nextMatchId(), address(assetToken), address(wbtc), buyer, seller, 5 ether, 1e8);
 
         assertEq(assetToken.balanceOf(buyer), 0);
         assertEq(wbtc.balanceOf(seller), 0);
@@ -175,7 +184,7 @@ contract NiaraSettlementTest is Test {
         uint256 fee = (paymentAmount * settlement.feeBps()) / 10_000;
 
         vm.prank(operator);
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, paymentAmount);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, paymentAmount);
 
         assertEq(assetToken.balanceOf(buyer), 10 ether);
         assertEq(usdt.balanceOf(buyer), 1_000_000e6 - paymentAmount);
@@ -187,7 +196,7 @@ contract NiaraSettlementTest is Test {
         // Default feeBps = 50 (0.5%). 123_456_789 * 50 / 10000 = 617_283 (truncated).
         uint256 paymentAmount = 123_456_789;
         vm.prank(operator);
-        uint256 feeCharged = settlement.settle(address(assetToken), address(usdt), buyer, seller, 1 ether, paymentAmount);
+        uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 1 ether, paymentAmount);
         assertEq(feeCharged, 617_283);
     }
 
@@ -199,7 +208,7 @@ contract NiaraSettlementTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(settlement), 0, 10 ether)
         );
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsWithoutBuyerAllowance() public {
@@ -208,31 +217,31 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert();
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsOnZeroAssetAmount() public {
         vm.prank(operator);
         vm.expectRevert(NiaraSettlement.ZeroAmount.selector);
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 0, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 0, 1_000e6);
     }
 
     function test_Settle_RevertsOnZeroPaymentAmount() public {
         vm.prank(operator);
         vm.expectRevert(NiaraSettlement.ZeroAmount.selector);
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 0);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 0);
     }
 
     function test_Settle_RevertsIfBuyerEqualsSeller() public {
         vm.prank(operator);
         vm.expectRevert(NiaraSettlement.BuyerEqualsSeller.selector);
-        settlement.settle(address(assetToken), address(usdt), seller, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), seller, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsOnZeroTokenAddress() public {
         vm.prank(operator);
         vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
-        settlement.settle(address(0), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(0), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     /// @notice Rounding: tiny amounts cannot truncate the fee to zero while
@@ -241,14 +250,14 @@ contract NiaraSettlementTest is Test {
         // feeBps = 50 → paymentAmount=1 gera fee = 0 por truncamento (1*50/10000 = 0).
         vm.prank(operator);
         vm.expectRevert(NiaraSettlement.PaymentAmountTooSmallForFeePrecision.selector);
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 1, 1);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 1, 1);
     }
 
     function test_Settle_AllowsZeroFeeWhenFeeBpsIsZero() public {
         _setFeeBps(0);
 
         vm.prank(operator);
-        uint256 feeCharged = settlement.settle(address(assetToken), address(usdt), buyer, seller, 1, 1);
+        uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 1, 1);
 
         assertEq(feeCharged, 0);
         assertEq(usdt.balanceOf(address(distributor)), 0);
@@ -262,7 +271,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
         assertEq(assetToken.balanceOf(buyer), 0);
     }
 
@@ -332,13 +341,13 @@ contract NiaraSettlementTest is Test {
         evilAsset.armOnTransferFrom(
             address(settlement),
             abi.encodeWithSelector(
-                settlement.settle.selector, address(assetToken), address(usdt), buyer, seller, 1 ether, 100e6
+                settlement.settle.selector, REENTRANT_MATCH_ID, address(assetToken), address(usdt), buyer, seller, 1 ether, 100e6
             )
         );
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(evilAsset)));
-        settlement.settle(address(evilAsset), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(evilAsset), address(usdt), buyer, seller, 10 ether, 1_000e6);
 
         assertFalse(evilAsset.reentered());
         assertEq(evilAsset.balanceOf(buyer), 0);
@@ -356,7 +365,7 @@ contract NiaraSettlementTest is Test {
         evilPayment.approve(address(settlement), type(uint256).max);
 
         bytes memory reentrantCall = abi.encodeWithSelector(
-            settlement.settle.selector, address(assetToken), address(evilPayment), buyer, seller, 10 ether, 1_000e6
+            settlement.settle.selector, REENTRANT_MATCH_ID, address(assetToken), address(evilPayment), buyer, seller, 10 ether, 1_000e6
         );
         evilPayment.arm(address(settlement), reentrantCall);
 
@@ -364,7 +373,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert();
-        settlement.settle(address(assetToken), address(evilPayment), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(evilPayment), buyer, seller, 10 ether, 1_000e6);
 
         assertEq(assetToken.balanceOf(seller), sellerAssetBalanceBefore);
     }
@@ -384,10 +393,10 @@ contract NiaraSettlementTest is Test {
         vm.recordLogs();
 
         vm.prank(operator);
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        bytes32 settledTopic = keccak256("Settled(address,address,address,address,uint256,uint256,uint256)");
+        bytes32 settledTopic = keccak256("Settled(bytes16,address,address,address,address,uint256,uint256,uint256)");
         bytes32 transferTopic = keccak256("Transfer(address,address,uint256)");
 
         uint256 settledIndex = type(uint256).max;
@@ -422,14 +431,14 @@ contract NiaraSettlementTest is Test {
         evilPayment.armOnTransferFrom(
             address(settlement),
             abi.encodeWithSelector(
-                settlement.settle.selector, address(assetToken), address(evilPayment), buyer, seller, 1 ether, 100e6
+                settlement.settle.selector, REENTRANT_MATCH_ID, address(assetToken), address(evilPayment), buyer, seller, 1 ether, 100e6
             )
         );
 
         uint256 sellerAssetBefore = assetToken.balanceOf(seller);
 
         vm.prank(operator);
-        uint256 feeCharged = settlement.settle(address(assetToken), address(evilPayment), buyer, seller, 10 ether, 1_000e6);
+        uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(evilPayment), buyer, seller, 10 ether, 1_000e6);
 
         assertTrue(evilPayment.reentered());
         assertFalse(evilPayment.reentrantSucceeded());
@@ -483,7 +492,7 @@ contract NiaraSettlementTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, seller, settlementOperatorRole)
         );
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     /// @notice End to end: the registry pause blocks `settle`; unpausing restores it.
@@ -494,14 +503,14 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
 
         vm.prank(admin);
         registry.unpause();
         assertFalse(settlement.paused());
 
         vm.prank(operator);
-        uint256 feeCharged = settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
         assertGt(feeCharged, 0);
         assertEq(assetToken.balanceOf(buyer), 10 ether);
     }
@@ -602,7 +611,7 @@ contract NiaraSettlementTest is Test {
     /// stays withdrawable: the distributor keeps balances per token.
     function test_FeeToken_SwitchMovesSettlementToNewTokenAndKeepsOldCashback() public {
         vm.prank(operator);
-        uint256 oldFee = settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        uint256 oldFee = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
         uint256 oldCashback = (oldFee * distributor.cashbackBps()) / 10_000;
         assertEq(distributor.cashbackBalance(address(assetToken), address(usdt)), oldCashback);
 
@@ -610,10 +619,10 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.NotFeeToken.selector, address(usdt)));
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
 
         vm.prank(operator);
-        uint256 newFee = settlement.settle(address(assetToken), address(wbtc), buyer, seller, 5 ether, 1e8);
+        uint256 newFee = settlement.settle(_nextMatchId(), address(assetToken), address(wbtc), buyer, seller, 5 ether, 1e8);
         assertEq(wbtc.balanceOf(address(distributor)), newFee);
         assertEq(wbtc.balanceOf(seller), 1e8 - newFee);
 
@@ -632,7 +641,7 @@ contract NiaraSettlementTest is Test {
         MockUSDT unlisted = new MockUSDT();
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(unlisted)));
-        settlement.settle(address(unlisted), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(unlisted), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsForPendingAsset() public {
@@ -644,7 +653,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, pending));
-        settlement.settle(pending, address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), pending, address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsForSuspendedAsset() public {
@@ -653,7 +662,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(assetToken)));
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_ResumesAfterReapproval() public {
@@ -663,7 +672,7 @@ contract NiaraSettlementTest is Test {
         registry.approveListing(address(assetToken));
 
         vm.prank(operator);
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
         assertEq(assetToken.balanceOf(buyer), 10 ether);
     }
 
@@ -673,7 +682,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(assetToken)));
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsForApprovedFixedIncome() public {
@@ -683,7 +692,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetNotEquity.selector, address(bond)));
-        settlement.settle(address(bond), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(bond), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsForApprovedCredit() public {
@@ -693,7 +702,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetNotEquity.selector, address(loan)));
-        settlement.settle(address(loan), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(loan), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     /// @notice An Approved Currency is not an order-book asset: USDT cannot be the "asset"
@@ -705,7 +714,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetNotEquity.selector, address(usdt)));
-        settlement.settle(address(usdt), address(usdt), buyer, seller, 10e6, 1e6);
+        settlement.settle(_nextMatchId(), address(usdt), address(usdt), buyer, seller, 10e6, 1e6);
         assertEq(distributor.cashbackBalance(address(usdt), address(usdt)), 0);
     }
 
@@ -727,7 +736,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(backed)));
-        settlement.settle(address(backed), address(usdt), buyer, seller, 1 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(backed), address(usdt), buyer, seller, 1 ether, 1_000e6);
     }
 
     // ── Listing gate: payment token must be an Approved Currency listing ───────────────
@@ -740,7 +749,7 @@ contract NiaraSettlementTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(NiaraSettlement.PaymentTokenNotApprovedCurrency.selector, address(unlisted))
         );
-        settlement.settle(address(assetToken), address(unlisted), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(unlisted), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsForSuspendedCurrency() public {
@@ -749,7 +758,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.PaymentTokenNotApprovedCurrency.selector, address(usdt)));
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsForDelistedCurrency() public {
@@ -758,7 +767,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.PaymentTokenNotApprovedCurrency.selector, address(usdt)));
-        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     /// @notice An Approved non-Currency listing (here another Equity) is not a valid
@@ -771,7 +780,7 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.PaymentTokenNotApprovedCurrency.selector, address(other)));
-        settlement.settle(address(assetToken), address(other), buyer, seller, 10 ether, 100 ether);
+        settlement.settle(_nextMatchId(), address(assetToken), address(other), buyer, seller, 10 ether, 100 ether);
     }
 
     // ── Balance-delta check ────────────────────────────────────────────────────────────
@@ -798,7 +807,7 @@ contract NiaraSettlementTest is Test {
                 NiaraSettlement.TransferAmountMismatch.selector, address(fot), sellerProceeds, delivered
             )
         );
-        settlement.settle(address(assetToken), address(fot), buyer, seller, 10 ether, paymentAmount);
+        settlement.settle(_nextMatchId(), address(assetToken), address(fot), buyer, seller, 10 ether, paymentAmount);
 
         assertEq(fot.balanceOf(seller), 0);
         assertEq(assetToken.balanceOf(buyer), 0);
@@ -823,7 +832,7 @@ contract NiaraSettlementTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(NiaraSettlement.TransferAmountMismatch.selector, address(shrink), sellerProceeds, 0)
         );
-        settlement.settle(address(assetToken), address(shrink), buyer, seller, 10 ether, paymentAmount);
+        settlement.settle(_nextMatchId(), address(assetToken), address(shrink), buyer, seller, 10 ether, paymentAmount);
     }
 
     /// @notice With `feeBps = 0` the fee leg is skipped and a fee-on-transfer token still
@@ -841,7 +850,7 @@ contract NiaraSettlementTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(NiaraSettlement.TransferAmountMismatch.selector, address(fot), 1_000e6, 995e6)
         );
-        settlement.settle(address(assetToken), address(fot), buyer, seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(fot), buyer, seller, 10 ether, 1_000e6);
     }
 
     /// @notice Fuzz: for any successful settlement, what the seller and the distributor
@@ -855,7 +864,7 @@ contract NiaraSettlementTest is Test {
         uint256 buyerBefore = usdt.balanceOf(buyer);
 
         vm.prank(operator);
-        uint256 fee = settlement.settle(address(assetToken), address(usdt), buyer, seller, assetAmount, paymentAmount);
+        uint256 fee = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, assetAmount, paymentAmount);
 
         uint256 sellerGot = usdt.balanceOf(seller) - sellerBefore;
         uint256 distributorGot = usdt.balanceOf(address(distributor)) - distributorBefore;
@@ -868,7 +877,7 @@ contract NiaraSettlementTest is Test {
     /// @notice Cashback still flows to the native issuer through the unchanged distributor.
     function test_Settle_CreditsCashbackToNativeIssuer() public {
         vm.prank(operator);
-        uint256 fee = settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        uint256 fee = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
 
         uint256 expectedCashback = (fee * distributor.cashbackBps()) / 10_000;
         assertGt(expectedCashback, 0);
@@ -884,13 +893,13 @@ contract NiaraSettlementTest is Test {
     function test_Settle_RevertsOnZeroBuyer() public {
         vm.prank(operator);
         vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
-        settlement.settle(address(assetToken), address(usdt), address(0), seller, 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), address(0), seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsOnZeroSeller() public {
         vm.prank(operator);
         vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
-        settlement.settle(address(assetToken), address(usdt), buyer, address(0), 10 ether, 1_000e6);
+        settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, address(0), 10 ether, 1_000e6);
     }
 
     function test_ProposeSetCashbackDistributor_RevertsForZeroAddress() public {
@@ -910,5 +919,117 @@ contract NiaraSettlementTest is Test {
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.FeeExceedsCap.selector, tooHigh));
         settlement.executeSetFeeBps(tooHigh);
+    }
+
+    // ── Replay protection (one settlement per match id) ───────────────────────────────
+
+    bytes16 internal constant MATCH_ID = bytes16(keccak256("match-0001"));
+
+    function test_Settle_MarksMatchSettledAndEmitsMatchId() public {
+        assertFalse(settlement.settledMatches(MATCH_ID));
+        uint256 fee = (1_000e6 * uint256(settlement.feeBps())) / 10_000;
+
+        vm.expectEmit(true, true, true, true, address(settlement));
+        emit NiaraSettlement.Settled(MATCH_ID, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6, fee);
+        vm.prank(operator);
+        settlement.settle(MATCH_ID, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+
+        assertTrue(settlement.settledMatches(MATCH_ID));
+    }
+
+    /// @notice Settling the same match id twice reverts, even with allowances and balances
+    /// that would cover a second settlement, and moves nothing.
+    function test_Settle_RevertsOnReplayedMatchId() public {
+        vm.prank(operator);
+        settlement.settle(MATCH_ID, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+
+        uint256 buyerAsset = assetToken.balanceOf(buyer);
+        uint256 sellerUsdt = usdt.balanceOf(seller);
+        uint256 distributorUsdt = usdt.balanceOf(address(distributor));
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.MatchAlreadySettled.selector, MATCH_ID));
+        settlement.settle(MATCH_ID, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+
+        assertEq(assetToken.balanceOf(buyer), buyerAsset);
+        assertEq(usdt.balanceOf(seller), sellerUsdt);
+        assertEq(usdt.balanceOf(address(distributor)), distributorUsdt);
+    }
+
+    /// @notice The guard is on the id alone: different terms or parties cannot reuse it.
+    function test_Settle_ReplayRevertsWithDifferentTerms() public {
+        vm.prank(operator);
+        settlement.settle(MATCH_ID, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+
+        usdt.mint(seller, 1_000e6);
+        vm.prank(seller);
+        usdt.approve(address(settlement), type(uint256).max);
+        vm.prank(buyer);
+        assetToken.approve(address(settlement), type(uint256).max);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.MatchAlreadySettled.selector, MATCH_ID));
+        settlement.settle(MATCH_ID, address(assetToken), address(usdt), seller, buyer, 1 ether, 50e6);
+    }
+
+    /// @notice A settlement that reverts does not consume its match id: once the cause is
+    /// gone (here, the pause), the same match settles.
+    function test_Settle_RevertedSettlementDoesNotConsumeMatchId() public {
+        vm.prank(admin);
+        registry.pause();
+        vm.prank(operator);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        settlement.settle(MATCH_ID, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        assertFalse(settlement.settledMatches(MATCH_ID));
+
+        vm.prank(admin);
+        registry.unpause();
+        vm.prank(operator);
+        settlement.settle(MATCH_ID, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        assertTrue(settlement.settledMatches(MATCH_ID));
+    }
+
+    function test_Settle_DistinctMatchIdsSettleIndependently() public {
+        bytes16 otherId = bytes16(keccak256("match-0002"));
+        vm.prank(operator);
+        settlement.settle(MATCH_ID, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        vm.prank(operator);
+        settlement.settle(otherId, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+
+        assertTrue(settlement.settledMatches(MATCH_ID));
+        assertTrue(settlement.settledMatches(otherId));
+        assertEq(assetToken.balanceOf(buyer), 20 ether);
+    }
+
+    /// @notice The all-zero id is an id like any other (Solana accepts any 16 bytes too):
+    /// it settles once.
+    function test_Settle_ZeroMatchIdSettlesOnce() public {
+        vm.prank(operator);
+        settlement.settle(bytes16(0), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.MatchAlreadySettled.selector, bytes16(0)));
+        settlement.settle(bytes16(0), address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    /// @notice Checks-effects-interactions: the match is already marked settled when the
+    /// first external transfer hands control to a hostile token's hook.
+    function test_Settle_MatchMarkedSettledBeforeExternalTransfers() public {
+        MaliciousHookToken evilPayment = new MaliciousHookToken();
+        evilPayment.mint(buyer, 1_000_000e6);
+        _listCurrency(address(evilPayment));
+        _useFeeToken(address(evilPayment));
+        vm.prank(buyer);
+        evilPayment.approve(address(settlement), type(uint256).max);
+
+        evilPayment.armOnTransferFrom(
+            address(settlement), abi.encodeWithSelector(settlement.settledMatches.selector, MATCH_ID)
+        );
+
+        vm.prank(operator);
+        settlement.settle(MATCH_ID, address(assetToken), address(evilPayment), buyer, seller, 10 ether, 1_000e6);
+
+        assertTrue(evilPayment.reentered());
+        assertTrue(evilPayment.reentrantSucceeded());
+        assertTrue(abi.decode(evilPayment.reentrantReturnData(), (bool)));
     }
 }

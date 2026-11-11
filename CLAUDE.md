@@ -67,7 +67,8 @@ other way around.
 The five functions with external calls follow this pattern, each with a code comment
 explaining why:
 
-- `NiaraSettlement.settle`: `emit Settled` before the three `safeTransferFrom`.
+- `NiaraSettlement.settle`: `settledMatches[matchId] = true` (replay guard) and
+  `emit Settled` before the three `safeTransferFrom`.
 - `BackingGateway.mintAttested`: `req.minted = true` and `emit BackingMinted` before
   `IAssetToken.mint`.
 - `BackingGateway.redemptionAttest`: `SETTLED` status, `proofHash`, the decrease in

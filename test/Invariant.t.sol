@@ -351,6 +351,16 @@ contract InvariantTest is Test {
         assertFalse(registry.getListing(address(wbtc)).cashbackFrozen);
     }
 
+    /// @notice Replay protection: a match id settles at most once, and every id that settled
+    /// is marked in `settledMatches`.
+    function invariant_MatchIdSettlesAtMostOnce() public view {
+        assertEq(handler.ghost_replayedSettlements(), 0);
+        uint256 count = handler.settledMatchCount();
+        for (uint256 i = 0; i < count; i++) {
+            assertTrue(settlement.settledMatches(handler.ghost_settledMatchIds(i)));
+        }
+    }
+
     /// @notice Delisted is final: once delisted, a token never leaves that status.
     function invariant_DelistedIsFinal() public view {
         address[4] memory tokens = [address(nativeEquity), address(nativeBond), address(usdt), address(wbtc)];
