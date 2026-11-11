@@ -66,6 +66,10 @@ contract Handler is Test {
     /// @notice Successful settlements (sanity: shows the fuzzer reaches the happy path).
     uint256 public ghost_successfulSettlements;
 
+    /// @notice Successful settlements, cashback withdrawals or protocol-fee withdrawals while
+    /// the protocol was paused. Must stay zero (spec §3.3, pause principle).
+    uint256 public ghost_payoutsWhilePaused;
+
     /// @notice Successful settlements paid in a token other than `settlement.feeToken()`
     /// (USDT). Must stay zero (spec invariant 12).
     uint256 public ghost_settlementsOutsideFeeToken;
@@ -306,6 +310,7 @@ contract Handler is Test {
         vm.prank(settlementOperator);
         uint256 feeCharged = settlement.settle(asset, paymentToken, buyer, seller, assetAmount, paymentAmount);
         _recordSettleGhosts(asset, paymentToken, feeCharged, cashbackBefore);
+        if (registry.paused()) ghost_payoutsWhilePaused++;
 
         // The party receiving USDT (the seller) pays the fee out of it; the other party
         // receives its leg in full.
@@ -497,6 +502,7 @@ contract Handler is Test {
         // withdraw yet, exercising NothingToWithdraw organically.
         vm.prank(issuer);
         distributor.withdraw(asset, paymentToken);
+        if (registry.paused()) ghost_payoutsWhilePaused++;
     }
 
     function withdrawProtocolFees(uint256 paymentSeed, uint256 amountSeed) external {
@@ -512,6 +518,7 @@ contract Handler is Test {
 
         vm.prank(admin);
         distributor.withdrawProtocolFees(paymentToken, admin, amount);
+        if (registry.paused()) ghost_payoutsWhilePaused++;
     }
 
     // ── Pauses (emergency) ──────────────────────────────────────────────────────────────
@@ -529,17 +536,8 @@ contract Handler is Test {
         }
     }
 
-    function toggleSettlementPause() external {
-        bool isPaused = settlement.paused();
-        vm.prank(admin);
-        if (isPaused) {
-            settlement.unpause();
-        } else {
-            settlement.pause();
-        }
-    }
-
-    /// @notice Toggles the ListingRegistry pause (blocks approveIssuance only).
+    /// @notice Toggles the protocol's shared pause (held by the ListingRegistry): blocks
+    /// approveIssuance, settle and both CashbackDistributor withdrawals.
     function toggleRegistryPause() external {
         bool isPaused = registry.paused();
         vm.prank(admin);

@@ -26,14 +26,16 @@ import {NativeAssetToken} from "./NativeAssetToken.sol";
 /// batch (`requestIssuance`), the listing authority approves it (`approveIssuance`) and the
 /// registry mints it, so neither the issuer nor Niara can mint alone.
 ///
-/// Pause (spec §3.3, "Pause principle"): while paused, only `approveIssuance` is blocked,
-/// since minting is the highest-impact action there is. Listing actions, `requestIssuance`
-/// and `rejectIssuance` (neither mints) stay available.
+/// Pause (spec §3.3, "Pause principle"): this is the protocol's single, shared pause, the EVM
+/// mirror of Solana's `Config.paused`. It blocks payouts based on protocol accounting, never
+/// a user reclaiming their own escrowed deposit. While paused: `approveIssuance` here,
+/// `NiaraSettlement.settle`, and `CashbackDistributor.withdraw` / `withdrawProtocolFees`
+/// (both read `paused()` through ProtocolPausable). Listing actions, `requestIssuance` and
+/// `rejectIssuance` (neither mints) stay available.
 /// @dev Role changes (including LISTING_AUTHORITY_ROLE) go through the inherited
 /// timelock. Status changes and issuance approvals are operational and take effect
 /// immediately, like the Solana `approve_listing` / `suspend_listing` / `delist`. Pause is
-/// not timelocked: a circuit breaker must act immediately. Unlike Solana's single
-/// `Config.paused`, this pause covers the registry only; NiaraSettlement has its own.
+/// not timelocked: a circuit breaker must act immediately.
 contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable, ReentrancyGuard {
     bytes32 public constant LISTING_AUTHORITY_ROLE = keccak256("LISTING_AUTHORITY_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
@@ -125,14 +127,20 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
 
     // ── Pause ───────────────────────────────────────────────────────────────────────────
 
-    /// @notice Pauses issuance execution (`approveIssuance`) in an emergency.
+    /// @notice Pauses the whole protocol in an emergency: `approveIssuance`, `settle` and
+    /// the CashbackDistributor withdrawals.
     function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }
 
-    /// @notice Removes the pause.
+    /// @notice Removes the protocol pause.
     function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
+    }
+
+    /// @inheritdoc IListingRegistry
+    function paused() public view override(IListingRegistry, Pausable) returns (bool) {
+        return super.paused();
     }
 
     // ── Listings ────────────────────────────────────────────────────────────────────────

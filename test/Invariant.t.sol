@@ -55,8 +55,8 @@ contract InvariantTest is Test {
     }
 
     function _deployContracts() internal {
-        distributor = new CashbackDistributor(admin, TIMELOCK_DELAY);
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
         usdt = new MockUSDT();
         settlement =
             new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);
@@ -184,7 +184,7 @@ contract InvariantTest is Test {
     }
 
     function _handlerSelectors() internal pure returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](19);
+        selectors = new bytes4[](18);
         selectors[0] = Handler.requestBacking.selector;
         selectors[1] = Handler.attestBacking.selector;
         selectors[2] = Handler.mintAttested.selector;
@@ -196,14 +196,13 @@ contract InvariantTest is Test {
         selectors[8] = Handler.withdrawCashback.selector;
         selectors[9] = Handler.withdrawProtocolFees.selector;
         selectors[10] = Handler.toggleGatewayPause.selector;
-        selectors[11] = Handler.toggleSettlementPause.selector;
-        selectors[12] = Handler.toggleAssetPause.selector;
-        selectors[13] = Handler.setListingStatus.selector;
-        selectors[14] = Handler.requestIssuance.selector;
-        selectors[15] = Handler.approveIssuance.selector;
-        selectors[16] = Handler.burnNative.selector;
-        selectors[17] = Handler.rejectIssuance.selector;
-        selectors[18] = Handler.toggleRegistryPause.selector;
+        selectors[11] = Handler.toggleAssetPause.selector;
+        selectors[12] = Handler.setListingStatus.selector;
+        selectors[13] = Handler.requestIssuance.selector;
+        selectors[14] = Handler.approveIssuance.selector;
+        selectors[15] = Handler.burnNative.selector;
+        selectors[16] = Handler.rejectIssuance.selector;
+        selectors[17] = Handler.toggleRegistryPause.selector;
     }
 
     function _grantRoleOn(address target, bytes32 role, address account) internal {
@@ -330,6 +329,15 @@ contract InvariantTest is Test {
     /// paused (spec invariant 11, second half).
     function invariant_NoIssuanceWhilePausedOrNotApproved() public view {
         assertEq(handler.ghost_illegalIssuances(), 0);
+    }
+
+    /// @notice One shared pause: while the registry is paused, no settlement, cashback
+    /// withdrawal or protocol-fee withdrawal ever succeeds (and no batch executes, see
+    /// invariant_NoIssuanceWhilePausedOrNotApproved). Every contract reads the same flag.
+    function invariant_NoPayoutWhilePaused() public view {
+        assertEq(handler.ghost_payoutsWhilePaused(), 0);
+        assertEq(settlement.paused(), registry.paused());
+        assertEq(distributor.paused(), registry.paused());
     }
 
     /// @notice Delisted is final: once delisted, a token never leaves that status.

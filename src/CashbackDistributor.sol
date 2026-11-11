@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol";
+import {ProtocolPausable} from "./governance/ProtocolPausable.sol";
 import {IAssetToken} from "./interfaces/IAssetToken.sol";
 
 /// @title CashbackDistributor
@@ -12,7 +13,11 @@ import {IAssetToken} from "./interfaces/IAssetToken.sol";
 /// the asset's issuer in a pull pattern: amounts accumulate per (asset, settlement
 /// currency) and the issuer withdraws whenever it wants via `withdraw`. The rest of the fee
 /// accumulates as protocol revenue, withdrawable by the treasury.
-contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
+///
+/// Pause: both withdrawals are payouts based on the protocol's own accounting, so both stop
+/// while the protocol's shared pause (held by the ListingRegistry, see ProtocolPausable) is
+/// active. `recordFee` is not paused: it only runs inside `settle`, which is.
+contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant SETTLEMENT_ROLE = keccak256("SETTLEMENT_ROLE");
@@ -52,8 +57,14 @@ contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
     error NothingToWithdraw();
     error InvalidWithdrawAmount();
 
-    constructor(address admin_, uint256 timelockDelay_) TimelockedAccessControl(timelockDelay_) {
-        if (admin_ == address(0)) revert ZeroAddress();
+    /// @param admin_ Holder of DEFAULT_ADMIN_ROLE and TREASURY_ROLE.
+    /// @param listingRegistry_ ListingRegistry holding the shared protocol pause.
+    /// @param timelockDelay_ Delay (seconds) between proposal and execution of sensitive changes.
+    constructor(address admin_, address listingRegistry_, uint256 timelockDelay_)
+        TimelockedAccessControl(timelockDelay_)
+        ProtocolPausable(listingRegistry_)
+    {
+        if (admin_ == address(0) || listingRegistry_ == address(0)) revert ZeroAddress();
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(TREASURY_ROLE, admin_);
     }
@@ -82,8 +93,9 @@ contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
 
     /// @notice Withdraws the accumulated cashback of `assetToken` in `paymentToken`. Only the
     /// wallet currently registered as the asset's `issuerWallet` can call it: if the issuer
-    /// changes wallets, the new wallet can withdraw the accumulated balance.
-    function withdraw(address assetToken, address paymentToken) external nonReentrant {
+    /// changes wallets, the new wallet can withdraw the accumulated balance. Blocked while
+    /// the protocol is paused.
+    function withdraw(address assetToken, address paymentToken) external nonReentrant whenProtocolNotPaused {
         if (msg.sender != IAssetToken(assetToken).issuerWallet()) revert NotIssuerWallet();
 
         uint256 amount = cashbackBalance[assetToken][paymentToken];
@@ -95,8 +107,14 @@ contract CashbackDistributor is TimelockedAccessControl, ReentrancyGuard {
         emit CashbackWithdrawn(assetToken, paymentToken, msg.sender, amount);
     }
 
-    /// @notice Withdraws accumulated protocol revenue. Restricted to the treasury.
-    function withdrawProtocolFees(address paymentToken, address to, uint256 amount) external nonReentrant onlyRole(TREASURY_ROLE) {
+    /// @notice Withdraws accumulated protocol revenue. Restricted to the treasury. Blocked
+    /// while the protocol is paused.
+    function withdrawProtocolFees(address paymentToken, address to, uint256 amount)
+        external
+        nonReentrant
+        onlyRole(TREASURY_ROLE)
+        whenProtocolNotPaused
+    {
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0 || amount > protocolBalance[paymentToken]) revert InvalidWithdrawAmount();
 

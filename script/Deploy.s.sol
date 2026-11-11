@@ -124,13 +124,14 @@ contract DeployNiara is Script {
         usdt = new MockUSDT();
         wbtc = new MockWBTC();
 
-        distributor = new CashbackDistributor(cfg.admin, cfg.timelockDelay);
-        // NiaraSettlement now requires a ListingRegistry (admin also holds the listing
-        // authority here). This script predates the registry: `settle` with the backed
-        // AssetToken below reverts (it is not a factory token, so it cannot be listed).
-        // The v1 deploy scripts, with chainid guards, are rewritten in Week 2.
+        // NiaraSettlement and CashbackDistributor require a ListingRegistry (admin also holds
+        // the listing authority here): it gates listings and holds the shared protocol
+        // pause. This script predates the registry: `settle` with the backed AssetToken
+        // below reverts (it is not a factory token, so it cannot be listed). The v1 deploy
+        // scripts, with chainid guards, are rewritten in Week 2.
         ListingRegistry registry = new ListingRegistry(cfg.admin, cfg.admin, cfg.timelockDelay);
         console2.log(string.concat("DEPLOYED_LISTING_REGISTRY_ADDRESS=", vm.toString(address(registry))));
+        distributor = new CashbackDistributor(cfg.admin, address(registry), cfg.timelockDelay);
         // USDT is the fee token: the only payment token `settle` accepts.
         settlement =
             new NiaraSettlement(cfg.admin, address(distributor), address(registry), address(usdt), cfg.timelockDelay);

@@ -37,4 +37,9 @@ interface IListingRegistry {
 
     /// @notice Returns the listing of `token` (all fields zero / `None` if there is none).
     function getListing(address token) external view returns (Listing memory);
+
+    /// @notice The protocol's single, shared pause (Solana: `Config.paused`). While true,
+    /// `ListingRegistry.approveIssuance`, `NiaraSettlement.settle` and the
+    /// CashbackDistributor withdrawals all revert.
+    function paused() external view returns (bool);
 }

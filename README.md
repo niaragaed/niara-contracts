@@ -87,6 +87,15 @@ withdraws whenever it wants via `withdraw`. It only credits if
 `AssetToken.cashbackEligible()` is true. The rest of the fee becomes protocol revenue,
 withdrawable by the treasury.
 
+**One shared pause.** `ListingRegistry.pause()` (PAUSER_ROLE, the admin) is the
+protocol's single circuit breaker, the EVM mirror of Solana's `Config.paused`: while it
+is on, `ListingRegistry.approveIssuance`, `NiaraSettlement.settle` and both
+`CashbackDistributor` withdrawals revert with `EnforcedPause()`. `NiaraSettlement` and
+`CashbackDistributor` have no pause of their own; they read the registry's
+(`governance/ProtocolPausable.sol`). Principle: a pause blocks payouts based on protocol
+accounting, never a user reclaiming their own escrowed deposit. `BackingGateway` and
+`AssetToken` (the backed model) keep their own pauses.
+
 Cashback share: **1000 bps (10% of the fee), a provisional value**. See the code
 comment: *"TO BE DEFINED: 1% of the fee equals 0.005% of volume, probably not enough.
 See the whitepaper, section 4."*

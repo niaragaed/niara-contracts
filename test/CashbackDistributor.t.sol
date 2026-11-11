@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
+import {ListingRegistry} from "../src/ListingRegistry.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {MaliciousReentrantToken} from "./mocks/MaliciousReentrantToken.sol";
@@ -10,6 +12,7 @@ import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol"
 
 contract CashbackDistributorTest is Test {
     CashbackDistributor public distributor;
+    ListingRegistry public registry;
     AssetToken public equityToken;
     AssetToken public currencyToken;
     MockUSDT public usdt;
@@ -26,7 +29,8 @@ contract CashbackDistributorTest is Test {
     bytes32 public treasuryRole;
 
     function setUp() public {
-        distributor = new CashbackDistributor(admin, TIMELOCK_DELAY);
+        registry = new ListingRegistry(admin, admin, TIMELOCK_DELAY);
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
         settlementRole = distributor.SETTLEMENT_ROLE();
         treasuryRole = distributor.TREASURY_ROLE();
 
@@ -229,7 +233,100 @@ contract CashbackDistributorTest is Test {
 
     function test_Constructor_RevertsForZeroAdmin() public {
         vm.expectRevert(CashbackDistributor.ZeroAddress.selector);
-        new CashbackDistributor(address(0), TIMELOCK_DELAY);
+        new CashbackDistributor(address(0), address(registry), TIMELOCK_DELAY);
+    }
+
+    function test_Constructor_RevertsForZeroListingRegistry() public {
+        vm.expectRevert(CashbackDistributor.ZeroAddress.selector);
+        new CashbackDistributor(admin, address(0), TIMELOCK_DELAY);
+    }
+
+    function test_Constructor_SetsListingRegistry() public view {
+        assertEq(address(distributor.listingRegistry()), address(registry));
+    }
+
+    // ── Shared protocol pause (held by the ListingRegistry) ───────────────────────────
+
+    function _pauseProtocol() internal {
+        vm.prank(admin);
+        registry.pause();
+    }
+
+    function test_Paused_MirrorsRegistryPause() public {
+        assertFalse(distributor.paused());
+        _pauseProtocol();
+        assertTrue(distributor.paused());
+        vm.prank(admin);
+        registry.unpause();
+        assertFalse(distributor.paused());
+    }
+
+    /// @notice The distributor has no pause of its own: only the registry can pause it.
+    function test_Pause_NoLocalPauseFunctions() public {
+        vm.prank(admin);
+        (bool pauseOk,) = address(distributor).call(abi.encodeWithSignature("pause()"));
+        assertFalse(pauseOk);
+        vm.prank(admin);
+        (bool unpauseOk,) = address(distributor).call(abi.encodeWithSignature("unpause()"));
+        assertFalse(unpauseOk);
+    }
+
+    /// @notice Cashback is a payout based on protocol accounting: blocked while paused.
+    function test_Withdraw_RevertsWhileProtocolPaused() public {
+        _recordFee(equityToken, 1_000e6);
+        uint256 balance = distributor.cashbackBalance(address(equityToken), address(usdt));
+        _pauseProtocol();
+
+        vm.prank(issuer);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        distributor.withdraw(address(equityToken), address(usdt));
+
+        assertEq(distributor.cashbackBalance(address(equityToken), address(usdt)), balance);
+        assertEq(usdt.balanceOf(issuer), 0);
+    }
+
+    /// @notice Protocol fees are a payout based on protocol accounting: blocked while paused.
+    function test_WithdrawProtocolFees_RevertsWhileProtocolPaused() public {
+        _recordFee(equityToken, 1_000e6);
+        uint256 available = distributor.protocolBalance(address(usdt));
+        _pauseProtocol();
+
+        vm.prank(admin);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        distributor.withdrawProtocolFees(address(usdt), treasuryTarget, available);
+
+        assertEq(distributor.protocolBalance(address(usdt)), available);
+    }
+
+    /// @notice Modifier order: `nonReentrant`, then the role, then the pause.
+    function test_WithdrawProtocolFees_RoleCheckedBeforePause() public {
+        _pauseProtocol();
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, treasuryRole)
+        );
+        distributor.withdrawProtocolFees(address(usdt), treasuryTarget, 1);
+    }
+
+    /// @notice `recordFee` is not paused (it only runs inside `settle`, which is), and nothing
+    /// accrued is lost: after unpausing both withdrawals pay the full balances.
+    function test_Pause_RecordFeeStillAccruesAndWithdrawalsResumeAfterUnpause() public {
+        _pauseProtocol();
+        _recordFee(equityToken, 1_000e6);
+        uint256 cashback = distributor.cashbackBalance(address(equityToken), address(usdt));
+        uint256 protocolShare = distributor.protocolBalance(address(usdt));
+        assertGt(cashback, 0);
+
+        vm.prank(admin);
+        registry.unpause();
+
+        vm.prank(issuer);
+        distributor.withdraw(address(equityToken), address(usdt));
+        assertEq(usdt.balanceOf(issuer), cashback);
+
+        vm.prank(admin);
+        distributor.withdrawProtocolFees(address(usdt), treasuryTarget, protocolShare);
+        assertEq(usdt.balanceOf(treasuryTarget), protocolShare);
     }
 
     function test_WithdrawProtocolFees_RevertsForZeroRecipient() public {

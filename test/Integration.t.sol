@@ -11,6 +11,7 @@ import {AssetTokenFactory} from "../src/AssetTokenFactory.sol";
 import {NativeAssetToken} from "../src/NativeAssetToken.sol";
 import {IListingRegistry} from "../src/interfaces/IListingRegistry.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /// @notice End-to-end flows with the real contracts wired together.
 /// - Native (v1): issuer deploys its instrument → listing submitted and approved →
@@ -39,8 +40,8 @@ contract IntegrationTest is Test {
     uint256 public constant TIMELOCK_DELAY = 2 days;
 
     function setUp() public {
-        distributor = new CashbackDistributor(admin, TIMELOCK_DELAY);
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
         usdt = new MockUSDT();
         settlement =
             new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);
@@ -149,6 +150,81 @@ contract IntegrationTest is Test {
         vm.prank(settlementOperator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, address(acme)));
         settlement.settle(address(acme), address(usdt), buyer, seller, 1 ether, 100e6);
+    }
+
+    /// @notice One shared pause (spec §3.3): a single `registry.pause()` stops issuance
+    /// execution, settlement and both distributor payouts together; listing actions and
+    /// holder burns stay available; a single `unpause()` restores everything.
+    function test_SharedPause_StopsIssuanceSettlementAndPayoutsTogether() public {
+        AssetTokenFactory factory = registry.factory();
+        vm.prank(issuer);
+        NativeAssetToken acme = NativeAssetToken(
+            factory.createAssetToken("Acme Corp Shares", "ACME", IListingRegistry.AssetClass.Equity, keccak256("doc"))
+        );
+        vm.prank(issuer);
+        registry.submitListing(address(acme));
+        vm.prank(listingAuthority);
+        registry.approveListing(address(acme));
+        vm.prank(issuer);
+        uint256 batch1 = registry.requestIssuance(address(acme), 1_000 ether, seller, keccak256("batch-1"));
+        vm.prank(listingAuthority);
+        registry.approveIssuance(address(acme), batch1);
+
+        vm.prank(seller);
+        acme.approve(address(settlement), type(uint256).max);
+        vm.prank(buyer);
+        usdt.approve(address(settlement), type(uint256).max);
+        vm.prank(settlementOperator);
+        uint256 fee = settlement.settle(address(acme), address(usdt), buyer, seller, 100 ether, 10_000e6);
+        uint256 cashback = distributor.cashbackBalance(address(acme), address(usdt));
+        uint256 protocolShare = distributor.protocolBalance(address(usdt));
+        assertEq(cashback + protocolShare, fee);
+
+        vm.prank(issuer);
+        uint256 batch2 = registry.requestIssuance(address(acme), 10 ether, seller, keccak256("batch-2"));
+
+        // One call pauses the whole protocol.
+        vm.prank(admin);
+        registry.pause();
+        assertTrue(settlement.paused());
+        assertTrue(distributor.paused());
+
+        vm.prank(listingAuthority);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        registry.approveIssuance(address(acme), batch2);
+
+        vm.prank(settlementOperator);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        settlement.settle(address(acme), address(usdt), buyer, seller, 1 ether, 100e6);
+
+        vm.prank(issuer);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        distributor.withdraw(address(acme), address(usdt));
+
+        vm.prank(admin);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        distributor.withdrawProtocolFees(address(usdt), admin, protocolShare);
+
+        // Not payouts based on protocol accounting: still allowed while paused.
+        vm.prank(buyer);
+        acme.burnWithReason(1 ether, NativeAssetToken.BurnReason.Redemption, keccak256("burn-while-paused"));
+        vm.prank(issuer);
+        registry.requestIssuance(address(acme), 5 ether, seller, keccak256("batch-3"));
+
+        // One call resumes everything; nothing accrued was lost.
+        vm.prank(admin);
+        registry.unpause();
+
+        vm.prank(listingAuthority);
+        registry.approveIssuance(address(acme), batch2);
+        vm.prank(settlementOperator);
+        settlement.settle(address(acme), address(usdt), buyer, seller, 1 ether, 100e6);
+        vm.prank(issuer);
+        distributor.withdraw(address(acme), address(usdt));
+        assertGe(usdt.balanceOf(issuer), cashback);
+        vm.prank(admin);
+        distributor.withdrawProtocolFees(address(usdt), admin, protocolShare);
+        assertEq(usdt.balanceOf(admin), protocolShare);
     }
 
     function test_FullLifecycle_BackingToRedemption_NotTradable() public {

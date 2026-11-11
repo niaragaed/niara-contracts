@@ -40,19 +40,17 @@ contract NiaraSettlementTest is Test {
     bytes32 public constant DOC_HASH = keccak256("acme-offering-document");
 
     bytes32 public settlementOperatorRole;
-    bytes32 public pauserRole;
     bytes32 public settlementRoleOnDistributor;
 
     function setUp() public {
-        distributor = new CashbackDistributor(admin, TIMELOCK_DELAY);
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
         usdt = new MockUSDT();
         wbtc = new MockWBTC();
         settlement =
             new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);
 
         settlementOperatorRole = settlement.SETTLEMENT_OPERATOR_ROLE();
-        pauserRole = settlement.PAUSER_ROLE();
         settlementRoleOnDistributor = distributor.SETTLEMENT_ROLE();
 
         _distributorGrantRole(settlementRoleOnDistributor, address(settlement));
@@ -256,13 +254,16 @@ contract NiaraSettlementTest is Test {
         assertEq(usdt.balanceOf(address(distributor)), 0);
     }
 
-    function test_Settle_RevertsWhenPaused() public {
+    /// @notice `settle` stops under the protocol's shared pause (held by the registry), with
+    /// the same error the registry raises.
+    function test_Settle_RevertsWhenProtocolPaused() public {
         vm.prank(admin);
-        settlement.pause();
+        registry.pause();
 
         vm.prank(operator);
         vm.expectRevert(Pausable.EnforcedPause.selector);
         settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        assertEq(assetToken.balanceOf(buyer), 0);
     }
 
     // ── Fee: hard cap and timelock ─────────────────────────────────────────────────────
@@ -297,7 +298,7 @@ contract NiaraSettlementTest is Test {
     }
 
     function test_CashbackDistributor_ChangeRequiresTimelock() public {
-        CashbackDistributor newDistributor = new CashbackDistributor(admin, TIMELOCK_DELAY);
+        CashbackDistributor newDistributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
 
         vm.prank(admin);
         settlement.proposeSetCashbackDistributor(address(newDistributor));
@@ -447,32 +448,48 @@ contract NiaraSettlementTest is Test {
         assertEq(evilPayment.balanceOf(address(distributor)), 5e6);
     }
 
-    // ── Pausable: controle de acesso ───────────────────────────────────────────────────
+    // ── Shared protocol pause (held by the ListingRegistry) ───────────────────────────
 
-    function test_Pause_OnlyPauserRole() public {
-        vm.prank(seller);
-        vm.expectRevert(
-            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, seller, pauserRole)
-        );
-        settlement.pause();
-    }
-
-    function test_Unpause_OnlyPauserRole() public {
+    /// @notice NiaraSettlement has no pause of its own any more: `pause()` / `unpause()` do not
+    /// exist on it, and `paused()` only mirrors the registry.
+    function test_Pause_NoLocalPauseFunctions() public {
         vm.prank(admin);
-        settlement.pause();
+        (bool pauseOk,) = address(settlement).call(abi.encodeWithSignature("pause()"));
+        assertFalse(pauseOk);
+        vm.prank(admin);
+        (bool unpauseOk,) = address(settlement).call(abi.encodeWithSignature("unpause()"));
+        assertFalse(unpauseOk);
+        (bool roleOk,) = address(settlement).call(abi.encodeWithSignature("PAUSER_ROLE()"));
+        assertFalse(roleOk);
+    }
+
+    function test_Paused_MirrorsRegistryPause() public {
+        assertFalse(settlement.paused());
+        vm.prank(admin);
+        registry.pause();
+        assertTrue(settlement.paused());
+        vm.prank(admin);
+        registry.unpause();
+        assertFalse(settlement.paused());
+    }
+
+    /// @notice Modifier order: `nonReentrant`, then the role, then the pause. A caller without
+    /// the operator role gets the access-control error even while paused.
+    function test_Settle_RoleCheckedBeforePause() public {
+        vm.prank(admin);
+        registry.pause();
 
         vm.prank(seller);
         vm.expectRevert(
-            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, seller, pauserRole)
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, seller, settlementOperatorRole)
         );
-        settlement.unpause();
+        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
-    /// @notice Ponta a ponta: pausar bloqueia `settle`; despausar restaura o funcionamento
-    /// normal.
+    /// @notice End to end: the registry pause blocks `settle`; unpausing restores it.
     function test_PauseUnpause_EndToEnd_BlocksThenRestoresSettle() public {
         vm.prank(admin);
-        settlement.pause();
+        registry.pause();
         assertTrue(settlement.paused());
 
         vm.prank(operator);
@@ -480,7 +497,7 @@ contract NiaraSettlementTest is Test {
         settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
 
         vm.prank(admin);
-        settlement.unpause();
+        registry.unpause();
         assertFalse(settlement.paused());
 
         vm.prank(operator);

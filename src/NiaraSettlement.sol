@@ -3,9 +3,9 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol";
+import {ProtocolPausable} from "./governance/ProtocolPausable.sol";
 import {ICashbackDistributor} from "./interfaces/ICashbackDistributor.sol";
 import {IListingRegistry} from "./interfaces/IListingRegistry.sol";
 
@@ -28,11 +28,13 @@ import {IListingRegistry} from "./interfaces/IListingRegistry.sol";
 /// between two parties that approved the contract would let an arbitrary caller pick
 /// unfavorable terms within those approvals. The role should be granted to Niara's
 /// trusted order-matching engine.
-contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
+///
+/// Pause: there is no separate pause here. `settle` stops while the protocol's shared pause
+/// (held by the ListingRegistry, see ProtocolPausable) is active.
+contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant SETTLEMENT_OPERATOR_ROLE = keccak256("SETTLEMENT_OPERATOR_ROLE");
-    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
     uint16 private constant BPS_DENOMINATOR = 10_000;
 
@@ -52,9 +54,9 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
     /// @notice Contract that receives the fee and credits cashback to the issuer when eligible.
     ICashbackDistributor public cashbackDistributor;
 
-    /// @notice Registry that decides which assets and payment tokens can settle. Immutable:
-    /// replacing it means deploying a new NiaraSettlement.
-    IListingRegistry public immutable listingRegistry;
+    // `listingRegistry` (inherited from ProtocolPausable, immutable) decides which assets and
+    // payment tokens can settle, and holds the shared pause. Replacing it means deploying a
+    // new NiaraSettlement.
 
     event Settled(
         address indexed assetToken,
@@ -83,9 +85,10 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
     error PaymentTokenNotApprovedCurrency(address paymentToken);
     error TransferAmountMismatch(address token, uint256 expected, uint256 received);
 
-    /// @param admin_ Holder of DEFAULT_ADMIN_ROLE and PAUSER_ROLE.
+    /// @param admin_ Holder of DEFAULT_ADMIN_ROLE.
     /// @param cashbackDistributor_ CashbackDistributor that receives the fee.
-    /// @param listingRegistry_ ListingRegistry that gates which assets and currencies settle.
+    /// @param listingRegistry_ ListingRegistry that gates which assets and currencies settle,
+    /// and holds the shared protocol pause.
     /// @param feeToken_ The USDT token: the only payment token, and the fee currency.
     /// @param timelockDelay_ Delay (seconds) between proposal and execution of sensitive changes.
     constructor(
@@ -94,7 +97,7 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         address listingRegistry_,
         address feeToken_,
         uint256 timelockDelay_
-    ) TimelockedAccessControl(timelockDelay_) {
+    ) TimelockedAccessControl(timelockDelay_) ProtocolPausable(listingRegistry_) {
         if (
             admin_ == address(0) || cashbackDistributor_ == address(0) || listingRegistry_ == address(0)
                 || feeToken_ == address(0)
@@ -102,11 +105,9 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
             revert ZeroAddress();
         }
         cashbackDistributor = ICashbackDistributor(cashbackDistributor_);
-        listingRegistry = IListingRegistry(listingRegistry_);
         feeToken = feeToken_;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
-        _grantRole(PAUSER_ROLE, admin_);
     }
 
     /// @notice Executes the atomic settlement of an already matched order.
@@ -127,7 +128,7 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         address seller,
         uint256 assetAmount,
         uint256 paymentAmount
-    ) external nonReentrant onlyRole(SETTLEMENT_OPERATOR_ROLE) whenNotPaused returns (uint256 feeCharged) {
+    ) external nonReentrant onlyRole(SETTLEMENT_OPERATOR_ROLE) whenProtocolNotPaused returns (uint256 feeCharged) {
         if (assetToken == address(0) || paymentToken == address(0)) revert ZeroAddress();
         if (buyer == address(0) || seller == address(0)) revert ZeroAddress();
         if (buyer == seller) revert BuyerEqualsSeller();
@@ -245,15 +246,5 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         address old = feeToken;
         feeToken = newFeeToken;
         emit FeeTokenChanged(old, newFeeToken);
-    }
-
-    /// @notice Pauses `settle` in an emergency.
-    function pause() external onlyRole(PAUSER_ROLE) {
-        _pause();
-    }
-
-    /// @notice Remove a pausa.
-    function unpause() external onlyRole(PAUSER_ROLE) {
-        _unpause();
     }
 }
