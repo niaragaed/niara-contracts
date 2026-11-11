@@ -33,6 +33,10 @@ interface IListingRegistry {
         bool cashbackEligible;
         bytes32 docHash;
         uint64 approvedAt;
+        /// @dev Per-listing cashback freeze (spec §9.5): while true,
+        /// `CashbackDistributor.withdraw` reverts for this token; accrual continues. Set and
+        /// cleared by the listing authority (`freezeCashback` / `unfreezeCashback`).
+        bool cashbackFrozen;
     }
 
     /// @notice Returns the listing of `token` (all fields zero / `None` if there is none).

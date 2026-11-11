@@ -184,7 +184,7 @@ contract InvariantTest is Test {
     }
 
     function _handlerSelectors() internal pure returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](18);
+        selectors = new bytes4[](19);
         selectors[0] = Handler.requestBacking.selector;
         selectors[1] = Handler.attestBacking.selector;
         selectors[2] = Handler.mintAttested.selector;
@@ -203,6 +203,7 @@ contract InvariantTest is Test {
         selectors[15] = Handler.burnNative.selector;
         selectors[16] = Handler.rejectIssuance.selector;
         selectors[17] = Handler.toggleRegistryPause.selector;
+        selectors[18] = Handler.toggleCashbackFreeze.selector;
     }
 
     function _grantRoleOn(address target, bytes32 role, address account) internal {
@@ -338,6 +339,16 @@ contract InvariantTest is Test {
         assertEq(handler.ghost_payoutsWhilePaused(), 0);
         assertEq(settlement.paused(), registry.paused());
         assertEq(distributor.paused(), registry.paused());
+    }
+
+    /// @notice Per-listing cashback freeze (spec §9.5): no cashback withdrawal ever succeeds
+    /// on a frozen listing, accrual is never affected by it, and Currency listings are never
+    /// frozen (they cannot be).
+    function invariant_NoCashbackWithdrawalWhileFrozen() public view {
+        assertEq(handler.ghost_withdrawalsWhileFrozen(), 0);
+        assertEq(handler.ghost_frozenAccrualMismatch(), 0);
+        assertFalse(registry.getListing(address(usdt)).cashbackFrozen);
+        assertFalse(registry.getListing(address(wbtc)).cashbackFrozen);
     }
 
     /// @notice Delisted is final: once delisted, a token never leaves that status.

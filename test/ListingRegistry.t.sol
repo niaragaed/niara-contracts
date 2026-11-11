@@ -1034,4 +1034,150 @@ contract ListingRegistryTest is Test {
         assertEq(equity.totalSupply(), 400 ether);
         assertEq(equity.balanceOf(investor), 400 ether);
     }
+
+    // ── Cashback freeze (spec §9.5) ────────────────────────────────────────────────────
+
+    function _freeze(address token) internal {
+        vm.prank(authority);
+        registry.freezeCashback(token);
+    }
+
+    function _unfreeze(address token) internal {
+        vm.prank(authority);
+        registry.unfreezeCashback(token);
+    }
+
+    function test_CashbackFrozen_FalseAtCreation() public {
+        _submit(equity);
+        assertFalse(registry.getListing(address(equity)).cashbackFrozen);
+        vm.prank(authority);
+        registry.listCurrency(address(usdt));
+        assertFalse(registry.getListing(address(usdt)).cashbackFrozen);
+    }
+
+    function test_FreezeCashback_OnlyListingAuthority() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, admin, listingAuthorityRole)
+        );
+        registry.freezeCashback(address(equity));
+        vm.prank(issuer);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, issuer, listingAuthorityRole)
+        );
+        registry.freezeCashback(address(equity));
+    }
+
+    function test_UnfreezeCashback_OnlyListingAuthority() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        _freeze(address(equity));
+        vm.prank(issuer);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, issuer, listingAuthorityRole)
+        );
+        registry.unfreezeCashback(address(equity));
+        assertTrue(registry.getListing(address(equity)).cashbackFrozen);
+    }
+
+    /// @notice No timelock: the flag flips in the same call, and the event mirrors Solana's
+    /// `CashbackFreezeSet`. Nothing else in the listing changes.
+    function test_FreezeAndUnfreeze_SetFlagImmediatelyAndEmit() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        IListingRegistry.Listing memory before = registry.getListing(address(equity));
+
+        vm.expectEmit(true, true, false, true, address(registry));
+        emit ListingRegistry.CashbackFreezeSet(address(equity), true, authority);
+        _freeze(address(equity));
+
+        IListingRegistry.Listing memory frozen = registry.getListing(address(equity));
+        assertTrue(frozen.cashbackFrozen);
+        assertEq(uint8(frozen.status), uint8(before.status));
+        assertEq(frozen.issuer, before.issuer);
+        assertEq(uint8(frozen.assetClass), uint8(before.assetClass));
+        assertTrue(frozen.cashbackEligible);
+        assertEq(frozen.docHash, before.docHash);
+        assertEq(frozen.approvedAt, before.approvedAt);
+
+        vm.expectEmit(true, true, false, true, address(registry));
+        emit ListingRegistry.CashbackFreezeSet(address(equity), false, authority);
+        _unfreeze(address(equity));
+        assertFalse(registry.getListing(address(equity)).cashbackFrozen);
+    }
+
+    /// @notice Freezable in every listing status: cashback stays withdrawable after
+    /// delisting, so it must stay freezable too.
+    function test_FreezeCashback_WorksInEveryListingStatus() public {
+        IListingRegistry.ListingStatus[4] memory statuses = [
+            IListingRegistry.ListingStatus.Pending,
+            IListingRegistry.ListingStatus.Approved,
+            IListingRegistry.ListingStatus.Suspended,
+            IListingRegistry.ListingStatus.Delisted
+        ];
+        for (uint256 i = 0; i < statuses.length; i++) {
+            uint256 snapshot = vm.snapshotState();
+            _toStatus(statuses[i]);
+            _freeze(address(equity));
+            assertTrue(registry.getListing(address(equity)).cashbackFrozen);
+            _unfreeze(address(equity));
+            assertFalse(registry.getListing(address(equity)).cashbackFrozen);
+            vm.revertToState(snapshot);
+        }
+    }
+
+    /// @notice Containment works during an incident: freeze and unfreeze are not paused.
+    function test_FreezeCashback_AllowedWhilePaused() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        _pause();
+        _freeze(address(equity));
+        assertTrue(registry.getListing(address(equity)).cashbackFrozen);
+        _unfreeze(address(equity));
+        assertFalse(registry.getListing(address(equity)).cashbackFrozen);
+    }
+
+    function test_FreezeCashback_RevertsForCurrency() public {
+        vm.prank(authority);
+        registry.listCurrency(address(usdt));
+        vm.prank(authority);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.NotCashbackEligible.selector, address(usdt)));
+        registry.freezeCashback(address(usdt));
+        vm.prank(authority);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.NotCashbackEligible.selector, address(usdt)));
+        registry.unfreezeCashback(address(usdt));
+    }
+
+    function test_FreezeCashback_RevertsWithoutListing() public {
+        vm.prank(authority);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.NotCashbackEligible.selector, address(equity)));
+        registry.freezeCashback(address(equity));
+    }
+
+    function test_FreezeCashback_RevertsWhenAlreadyFrozen() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        _freeze(address(equity));
+        vm.prank(authority);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.CashbackAlreadyFrozen.selector, address(equity)));
+        registry.freezeCashback(address(equity));
+    }
+
+    function test_UnfreezeCashback_RevertsWhenNotFrozen() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        vm.prank(authority);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.CashbackNotFrozen.selector, address(equity)));
+        registry.unfreezeCashback(address(equity));
+    }
+
+    /// @notice The freeze is per listing: freezing one leaves the others untouched, and it
+    /// survives status changes (suspend / re-approve).
+    function test_FreezeCashback_IsPerListingAndSurvivesStatusChanges() public {
+        NativeAssetToken other = _create(issuer, IListingRegistry.AssetClass.Credit);
+        _toStatus(IListingRegistry.ListingStatus.Approved);
+        _submit(other);
+        _freeze(address(equity));
+        assertFalse(registry.getListing(address(other)).cashbackFrozen);
+
+        _suspend(address(equity));
+        _approve(address(equity));
+        assertTrue(registry.getListing(address(equity)).cashbackFrozen);
+    }
 }

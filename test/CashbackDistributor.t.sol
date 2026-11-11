@@ -4,6 +4,9 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
 import {ListingRegistry} from "../src/ListingRegistry.sol";
+import {AssetTokenFactory} from "../src/AssetTokenFactory.sol";
+import {NativeAssetToken} from "../src/NativeAssetToken.sol";
+import {IListingRegistry} from "../src/interfaces/IListingRegistry.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
@@ -335,5 +338,95 @@ contract CashbackDistributorTest is Test {
         vm.prank(admin);
         vm.expectRevert(CashbackDistributor.ZeroAddress.selector);
         distributor.withdrawProtocolFees(address(usdt), address(0), 1_000e6);
+    }
+
+    // ── Per-listing cashback freeze (spec §9.5) ────────────────────────────────────────
+
+    /// @dev A listed native Equity whose issuer is `issuer`. The registry's listing authority
+    /// is `admin` in this suite.
+    function _listedNative() internal returns (NativeAssetToken token) {
+        AssetTokenFactory factory = registry.factory();
+        vm.prank(issuer);
+        token = NativeAssetToken(
+            factory.createAssetToken("Acme", "ACME", IListingRegistry.AssetClass.Equity, keccak256("doc"))
+        );
+        vm.prank(issuer);
+        registry.submitListing(address(token));
+        vm.prank(admin);
+        registry.approveListing(address(token));
+    }
+
+    function _recordNativeFee(NativeAssetToken asset, uint256 feeAmount) internal {
+        usdt.mint(address(distributor), feeAmount);
+        vm.prank(settlementCaller);
+        distributor.recordFee(address(asset), address(usdt), feeAmount);
+    }
+
+    function test_Withdraw_RevertsWhileCashbackFrozen() public {
+        NativeAssetToken acme = _listedNative();
+        _recordNativeFee(acme, 1_000e6);
+        uint256 balance = distributor.cashbackBalance(address(acme), address(usdt));
+        vm.prank(admin);
+        registry.freezeCashback(address(acme));
+
+        vm.prank(issuer);
+        vm.expectRevert(abi.encodeWithSelector(CashbackDistributor.CashbackFrozen.selector, address(acme)));
+        distributor.withdraw(address(acme), address(usdt));
+        assertEq(distributor.cashbackBalance(address(acme), address(usdt)), balance);
+        assertEq(usdt.balanceOf(issuer), 0);
+    }
+
+    /// @notice A non-issuer is told it is not the issuer, frozen or not.
+    function test_Withdraw_IssuerCheckedBeforeFreeze() public {
+        NativeAssetToken acme = _listedNative();
+        _recordNativeFee(acme, 1_000e6);
+        vm.prank(admin);
+        registry.freezeCashback(address(acme));
+
+        vm.prank(alice);
+        vm.expectRevert(CashbackDistributor.NotIssuerWallet.selector);
+        distributor.withdraw(address(acme), address(usdt));
+    }
+
+    /// @notice Accrual continues while frozen and nothing is lost: after unfreezing, the
+    /// issuer withdraws everything credited before and during the freeze.
+    function test_Freeze_AccrualContinuesAndUnfreezeReleasesEverything() public {
+        NativeAssetToken acme = _listedNative();
+        _recordNativeFee(acme, 1_000e6);
+        uint256 before = distributor.cashbackBalance(address(acme), address(usdt));
+        vm.prank(admin);
+        registry.freezeCashback(address(acme));
+
+        _recordNativeFee(acme, 2_000e6);
+        uint256 total = distributor.cashbackBalance(address(acme), address(usdt));
+        assertEq(total, before + (uint256(2_000e6) * distributor.cashbackBps()) / 10_000);
+
+        vm.prank(admin);
+        registry.unfreezeCashback(address(acme));
+        vm.prank(issuer);
+        distributor.withdraw(address(acme), address(usdt));
+        assertEq(usdt.balanceOf(issuer), total);
+        assertEq(distributor.cashbackBalance(address(acme), address(usdt)), 0);
+    }
+
+    /// @notice The freeze is per listing and only affects issuer cashback: another listing's
+    /// issuer and the treasury's protocol fees are untouched.
+    function test_Freeze_DoesNotAffectOtherListingsOrProtocolFees() public {
+        NativeAssetToken frozenAsset = _listedNative();
+        NativeAssetToken otherAsset = _listedNative();
+        _recordNativeFee(frozenAsset, 1_000e6);
+        _recordNativeFee(otherAsset, 1_000e6);
+        vm.prank(admin);
+        registry.freezeCashback(address(frozenAsset));
+
+        uint256 otherCashback = distributor.cashbackBalance(address(otherAsset), address(usdt));
+        vm.prank(issuer);
+        distributor.withdraw(address(otherAsset), address(usdt));
+        assertEq(usdt.balanceOf(issuer), otherCashback);
+
+        uint256 protocolShare = distributor.protocolBalance(address(usdt));
+        vm.prank(admin);
+        distributor.withdrawProtocolFees(address(usdt), treasuryTarget, protocolShare);
+        assertEq(usdt.balanceOf(treasuryTarget), protocolShare);
     }
 }

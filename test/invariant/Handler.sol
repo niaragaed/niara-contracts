@@ -70,6 +70,17 @@ contract Handler is Test {
     /// the protocol was paused. Must stay zero (spec §3.3, pause principle).
     uint256 public ghost_payoutsWhilePaused;
 
+    /// @notice Successful cashback withdrawals on a listing whose cashback was frozen. Must
+    /// stay zero (spec §9.5).
+    uint256 public ghost_withdrawalsWhileFrozen;
+
+    /// @notice Settlements on a frozen listing that credited a cashback different from the
+    /// unfrozen formula. Must stay zero: the freeze never stops accrual.
+    uint256 public ghost_frozenAccrualMismatch;
+
+    /// @notice Settlements that succeeded on a frozen listing (sanity: the fuzzer reaches it).
+    uint256 public ghost_settlementsWhileFrozen;
+
     /// @notice Successful settlements paid in a token other than `settlement.feeToken()`
     /// (USDT). Must stay zero (spec invariant 12).
     uint256 public ghost_settlementsOutsideFeeToken;
@@ -311,6 +322,11 @@ contract Handler is Test {
         uint256 feeCharged = settlement.settle(asset, paymentToken, buyer, seller, assetAmount, paymentAmount);
         _recordSettleGhosts(asset, paymentToken, feeCharged, cashbackBefore);
         if (registry.paused()) ghost_payoutsWhilePaused++;
+        if (registry.getListing(asset).cashbackFrozen) {
+            ghost_settlementsWhileFrozen++;
+            uint256 credited = distributor.cashbackBalance(asset, paymentToken) - cashbackBefore;
+            if (credited != (feeCharged * distributor.cashbackBps()) / 10_000) ghost_frozenAccrualMismatch++;
+        }
 
         // The party receiving USDT (the seller) pays the fee out of it; the other party
         // receives its leg in full.
@@ -422,6 +438,19 @@ contract Handler is Test {
         return seed % 2 == 0 ? nativeEquity : nativeBond;
     }
 
+    /// @notice The listing authority freezes or unfreezes cashback on a native listing, or
+    /// (chaotic path) tries it on a Currency listing, which always reverts.
+    function toggleCashbackFreeze(uint256 tokenSeed) external {
+        address token = _chaos(tokenSeed) ? address(usdt) : address(_pickNative(tokenSeed / 5));
+        bool frozen = registry.getListing(token).cashbackFrozen;
+        vm.prank(listingAuthority);
+        if (frozen) {
+            registry.unfreezeCashback(token);
+        } else {
+            registry.freezeCashback(token);
+        }
+    }
+
     /// @notice The native issuer requests a batch to a random actor. A fraction of calls
     /// comes from a non-issuer, or with a zero amount, on purpose.
     function requestIssuance(uint256 tokenSeed, uint256 amountSeed, uint256 actorSeed) external {
@@ -503,6 +532,7 @@ contract Handler is Test {
         vm.prank(issuer);
         distributor.withdraw(asset, paymentToken);
         if (registry.paused()) ghost_payoutsWhilePaused++;
+        if (registry.getListing(asset).cashbackFrozen) ghost_withdrawalsWhileFrozen++;
     }
 
     function withdrawProtocolFees(uint256 paymentSeed, uint256 amountSeed) external {

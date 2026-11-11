@@ -728,7 +728,12 @@ both listing paths (§4.1), issuance batches numbered from 1 with
 `Approved` `Currency`, fees and cashback always in USDT (EVM: `settle` accepts only
 `NiaraSettlement.feeToken`, which needs an `Approved` `Currency` listing too, reverts
 `NotFeeToken` otherwise, and is switched only through the timelock; the seller, who
-receives the USDT, pays the fee). What still differs, on purpose:
+receives the USDT, pays the fee), and the per-listing cashback freeze (§9.5; EVM:
+`ListingRegistry.freezeCashback` / `unfreezeCashback`, LISTING_AUTHORITY_ROLE, no
+timelock, any listing status, allowed while paused, `NotCashbackEligible` /
+`CashbackAlreadyFrozen` / `CashbackNotFrozen`, `CashbackFreezeSet(token, frozen,
+listingAuthority)`; `CashbackDistributor.withdraw` reverts `CashbackFrozen` while accrual
+continues). What still differs, on purpose:
 
 | Topic | Solana (`niara_exchange`) | EVM (`niara-contracts`) | Why |
 |---|---|---|---|
@@ -744,7 +749,7 @@ receives the USDT, pays the fee). What still differs, on purpose:
 | Replay protection | `settle(order_id)` creates `["settled", order_id]`: a match settles at most once on-chain | No match id on-chain; idempotency is the off-chain unique constraint on `match_id` (§5) | Not ported yet; candidate for the EVM settle adapter work |
 | Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
 | Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, one `FeeLedger` for the fee mint, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; balances are kept per (asset, token) and per token, so only USDT ever accrues, and a fee-token switch leaves old balances withdrawable; no ledger accounts, no sweep | Pre-existing EVM distributor; `settle` alone enforces the fee token |
-| Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; blocked while paused | Pre-existing EVM distributor's payout shape (no amount, no destination) kept |
+| Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; blocked while paused and while the listing's cashback is frozen (`Listing.cashbackFrozen`, read from the registry) | Pre-existing EVM distributor's payout shape (no amount, no destination) kept |
 | Batch timestamps | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
 
 ---

@@ -96,6 +96,13 @@ is on, `ListingRegistry.approveIssuance`, `NiaraSettlement.settle` and both
 accounting, never a user reclaiming their own escrowed deposit. `BackingGateway` and
 `AssetToken` (the backed model) keep their own pauses.
 
+**Per-listing cashback freeze.** `ListingRegistry.freezeCashback(token)` /
+`unfreezeCashback(token)` (LISTING_AUTHORITY_ROLE, no timelock, any listing status,
+allowed while paused) set `Listing.cashbackFrozen`; while it is set,
+`CashbackDistributor.withdraw` for that token reverts with `CashbackFrozen`. Accrual
+continues, so nothing is lost: everything credited is withdrawable after unfreezing.
+`Currency` listings, which never accrue cashback, cannot be frozen.
+
 Cashback share: **1000 bps (10% of the fee), a provisional value**. See the code
 comment: *"TO BE DEFINED: 1% of the fee equals 0.005% of volume, probably not enough.
 See the whitepaper, section 4."*

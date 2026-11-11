@@ -56,6 +56,7 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
     error NotIssuerWallet();
     error NothingToWithdraw();
     error InvalidWithdrawAmount();
+    error CashbackFrozen(address assetToken);
 
     /// @param admin_ Holder of DEFAULT_ADMIN_ROLE and TREASURY_ROLE.
     /// @param listingRegistry_ ListingRegistry holding the shared protocol pause.
@@ -94,9 +95,11 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
     /// @notice Withdraws the accumulated cashback of `assetToken` in `paymentToken`. Only the
     /// wallet currently registered as the asset's `issuerWallet` can call it: if the issuer
     /// changes wallets, the new wallet can withdraw the accumulated balance. Blocked while
-    /// the protocol is paused.
+    /// the protocol is paused and while the listing's cashback is frozen
+    /// (`ListingRegistry.freezeCashback`, spec §9.5); accrual continues meanwhile.
     function withdraw(address assetToken, address paymentToken) external nonReentrant whenProtocolNotPaused {
         if (msg.sender != IAssetToken(assetToken).issuerWallet()) revert NotIssuerWallet();
+        if (listingRegistry.getListing(assetToken).cashbackFrozen) revert CashbackFrozen(assetToken);
 
         uint256 amount = cashbackBalance[assetToken][paymentToken];
         if (amount == 0) revert NothingToWithdraw();

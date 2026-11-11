@@ -99,6 +99,9 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
         address indexed token, uint256 indexed batchNo, uint256 amount, address recipient, bytes32 docHash
     );
     event IssuanceRejected(address indexed token, uint256 indexed batchNo, uint256 amount, address recipient);
+    /// @notice Cashback withdrawals for `token` were frozen (`frozen == true`) or unfrozen by
+    /// the listing authority. Accrual is never affected. Mirrors Solana's `CashbackFreezeSet`.
+    event CashbackFreezeSet(address indexed token, bool frozen, address indexed listingAuthority);
 
     error ZeroAddress();
     error ZeroAmount();
@@ -111,6 +114,9 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
     error ListingNotApproved(address token);
     error BatchNotRequested(address token, uint256 batchNo);
     error EmptyDocHash();
+    error NotCashbackEligible(address token);
+    error CashbackAlreadyFrozen(address token);
+    error CashbackNotFrozen(address token);
 
     /// @param admin_ Holder of DEFAULT_ADMIN_ROLE (role changes, timelock) and PAUSER_ROLE.
     /// @param listingAuthority_ Initial holder of LISTING_AUTHORITY_ROLE.
@@ -164,7 +170,8 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
             status: ListingStatus.Pending,
             cashbackEligible: true,
             docHash: docHash,
-            approvedAt: 0
+            approvedAt: 0,
+            cashbackFrozen: false
         });
         // Batch numbers start at 1 (Solana: `next_batch_no = 1` in `submit_listing`).
         nextBatchNo[token] = 1;
@@ -186,7 +193,8 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
             status: ListingStatus.Approved,
             cashbackEligible: false,
             docHash: bytes32(0),
-            approvedAt: approvedAt
+            approvedAt: approvedAt,
+            cashbackFrozen: false
         });
         // Same event as approveListing (Solana's list_currency emits ListingApproved too).
         emit ListingApproved(token, address(0), AssetClass.Currency, false, bytes32(0), approvedAt);
@@ -228,6 +236,37 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
         }
         listing.status = ListingStatus.Delisted;
         emit ListingDelisted(token, from);
+    }
+
+    // ── Cashback freeze (spec §9.5) ─────────────────────────────────────────────────────
+
+    /// @notice Freezes cashback withdrawals for one listing, without pausing the protocol
+    /// (e.g. while an issuer key compromise is investigated). Accrual continues: settlements
+    /// keep crediting cashback, which becomes withdrawable again after `unfreezeCashback`.
+    /// @dev No timelock (containment must act at once), any listing status (cashback stays
+    /// withdrawable after delisting, so it must stay freezable) and allowed while paused,
+    /// like Solana's `freeze_cashback`. Reverts for listings that never accrue cashback
+    /// (`Currency`, or no listing) and when already frozen.
+    /// @param token Listed token whose issuer's cashback withdrawals are frozen.
+    function freezeCashback(address token) external onlyRole(LISTING_AUTHORITY_ROLE) {
+        _setCashbackFrozen(token, true);
+    }
+
+    /// @notice Lifts the cashback freeze of one listing; everything accrued while frozen is
+    /// withdrawable again. Same rules as `freezeCashback`; reverts when not frozen.
+    /// @param token Listed token whose issuer's cashback withdrawals are unfrozen.
+    function unfreezeCashback(address token) external onlyRole(LISTING_AUTHORITY_ROLE) {
+        _setCashbackFrozen(token, false);
+    }
+
+    function _setCashbackFrozen(address token, bool frozen) private {
+        Listing storage listing = _listings[token];
+        // `Currency` listings (and tokens with no listing) never accrue cashback.
+        if (!listing.cashbackEligible) revert NotCashbackEligible(token);
+        if (frozen && listing.cashbackFrozen) revert CashbackAlreadyFrozen(token);
+        if (!frozen && !listing.cashbackFrozen) revert CashbackNotFrozen(token);
+        listing.cashbackFrozen = frozen;
+        emit CashbackFreezeSet(token, frozen, msg.sender);
     }
 
     /// @inheritdoc IListingRegistry
