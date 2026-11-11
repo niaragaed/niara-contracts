@@ -720,23 +720,31 @@ account, so `token` plays the role of both `listing` and `asset_mint`).
 
 ### 4.2 EVM vs Solana differences (intentional)
 
-Aligned on both chains: asset classes, listing status table, `ListingApproved` on
-both listing paths (§4.1), issuance batches numbered from 1 with
-`requested_at`/`resolved_at`, `reject_issuance` in any listing status,
-`approve_issuance` blocked while paused, non-zero `doc_hash` / burn `reference`,
-`Currency` never cashback-eligible, `settle` only on `Approved` `Equity` against an
-`Approved` `Currency`, fees and cashback always in USDT (EVM: `settle` accepts only
-`NiaraSettlement.feeToken`, which needs an `Approved` `Currency` listing too, reverts
-`NotFeeToken` otherwise, and is switched only through the timelock; the seller, who
-receives the USDT, pays the fee), and the per-listing cashback freeze (§9.5; EVM:
-`ListingRegistry.freezeCashback` / `unfreezeCashback`, LISTING_AUTHORITY_ROLE, no
-timelock, any listing status, allowed while paused, `NotCashbackEligible` /
-`CashbackAlreadyFrozen` / `CashbackNotFrozen`, `CashbackFreezeSet(token, frozen,
-listingAuthority)`; `CashbackDistributor.withdraw` reverts `CashbackFrozen` while accrual
-continues), and on-chain replay protection: a match id settles at most once (EVM:
-`settle(bytes16 matchId, ...)` marks `settledMatches[matchId]` before any transfer and
-reverts `MatchAlreadySettled` on a second attempt; `Settled` carries `matchId` first, like
-Solana's `order_id`; a storage slot instead of a `SettlementRecord` account, so no rent).
+Aligned on both chains:
+- asset classes, listing status table, `ListingApproved` on both listing paths (§4.1);
+- issuance batches numbered from 1 with `requested_at`/`resolved_at`, `reject_issuance`
+  in any listing status, `approve_issuance` blocked while paused, non-zero `doc_hash` /
+  burn `reference`;
+- `Currency` never cashback-eligible; `settle` only on `Approved` `Equity` against an
+  `Approved` `Currency`;
+- **fees and cashback always in USDT** (§3.4). EVM: `settle` accepts only
+  `NiaraSettlement.feeToken` (`NotFeeToken` otherwise), which needs an `Approved`
+  `Currency` listing too and is switched only through the timelock
+  (`proposeSetFeeToken` / `executeSetFeeToken`); the seller, who receives the USDT,
+  pays the fee;
+- **one shared pause** with the same scope and principle (§3.3); where it lives differs,
+  see the table;
+- **per-listing cashback freeze** (§9.5). EVM: `ListingRegistry.freezeCashback` /
+  `unfreezeCashback` (LISTING_AUTHORITY_ROLE, no timelock, any listing status, allowed
+  while paused; `NotCashbackEligible` / `CashbackAlreadyFrozen` / `CashbackNotFrozen`;
+  `CashbackFreezeSet(token, frozen, listingAuthority)`); `CashbackDistributor.withdraw`
+  reverts `CashbackFrozen` while accrual continues;
+- **on-chain replay protection**: a match id settles at most once. EVM:
+  `settle(bytes16 matchId, ...)` sets `settledMatches[matchId]` before any transfer and
+  reverts `MatchAlreadySettled` on a second attempt; `Settled` carries `matchId` first,
+  like Solana's `order_id` (a storage slot instead of a `SettlementRecord` account, so
+  no rent).
+
 What still differs, on purpose:
 
 | Topic | Solana (`niara_exchange`) | EVM (`niara-contracts`) | Why |
