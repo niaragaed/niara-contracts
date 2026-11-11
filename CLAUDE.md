@@ -8,8 +8,12 @@ look for or reference files from that project here.
 
 **Multichain exchange:** `EXCHANGE-MULTICHAIN-DESIGN.md` is the source of truth for the multichain exchange (listing, issuance, settlement, P2P escrow) on EVM and Solana.
 It is a tracked **copy** of the spec in the Solana repo (`github.com/niaragaed/niara-exchange-solana`):
-keep it tracked here, sync it from there, and send EVM-side edits (e.g. §4.1 and the
-"EVM vs Solana differences" table in §4.2) back to that repo so the two copies don't drift.
+keep it tracked here and sync it from there.
+
+**EXCHANGE-MULTICHAIN-DESIGN.md is owned by the niara-exchange-solana repo. Never edit it
+here. List any spec change this repo needs under "Spec edits needed" in your final report.**
+That includes the EVM-side sections (§4.1 and the "EVM vs Solana differences" table in
+§4.2): they are changed in the Solana repo and synced back, never edited in this copy.
 
 ---
 
