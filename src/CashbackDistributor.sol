@@ -104,10 +104,15 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
         uint256 amount = cashbackBalance[assetToken][paymentToken];
         if (amount == 0) revert NothingToWithdraw();
 
+        // Checks-effects-interactions: the balance is zeroed and `CashbackWithdrawn` is
+        // emitted BEFORE the transfer. A payment token with a hook (ERC-777/ERC-1363) that
+        // re-enters during `safeTransfer` already sees nothing left to withdraw, and an
+        // off-chain indexer never sees the `Transfer` (or a re-entry's events) before the
+        // withdrawal that caused them. A failed transfer reverts everything, event included.
         cashbackBalance[assetToken][paymentToken] = 0;
-        IERC20(paymentToken).safeTransfer(msg.sender, amount);
-
         emit CashbackWithdrawn(assetToken, paymentToken, msg.sender, amount);
+
+        IERC20(paymentToken).safeTransfer(msg.sender, amount);
     }
 
     /// @notice Withdraws accumulated protocol revenue. Restricted to the treasury. Blocked
@@ -121,10 +126,12 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0 || amount > protocolBalance[paymentToken]) revert InvalidWithdrawAmount();
 
+        // Checks-effects-interactions, as in `withdraw`: the balance is decreased and
+        // `ProtocolFeesWithdrawn` is emitted BEFORE the transfer hands control to the token.
         protocolBalance[paymentToken] -= amount;
-        IERC20(paymentToken).safeTransfer(to, amount);
-
         emit ProtocolFeesWithdrawn(paymentToken, to, amount);
+
+        IERC20(paymentToken).safeTransfer(to, amount);
     }
 
     /// @notice Proposes a new cashback share (bps of the fee). Subject to the immutable

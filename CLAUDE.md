@@ -68,7 +68,7 @@ other way around.
   *do not* grant the role to the hostile contract, so they only pass if the observed
   error is `ReentrancyGuardReentrantCall` and not `AccessControlUnauthorizedAccount`.
 
-The five functions with external calls follow this pattern, each with a code comment
+The functions with external calls follow this pattern, each with a code comment
 explaining why:
 
 - `NiaraSettlement.settle`: `settledMatches[matchId] = true` (replay guard) and
@@ -81,6 +81,10 @@ explaining why:
   `emit RedemptionRequestCancelled` before the `safeTransfer` that returns the tokens.
 - `ListingRegistry.approveIssuance`: batch `Executed`, `resolvedAt` and
   `emit IssuanceExecuted` before `NativeAssetToken.mint`.
+- `CashbackDistributor.withdraw`: the cashback balance zeroed and
+  `emit CashbackWithdrawn` before the `safeTransfer` to the issuer.
+- `CashbackDistributor.withdrawProtocolFees`: the protocol balance decreased and
+  `emit ProtocolFeesWithdrawn` before the `safeTransfer` to the treasury's recipient.
 
 **Each one has a log-order test locking in the regression** (`vm.recordLogs` +
 `assertLt` between the event index and the first `Transfer` index). Do not remove or
@@ -93,6 +97,9 @@ weaken these tests when changing those functions:
   (these three in `test/BackingGateway.t.sol`)
 - `test_ApproveIssuance_EmitsIssuanceExecutedBeforeExternalTransfer`
   (`test/ListingRegistry.t.sol`)
+- `test_Withdraw_EmitsCashbackWithdrawnBeforeExternalTransfer`
+- `test_WithdrawProtocolFees_EmitsProtocolFeesWithdrawnBeforeExternalTransfer`
+  (these two in `test/CashbackDistributor.t.sol`)
 
 When adding a new function with an external call, add the equivalent order test. To
 simulate the hostile asset, use `test/mocks/MaliciousHookToken.sol`, which **records**

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
 import {ListingRegistry} from "../src/ListingRegistry.sol";
 import {AssetTokenFactory} from "../src/AssetTokenFactory.sol";
@@ -11,6 +11,8 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {MaliciousReentrantToken} from "./mocks/MaliciousReentrantToken.sol";
+import {MaliciousHookToken} from "./mocks/MaliciousHookToken.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 contract CashbackDistributorTest is Test {
@@ -428,5 +430,150 @@ contract CashbackDistributorTest is Test {
         vm.prank(admin);
         distributor.withdrawProtocolFees(address(usdt), treasuryTarget, protocolShare);
         assertEq(usdt.balanceOf(treasuryTarget), protocolShare);
+    }
+
+    // ── Checks-effects-interactions on both withdrawals ────────────────────────────────
+
+    /// @dev Extracts the selector from raw return data (e.g. the error of a reverted call).
+    function _selectorOf(bytes memory data) internal pure returns (bytes4 sel) {
+        require(data.length >= 4, "return data has no selector");
+        assembly {
+            sel := mload(add(data, 32))
+        }
+    }
+
+    /// @dev Index of the first log with `topic0`, or `type(uint256).max` if there is none.
+    function _firstLogIndex(Vm.Log[] memory logs, bytes32 topic0) internal pure returns (uint256) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == topic0) return i;
+        }
+        return type(uint256).max;
+    }
+
+    /// @dev Credits `feeAmount` of a hostile payment token against the eligible equity.
+    function _recordFeeInHookToken(uint256 feeAmount) internal returns (MaliciousHookToken evilPayment) {
+        evilPayment = new MaliciousHookToken();
+        evilPayment.mint(address(distributor), feeAmount);
+        vm.prank(settlementCaller);
+        distributor.recordFee(address(equityToken), address(evilPayment), feeAmount);
+    }
+
+    /// @notice `CashbackWithdrawn` is emitted before the transfer, so an off-chain indexer
+    /// never sees the `Transfer` before the withdrawal that caused it.
+    function test_Withdraw_EmitsCashbackWithdrawnBeforeExternalTransfer() public {
+        _recordFee(equityToken, 1_000e6);
+
+        vm.recordLogs();
+        vm.prank(issuer);
+        distributor.withdraw(address(equityToken), address(usdt));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 eventIndex = _firstLogIndex(logs, keccak256("CashbackWithdrawn(address,address,address,uint256)"));
+        uint256 transferIndex = _firstLogIndex(logs, keccak256("Transfer(address,address,uint256)"));
+
+        assertTrue(eventIndex != type(uint256).max, "CashbackWithdrawn not emitted");
+        assertTrue(transferIndex != type(uint256).max, "no Transfer emitted");
+        assertLt(eventIndex, transferIndex);
+        assertEq(eventIndex, 0);
+    }
+
+    /// @notice `ProtocolFeesWithdrawn` is emitted before the transfer.
+    function test_WithdrawProtocolFees_EmitsProtocolFeesWithdrawnBeforeExternalTransfer() public {
+        _recordFee(currencyToken, 1_000e6);
+
+        vm.recordLogs();
+        vm.prank(admin);
+        distributor.withdrawProtocolFees(address(usdt), treasuryTarget, 400e6);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 eventIndex = _firstLogIndex(logs, keccak256("ProtocolFeesWithdrawn(address,address,uint256)"));
+        uint256 transferIndex = _firstLogIndex(logs, keccak256("Transfer(address,address,uint256)"));
+
+        assertTrue(eventIndex != type(uint256).max, "ProtocolFeesWithdrawn not emitted");
+        assertTrue(transferIndex != type(uint256).max, "no Transfer emitted");
+        assertLt(eventIndex, transferIndex);
+        assertEq(eventIndex, 0);
+    }
+
+    /// @notice A hook that reads the cashback balance during the payout already sees zero.
+    function test_Withdraw_BalanceZeroedBeforeExternalTransfer() public {
+        MaliciousHookToken evilPayment = _recordFeeInHookToken(1_000e6);
+        uint256 cashback = distributor.cashbackBalance(address(equityToken), address(evilPayment));
+        assertGt(cashback, 0);
+
+        evilPayment.armOnTransfer(
+            address(distributor),
+            abi.encodeWithSelector(distributor.cashbackBalance.selector, address(equityToken), address(evilPayment))
+        );
+        vm.prank(issuer);
+        distributor.withdraw(address(equityToken), address(evilPayment));
+
+        assertTrue(evilPayment.reentered());
+        assertTrue(evilPayment.reentrantSucceeded());
+        assertEq(abi.decode(evilPayment.reentrantReturnData(), (uint256)), 0);
+        assertEq(evilPayment.balanceOf(issuer), cashback);
+    }
+
+    /// @notice A hook that reads the protocol balance during the payout already sees it
+    /// decreased.
+    function test_WithdrawProtocolFees_BalanceDecreasedBeforeExternalTransfer() public {
+        MaliciousHookToken evilPayment = _recordFeeInHookToken(1_000e6);
+        uint256 available = distributor.protocolBalance(address(evilPayment));
+
+        evilPayment.armOnTransfer(
+            address(distributor), abi.encodeWithSelector(distributor.protocolBalance.selector, address(evilPayment))
+        );
+        vm.prank(admin);
+        distributor.withdrawProtocolFees(address(evilPayment), treasuryTarget, 100e6);
+
+        assertTrue(evilPayment.reentered());
+        assertTrue(evilPayment.reentrantSucceeded());
+        assertEq(abi.decode(evilPayment.reentrantReturnData(), (uint256)), available - 100e6);
+    }
+
+    /// @notice Cross-function re-entry from the payout hook (withdraw -> withdrawProtocolFees)
+    /// dies at the guard. The hostile token holds no TREASURY_ROLE, so the error would be the
+    /// access-control one if `nonReentrant` were not the first modifier.
+    function test_Withdraw_CrossFunctionReentrancy_RevertsViaGuard() public {
+        MaliciousHookToken evilPayment = _recordFeeInHookToken(1_000e6);
+        uint256 cashback = distributor.cashbackBalance(address(equityToken), address(evilPayment));
+        uint256 protocolShare = distributor.protocolBalance(address(evilPayment));
+
+        evilPayment.armOnTransfer(
+            address(distributor),
+            abi.encodeWithSelector(
+                distributor.withdrawProtocolFees.selector, address(evilPayment), address(evilPayment), protocolShare
+            )
+        );
+        vm.prank(issuer);
+        distributor.withdraw(address(equityToken), address(evilPayment));
+
+        assertTrue(evilPayment.reentered());
+        assertFalse(evilPayment.reentrantSucceeded());
+        assertEq(_selectorOf(evilPayment.reentrantReturnData()), ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        assertEq(evilPayment.balanceOf(issuer), cashback);
+        assertEq(distributor.protocolBalance(address(evilPayment)), protocolShare);
+    }
+
+    /// @notice Re-entry into `withdrawProtocolFees` from its own payout hook dies at the
+    /// guard, before access control (the hostile token holds no TREASURY_ROLE).
+    function test_WithdrawProtocolFees_Reentrancy_RevertsViaGuard() public {
+        MaliciousHookToken evilPayment = _recordFeeInHookToken(1_000e6);
+        uint256 protocolShare = distributor.protocolBalance(address(evilPayment));
+
+        evilPayment.armOnTransfer(
+            address(distributor),
+            abi.encodeWithSelector(
+                distributor.withdrawProtocolFees.selector, address(evilPayment), address(evilPayment), 1
+            )
+        );
+        vm.prank(admin);
+        distributor.withdrawProtocolFees(address(evilPayment), treasuryTarget, 100e6);
+
+        assertTrue(evilPayment.reentered());
+        assertFalse(evilPayment.reentrantSucceeded());
+        assertEq(_selectorOf(evilPayment.reentrantReturnData()), ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        assertEq(evilPayment.balanceOf(treasuryTarget), 100e6);
+        assertEq(distributor.protocolBalance(address(evilPayment)), protocolShare - 100e6);
     }
 }
