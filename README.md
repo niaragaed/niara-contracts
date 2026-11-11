@@ -77,7 +77,8 @@ everything. It works entirely through `allowance` and never holds the parties' b
 Replay protection: `settle` takes the off-chain match id (`bytes16 matchId`, the
 `matches.id` UUID) first. `settledMatches[matchId]` is set before any transfer, so a
 match settles at most once (`MatchAlreadySettled`), and `Settled` carries the `matchId`.
-A settlement that reverts does not consume its id.
+A settlement that reverts does not consume its id. The all-zero id is rejected
+(`ZeroMatchId`).
 
 Fee: 50 bps (0.5%) by default, with a hard, immutable cap of 100 bps (1%) that not even
 the admin can exceed. Restricted to `SETTLEMENT_OPERATOR_ROLE` (Niara's order-matching
@@ -112,9 +113,58 @@ Cashback share: **1000 bps (10% of the fee), a provisional value**. See the code
 comment: *"TO BE DEFINED: 1% of the fee equals 0.005% of volume, probably not enough.
 See the whitepaper, section 4."*
 
+### `P2PEscrow.sol`
+
+P2P negotiation mode for `FixedIncome`, `Credit` and `Currency` listings (`Equity` trades
+on the order book through `settle`): the EVM mirror of the Solana deals
+(`EXCHANGE-MULTICHAIN-DESIGN.md` §3.5). No operator is involved; both parties sign their
+own transaction.
+
+- `openDeal(dealId, terms, expiresAt)`: the proposer names the counterparty (never
+  itself, never zero) and escrows its own side: the asset when selling, the payment when
+  buying. `now < expiresAt <= now + 30 days`. Both listings must be `Approved`, the
+  payment must be a `Currency`, and every deal has a USDT leg: the payment for
+  `FixedIncome`/`Credit`, exactly one of the two tokens for a `Currency` deal.
+- `acceptDeal(dealKey)`: only the named counterparty, only while `now < expiresAt`. It
+  delivers its side from its own wallet and receives the escrowed side, atomically. The
+  party receiving USDT pays the fee out of it; the other party receives its leg in full.
+  Cashback is credited only for cashback-eligible listings (never a `Currency`).
+- `cancelDeal(dealKey)` (proposer, while open) and `expireDeal(dealKey)` (anyone, once
+  `now >= expiresAt`; the deposit can only go to the proposer) return the deposit.
+- `sweepExcess(token, to)` (TREASURY_ROLE): moves tokens that belong to no deal.
+
+**The fee is part of the agreed terms.** `openDeal` copies `NiaraSettlement.feeBps` and
+`CashbackDistributor.cashbackBps` onto the deal and `acceptDeal` charges those, so a
+timelocked change while the deal is open does not affect it. The fee uses the same formula
+as `settle` (rounded down; an active fee may not truncate to zero,
+`AmountTooSmallForFeePrecision`). The fee *token* is not copied: after a fee-token switch,
+a deal whose USDT leg is the old token can only be refunded. The fee goes to the
+`CashbackDistributor`, which accounts for it through `recordDealFee` (ESCROW_ROLE, held
+by the escrow only) at the deal's own cashback rate.
+
+**Pause and listing status.** The shared pause, and a listing that is `Suspended` or
+`Delisted`, block `openDeal` and `acceptDeal` but never `cancelDeal` or `expireDeal`:
+those two read neither the registry nor `NiaraSettlement`, so a proposer can always take
+its deposit back.
+
+**A deal executes or refunds only once.** A deal is never deleted; its status leaves
+`Open` exactly once, and the same `dealId` can never be reopened by the same proposer
+(ids are scoped to the proposer: `dealKeyOf(proposer, dealId)`).
+
+**Per-deal accounting.** All deposits sit in the one contract, tracked per deal and per
+token (`totalEscrowed`). Every exit moves exactly the deal's own deposit, never "the
+balance", so tokens sent straight to the contract can neither block a deal nor be claimed
+by one; they are the balance above `totalEscrowed`, which only `sweepExcess` moves.
+Deposits and every leg of an acceptance are checked by balance delta
+(`TransferAmountMismatch`), so a fee-on-transfer token can never enter the escrow.
+Refunds deliberately have no such check: a refund must not gain a way to revert.
+
+Not in the deploy scripts yet: `script/Deploy.s.sol` does not deploy `P2PEscrow` or grant
+it `ESCROW_ROLE` on the distributor.
+
 ### `governance/TimelockedAccessControl.sol`
 
-Governance base inherited by all four contracts. Every role grant/revocation, and every
+Governance base inherited by the protocol's contracts. Every role grant/revocation, and every
 sensitive parameter (fee, cashback, issuer wallet, `BackingGateway`/`CashbackDistributor`
 address), goes through a proposal + execution separated by a configurable delay
 (default used in tests: 2 days; adjustable between 1 hour and 30 days). The direct
@@ -386,10 +436,12 @@ src/
     IAssetToken.sol
     IBackingGateway.sol
     ICashbackDistributor.sol
+    INiaraSettlement.sol
   AssetToken.sol
   BackingGateway.sol
   NiaraSettlement.sol
   CashbackDistributor.sol
+  P2PEscrow.sol
 script/
   Deploy.s.sol           (phase 1: deploy + propose the wiring; phase 2 via --sig "executeWiring()")
   Demo.s.sol             (full flow as real transactions, for public demonstration)
@@ -409,4 +461,7 @@ test/
   TimelockedAccessControl.t.sol
   Integration.t.sol              (full flow: backing → settlement → cashback → redemption)
   Invariant.t.sol + invariant/Handler.sol  (stateful fuzzing of the core invariants)
+  P2PEscrow.t.sol                (every path of the escrow, hostile tokens, log order)
+  P2PEscrowInvariant.t.sol + invariant/EscrowHandler.sol
+                                 (stateful fuzzing of the escrow: Solana invariants 6 and 7)
 ```

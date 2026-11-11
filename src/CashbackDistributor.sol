@@ -22,6 +22,9 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
 
     bytes32 public constant SETTLEMENT_ROLE = keccak256("SETTLEMENT_ROLE");
     bytes32 public constant TREASURY_ROLE = keccak256("TREASURY_ROLE");
+    /// @notice Held by P2PEscrow: the only caller of `recordDealFee`. Separate from
+    /// SETTLEMENT_ROLE so neither contract can use the other's accounting entry point.
+    bytes32 public constant ESCROW_ROLE = keccak256("ESCROW_ROLE");
 
     uint16 private constant BPS_DENOMINATOR = 10_000;
 
@@ -90,6 +93,40 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
 
         protocolBalance[paymentToken] += (feeAmount - cashbackAmount);
         emit FeeRecorded(assetToken, paymentToken, feeAmount, cashbackAmount, eligible);
+    }
+
+    /// @notice Records the fee of a P2P deal: `feeAmount` of `feeToken`, already transferred
+    /// to this contract by P2PEscrow. Unlike `recordFee`, the cashback share uses the rate
+    /// fixed on the deal at `openDeal` (`dealCashbackBps`), not the current `cashbackBps`:
+    /// the fee and its split are part of the terms both parties agreed (spec §3.5).
+    /// @dev Eligibility comes from the asset's listing in the registry, not from the token:
+    /// a `Currency` asset is a plain ERC-20 with no `cashbackEligible()` and never accrues
+    /// cashback. Not paused: it only runs inside `acceptDeal`, which is.
+    /// @param assetToken The deal's asset token (the listing the cashback belongs to).
+    /// @param feeToken Token the fee was charged in.
+    /// @param feeAmount Fee transferred to this contract (non-zero).
+    /// @param dealCashbackBps Cashback rate stored on the deal, at most `MAX_CASHBACK_BPS`.
+    /// @return cashbackAmount Share of `feeAmount` credited to the issuer.
+    function recordDealFee(address assetToken, address feeToken, uint256 feeAmount, uint16 dealCashbackBps)
+        external
+        onlyRole(ESCROW_ROLE)
+        returns (uint256 cashbackAmount)
+    {
+        if (feeAmount == 0) revert ZeroFeeAmount();
+        if (dealCashbackBps > MAX_CASHBACK_BPS) revert CashbackBpsExceedsCap(dealCashbackBps);
+
+        bool eligible = listingRegistry.getListing(assetToken).cashbackEligible;
+        if (eligible) {
+            cashbackAmount = (feeAmount * dealCashbackBps) / BPS_DENOMINATOR;
+            if (cashbackAmount > 0) {
+                address issuer = IAssetToken(assetToken).issuerWallet();
+                cashbackBalance[assetToken][feeToken] += cashbackAmount;
+                emit CashbackCredited(assetToken, feeToken, issuer, cashbackAmount);
+            }
+        }
+
+        protocolBalance[feeToken] += (feeAmount - cashbackAmount);
+        emit FeeRecorded(assetToken, feeToken, feeAmount, cashbackAmount, eligible);
     }
 
     /// @notice Withdraws the accumulated cashback of `assetToken` in `paymentToken`. Only the

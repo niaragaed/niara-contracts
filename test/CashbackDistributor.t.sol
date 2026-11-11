@@ -576,4 +576,159 @@ contract CashbackDistributorTest is Test {
         assertEq(evilPayment.balanceOf(treasuryTarget), 100e6);
         assertEq(distributor.protocolBalance(address(evilPayment)), protocolShare - 100e6);
     }
+
+    // ── recordDealFee (P2PEscrow) ──────────────────────────────────────────────────────
+
+    address public escrowCaller = makeAddr("escrowCaller");
+
+    /// @dev Grants ESCROW_ROLE to `escrowCaller` (through the timelock) and returns the role.
+    function _grantEscrowRole() internal returns (bytes32 escrowRole) {
+        escrowRole = distributor.ESCROW_ROLE();
+        _grantRole(escrowRole, escrowCaller);
+    }
+
+    /// @dev Simulates P2PEscrow: transfers the fee to the distributor and then records it.
+    function _recordDealFee(address asset, uint256 feeAmount, uint16 dealCashbackBps) internal returns (uint256) {
+        usdt.mint(address(distributor), feeAmount);
+        vm.prank(escrowCaller);
+        return distributor.recordDealFee(asset, address(usdt), feeAmount, dealCashbackBps);
+    }
+
+    function test_RecordDealFee_OnlyEscrowRole() public {
+        bytes32 escrowRole = _grantEscrowRole();
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, escrowRole)
+        );
+        distributor.recordDealFee(address(equityToken), address(usdt), 100e6, 1_000);
+    }
+
+    /// @notice The two accounting entry points are separate: the settlement role cannot
+    /// record a deal fee, and the escrow role cannot record a settlement fee.
+    function test_RecordDealFee_RolesAreNotInterchangeable() public {
+        bytes32 escrowRole = _grantEscrowRole();
+        vm.prank(settlementCaller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, settlementCaller, escrowRole
+            )
+        );
+        distributor.recordDealFee(address(equityToken), address(usdt), 100e6, 1_000);
+
+        vm.prank(escrowCaller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, escrowCaller, settlementRole
+            )
+        );
+        distributor.recordFee(address(equityToken), address(usdt), 100e6);
+    }
+
+    function test_RecordDealFee_RevertsForZeroFee() public {
+        _grantEscrowRole();
+        vm.prank(escrowCaller);
+        vm.expectRevert(CashbackDistributor.ZeroFeeAmount.selector);
+        distributor.recordDealFee(address(equityToken), address(usdt), 0, 1_000);
+    }
+
+    /// @notice The hard cashback cap also binds the rate a deal carries.
+    function test_RecordDealFee_RevertsWhenDealRateExceedsCap() public {
+        _grantEscrowRole();
+        uint16 tooHigh = distributor.MAX_CASHBACK_BPS() + 1;
+        vm.prank(escrowCaller);
+        vm.expectRevert(abi.encodeWithSelector(CashbackDistributor.CashbackBpsExceedsCap.selector, tooHigh));
+        distributor.recordDealFee(address(equityToken), address(usdt), 100e6, tooHigh);
+    }
+
+    /// @notice The cashback share uses the rate fixed on the deal, not the current
+    /// `cashbackBps` (1000 here).
+    function test_RecordDealFee_CreditsAtTheDealRate() public {
+        _grantEscrowRole();
+        NativeAssetToken acme = _listedNative();
+
+        usdt.mint(address(distributor), 1_000e6);
+        vm.expectEmit(true, true, true, true, address(distributor));
+        emit CashbackDistributor.CashbackCredited(address(acme), address(usdt), issuer, 250e6);
+        vm.expectEmit(true, true, false, true, address(distributor));
+        emit CashbackDistributor.FeeRecorded(address(acme), address(usdt), 1_000e6, 250e6, true);
+        vm.prank(escrowCaller);
+        uint256 cashback = distributor.recordDealFee(address(acme), address(usdt), 1_000e6, 2_500);
+
+        assertEq(cashback, 250e6);
+        assertEq(distributor.cashbackBalance(address(acme), address(usdt)), 250e6);
+        assertEq(distributor.protocolBalance(address(usdt)), 750e6);
+    }
+
+    function test_RecordDealFee_FullCashbackAtTheCap() public {
+        _grantEscrowRole();
+        NativeAssetToken acme = _listedNative();
+        uint256 cashback = _recordDealFee(address(acme), 1_000e6, 10_000);
+
+        assertEq(cashback, 1_000e6);
+        assertEq(distributor.protocolBalance(address(usdt)), 0);
+    }
+
+    /// @notice An eligible listing at a zero deal rate: everything is protocol revenue.
+    function test_RecordDealFee_ZeroDealRateCreditsNothing() public {
+        _grantEscrowRole();
+        NativeAssetToken acme = _listedNative();
+
+        usdt.mint(address(distributor), 1_000e6);
+        vm.expectEmit(true, true, false, true, address(distributor));
+        emit CashbackDistributor.FeeRecorded(address(acme), address(usdt), 1_000e6, 0, true);
+        vm.prank(escrowCaller);
+        uint256 cashback = distributor.recordDealFee(address(acme), address(usdt), 1_000e6, 0);
+
+        assertEq(cashback, 0);
+        assertEq(distributor.cashbackBalance(address(acme), address(usdt)), 0);
+        assertEq(distributor.protocolBalance(address(usdt)), 1_000e6);
+    }
+
+    /// @notice A Currency listing never accrues cashback. Its token is a plain ERC-20 with
+    /// no `cashbackEligible()` / `issuerWallet()`: eligibility comes from the registry.
+    function test_RecordDealFee_CurrencyListingNeverAccruesCashback() public {
+        _grantEscrowRole();
+        MockUSDT brl = new MockUSDT();
+        vm.prank(admin);
+        registry.listCurrency(address(brl));
+
+        usdt.mint(address(distributor), 1_000e6);
+        vm.expectEmit(true, true, false, true, address(distributor));
+        emit CashbackDistributor.FeeRecorded(address(brl), address(usdt), 1_000e6, 0, false);
+        vm.prank(escrowCaller);
+        uint256 cashback = distributor.recordDealFee(address(brl), address(usdt), 1_000e6, 10_000);
+
+        assertEq(cashback, 0);
+        assertEq(distributor.cashbackBalance(address(brl), address(usdt)), 0);
+        assertEq(distributor.protocolBalance(address(usdt)), 1_000e6);
+    }
+
+    /// @notice A token with no listing is not eligible either.
+    function test_RecordDealFee_UnlistedAssetNeverAccruesCashback() public {
+        _grantEscrowRole();
+        uint256 cashback = _recordDealFee(address(equityToken), 1_000e6, 10_000);
+
+        assertEq(cashback, 0);
+        assertEq(distributor.protocolBalance(address(usdt)), 1_000e6);
+    }
+
+    /// @notice Deal cashback lands in the same balance as settlement cashback, so the issuer
+    /// withdraws it the same way.
+    function test_RecordDealFee_CashbackIsWithdrawable() public {
+        _grantEscrowRole();
+        NativeAssetToken acme = _listedNative();
+        _recordDealFee(address(acme), 1_000e6, 2_500);
+
+        vm.prank(issuer);
+        distributor.withdraw(address(acme), address(usdt));
+        assertEq(usdt.balanceOf(issuer), 250e6);
+    }
+
+    /// @notice Like `recordFee`, it is not paused: it only runs inside `acceptDeal`, which is.
+    function test_RecordDealFee_NotBlockedByPause() public {
+        _grantEscrowRole();
+        NativeAssetToken acme = _listedNative();
+        _pauseProtocol();
+        assertEq(_recordDealFee(address(acme), 1_000e6, 2_500), 250e6);
+    }
 }

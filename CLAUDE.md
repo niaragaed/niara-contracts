@@ -85,6 +85,15 @@ explaining why:
   `emit CashbackWithdrawn` before the `safeTransfer` to the issuer.
 - `CashbackDistributor.withdrawProtocolFees`: the protocol balance decreased and
   `emit ProtocolFeesWithdrawn` before the `safeTransfer` to the treasury's recipient.
+- `P2PEscrow.openDeal`: the deal stored, `totalEscrowed` increased and `emit DealOpened`
+  before the `safeTransferFrom` that pulls the deposit.
+- `P2PEscrow.acceptDeal`: `Executed` status, `resolvedAt`, the decrease in
+  `totalEscrowed` and `emit DealExecuted` before any of the transfers.
+- `P2PEscrow.cancelDeal` / `expireDeal`: `Cancelled` / `Expired` status, `resolvedAt`,
+  the decrease in `totalEscrowed` and `emit DealCancelled` / `DealExpired` before the
+  `safeTransfer` that returns the deposit.
+- `P2PEscrow.sweepExcess`: `emit ExcessSwept` before the `safeTransfer` (it has no state
+  to update).
 
 **Each one has a log-order test locking in the regression** (`vm.recordLogs` +
 `assertLt` between the event index and the first `Transfer` index). Do not remove or
@@ -100,6 +109,12 @@ weaken these tests when changing those functions:
 - `test_Withdraw_EmitsCashbackWithdrawnBeforeExternalTransfer`
 - `test_WithdrawProtocolFees_EmitsProtocolFeesWithdrawnBeforeExternalTransfer`
   (these two in `test/CashbackDistributor.t.sol`)
+- `test_OpenDeal_EmitsDealOpenedBeforeExternalTransfer`
+- `test_AcceptDeal_EmitsDealExecutedBeforeExternalTransfers`
+- `test_CancelDeal_EmitsDealCancelledBeforeExternalTransfer`
+- `test_ExpireDeal_EmitsDealExpiredBeforeExternalTransfer`
+- `test_SweepExcess_EmitsExcessSweptBeforeExternalTransfer`
+  (these five in `test/P2PEscrow.t.sol`)
 
 When adding a new function with an external call, add the equivalent order test. To
 simulate the hostile asset, use `test/mocks/MaliciousHookToken.sol`, which **records**
@@ -112,7 +127,15 @@ saw.
 the fee transfer, because the distributor accounts for a fee that must already be in
 its balance. It is an internal protocol call and any failure reverts the whole
 transaction, event included. It is commented in the code; if you need to change that
-order, discuss it first.
+order, discuss it first. `P2PEscrow.acceptDeal` has the same exception for the same
+reason: `cashbackDistributor.recordDealFee` comes after the fee transfer.
+
+**P2PEscrow refunds are never blocked.** `cancelDeal` and `expireDeal` must not read the
+registry, `NiaraSettlement` or the pause, and must not gain any new way to revert (no
+`whenProtocolNotPaused`, no listing check, no balance-delta check on the refund). Every
+exit moves exactly the deal's own deposit; `sweepExcess` only ever moves
+`balance - totalEscrowed[token]`. The invariant suite (`test/P2PEscrowInvariant.t.sol`,
+mirroring Solana invariants 6 and 7) must keep passing on any change to that contract.
 
 ## Parameter still to be defined
 
