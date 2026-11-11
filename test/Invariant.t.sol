@@ -57,7 +57,9 @@ contract InvariantTest is Test {
     function _deployContracts() internal {
         distributor = new CashbackDistributor(admin, TIMELOCK_DELAY);
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
-        settlement = new NiaraSettlement(admin, address(distributor), address(registry), TIMELOCK_DELAY);
+        usdt = new MockUSDT();
+        settlement =
+            new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);
         gateway = new BackingGateway(admin, TIMELOCK_DELAY);
         assetEquity = new AssetToken(
             "Apple Inc. - Niara Tokenized Equity",
@@ -79,7 +81,6 @@ contract InvariantTest is Test {
             admin,
             TIMELOCK_DELAY
         );
-        usdt = new MockUSDT();
         wbtc = new MockWBTC();
         unlistedPayment = new MockUSDT();
 
@@ -288,6 +289,25 @@ contract InvariantTest is Test {
             }
         }
         assertEq(handler.ghost_cashbackCreditedToCurrency(), 0);
+    }
+
+    /// @notice Fees are only ever charged in the fee token (USDT): no settlement pays in
+    /// anything else, no fee or cashback is ever recorded in another token, and the USDT
+    /// receiver pays the fee while the other party receives its leg in full (spec
+    /// invariant 12).
+    function invariant_FeesOnlyInFeeToken() public view {
+        assertEq(settlement.feeToken(), address(usdt));
+        assertEq(handler.ghost_settlementsOutsideFeeToken(), 0);
+        assertEq(handler.ghost_feeNotPaidByUsdtReceiver(), 0);
+
+        address[3] memory others = [address(wbtc), address(unlistedPayment), address(nativeEquity)];
+        for (uint256 i = 0; i < others.length; i++) {
+            assertEq(handler.ghost_sumFeesRecorded(others[i]), 0);
+            assertEq(distributor.protocolBalance(others[i]), 0);
+            assertEq(distributor.cashbackBalance(address(nativeEquity), others[i]), 0);
+        }
+        assertEq(wbtc.balanceOf(address(distributor)), 0);
+        assertEq(unlistedPayment.balanceOf(address(distributor)), 0);
     }
 
     /// @notice Native supply only moves through approved issuance batches and holder burns:

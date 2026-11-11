@@ -9,6 +9,7 @@ import {ListingRegistry} from "../src/ListingRegistry.sol";
 import {AssetTokenFactory} from "../src/AssetTokenFactory.sol";
 import {NativeAssetToken} from "../src/NativeAssetToken.sol";
 import {IListingRegistry} from "../src/interfaces/IListingRegistry.sol";
+import {TimelockedAccessControl} from "../src/governance/TimelockedAccessControl.sol";
 import {MockBackingGateway} from "./mocks/MockBackingGateway.sol";
 import {MockFeeOnTransferToken} from "./mocks/MockFeeOnTransferToken.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
@@ -45,7 +46,10 @@ contract NiaraSettlementTest is Test {
     function setUp() public {
         distributor = new CashbackDistributor(admin, TIMELOCK_DELAY);
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
-        settlement = new NiaraSettlement(admin, address(distributor), address(registry), TIMELOCK_DELAY);
+        usdt = new MockUSDT();
+        wbtc = new MockWBTC();
+        settlement =
+            new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);
 
         settlementOperatorRole = settlement.SETTLEMENT_OPERATOR_ROLE();
         pauserRole = settlement.PAUSER_ROLE();
@@ -58,8 +62,6 @@ contract NiaraSettlementTest is Test {
         // batch issued to the seller through the registry.
         assetToken = _issueListedNative(IListingRegistry.AssetClass.Equity, seller, 1_000 ether);
 
-        usdt = new MockUSDT();
-        wbtc = new MockWBTC();
         _listCurrency(address(usdt));
         _listCurrency(address(wbtc));
         usdt.mint(buyer, 1_000_000e6);
@@ -89,6 +91,16 @@ contract NiaraSettlementTest is Test {
         vm.warp(block.timestamp + TIMELOCK_DELAY);
         vm.prank(admin);
         distributor.executeGrantRole(role, account);
+    }
+
+    /// @dev Switches the fee token through the timelock. Hostile and edge-case payment
+    /// tokens can only reach the transfer legs as the configured fee token.
+    function _useFeeToken(address token) internal {
+        vm.prank(admin);
+        settlement.proposeSetFeeToken(token);
+        vm.warp(block.timestamp + TIMELOCK_DELAY);
+        vm.prank(admin);
+        settlement.executeSetFeeToken(token);
     }
 
     // ── Listing helpers ────────────────────────────────────────────────────────────────
@@ -144,18 +156,33 @@ contract NiaraSettlementTest is Test {
         assertEq(usdt.balanceOf(buyer), 1_000_000e6 - paymentAmount);
     }
 
-    function test_Settle_TransfersAssetAndPayment_WBTC() public {
-        uint256 paymentAmount = 1e8; // 1 WBTC, 8 casas decimais
-        uint256 expectedFee = (paymentAmount * settlement.feeBps()) / 10_000;
+    /// @notice Fees are always in USDT, so the order book only pays in the fee token: an
+    /// Approved Currency that is not the fee token (WBTC) is rejected before any transfer.
+    function test_Settle_RevertsForApprovedCurrencyThatIsNotFeeToken() public {
+        assertTrue(registry.isApproved(address(wbtc)));
 
         vm.prank(operator);
-        uint256 feeCharged = settlement.settle(address(assetToken), address(wbtc), buyer, seller, 5 ether, paymentAmount);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.NotFeeToken.selector, address(wbtc)));
+        settlement.settle(address(assetToken), address(wbtc), buyer, seller, 5 ether, 1e8);
 
-        assertEq(feeCharged, expectedFee);
-        assertEq(assetToken.balanceOf(buyer), 5 ether);
-        assertEq(wbtc.balanceOf(seller), paymentAmount - expectedFee);
-        assertEq(wbtc.balanceOf(address(distributor)), expectedFee);
-        assertEq(wbtc.balanceOf(buyer), 1_000e8 - paymentAmount);
+        assertEq(assetToken.balanceOf(buyer), 0);
+        assertEq(wbtc.balanceOf(seller), 0);
+        assertEq(wbtc.balanceOf(address(distributor)), 0);
+    }
+
+    /// @notice The party receiving USDT (the seller) pays the fee, out of the USDT it
+    /// receives; the buyer receives its asset leg in full.
+    function test_Settle_SellerReceivingUsdtPaysTheFee() public {
+        uint256 paymentAmount = 1_000e6;
+        uint256 fee = (paymentAmount * settlement.feeBps()) / 10_000;
+
+        vm.prank(operator);
+        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, paymentAmount);
+
+        assertEq(assetToken.balanceOf(buyer), 10 ether);
+        assertEq(usdt.balanceOf(buyer), 1_000_000e6 - paymentAmount);
+        assertEq(usdt.balanceOf(seller), paymentAmount - fee);
+        assertEq(usdt.balanceOf(address(distributor)), fee);
     }
 
     function test_Settle_FeeMathExact() public {
@@ -320,6 +347,7 @@ contract NiaraSettlementTest is Test {
         MaliciousReentrantToken evilPayment = new MaliciousReentrantToken();
         evilPayment.mint(buyer, 1_000_000e6);
         _listCurrency(address(evilPayment));
+        _useFeeToken(address(evilPayment));
 
         _settlementGrantRole(settlementOperatorRole, address(evilPayment));
 
@@ -383,6 +411,7 @@ contract NiaraSettlementTest is Test {
         MaliciousHookToken evilPayment = new MaliciousHookToken();
         evilPayment.mint(buyer, 1_000_000e6);
         _listCurrency(address(evilPayment));
+        _useFeeToken(address(evilPayment));
 
         vm.prank(buyer);
         evilPayment.approve(address(settlement), type(uint256).max);
@@ -464,17 +493,116 @@ contract NiaraSettlementTest is Test {
 
     function test_Constructor_RevertsForZeroAdmin() public {
         vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
-        new NiaraSettlement(address(0), address(distributor), address(registry), TIMELOCK_DELAY);
+        new NiaraSettlement(address(0), address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);
     }
 
     function test_Constructor_RevertsForZeroCashbackDistributor() public {
         vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
-        new NiaraSettlement(admin, address(0), address(registry), TIMELOCK_DELAY);
+        new NiaraSettlement(admin, address(0), address(registry), address(usdt), TIMELOCK_DELAY);
     }
 
     function test_Constructor_RevertsForZeroListingRegistry() public {
         vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
-        new NiaraSettlement(admin, address(distributor), address(0), TIMELOCK_DELAY);
+        new NiaraSettlement(admin, address(distributor), address(0), address(usdt), TIMELOCK_DELAY);
+    }
+
+    function test_Constructor_RevertsForZeroFeeToken() public {
+        vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
+        new NiaraSettlement(admin, address(distributor), address(registry), address(0), TIMELOCK_DELAY);
+    }
+
+    function test_Constructor_SetsFeeToken() public view {
+        assertEq(settlement.feeToken(), address(usdt));
+    }
+
+    // ── Fee token (USDT): timelocked switch ────────────────────────────────────────────
+
+    function test_ProposeSetFeeToken_OnlyAdmin() public {
+        bytes32 adminRole = settlement.DEFAULT_ADMIN_ROLE();
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, operator, adminRole)
+        );
+        settlement.proposeSetFeeToken(address(wbtc));
+    }
+
+    function test_ExecuteSetFeeToken_OnlyAdmin() public {
+        vm.prank(admin);
+        settlement.proposeSetFeeToken(address(wbtc));
+        vm.warp(block.timestamp + TIMELOCK_DELAY);
+
+        bytes32 adminRole = settlement.DEFAULT_ADMIN_ROLE();
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, operator, adminRole)
+        );
+        settlement.executeSetFeeToken(address(wbtc));
+    }
+
+    function test_ProposeSetFeeToken_RevertsForZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert(NiaraSettlement.ZeroAddress.selector);
+        settlement.proposeSetFeeToken(address(0));
+    }
+
+    function test_FeeToken_ChangeRequiresTimelock() public {
+        vm.prank(admin);
+        uint256 executeAfter = settlement.proposeSetFeeToken(address(wbtc));
+        assertEq(executeAfter, block.timestamp + TIMELOCK_DELAY);
+
+        bytes32 actionId = keccak256(abi.encode("SET_FEE_TOKEN", address(wbtc)));
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(TimelockedAccessControl.TimelockNotElapsed.selector, actionId, executeAfter)
+        );
+        settlement.executeSetFeeToken(address(wbtc));
+        assertEq(settlement.feeToken(), address(usdt));
+    }
+
+    function test_ExecuteSetFeeToken_RevertsWithoutProposal() public {
+        bytes32 actionId = keccak256(abi.encode("SET_FEE_TOKEN", address(wbtc)));
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(TimelockedAccessControl.ActionNotPending.selector, actionId));
+        settlement.executeSetFeeToken(address(wbtc));
+    }
+
+    function test_FeeToken_ChangeEmitsEvents() public {
+        vm.expectEmit(true, false, false, true, address(settlement));
+        emit NiaraSettlement.FeeTokenChangeProposed(address(wbtc), block.timestamp + TIMELOCK_DELAY);
+        vm.prank(admin);
+        settlement.proposeSetFeeToken(address(wbtc));
+
+        vm.warp(block.timestamp + TIMELOCK_DELAY);
+        vm.expectEmit(true, true, false, true, address(settlement));
+        emit NiaraSettlement.FeeTokenChanged(address(usdt), address(wbtc));
+        vm.prank(admin);
+        settlement.executeSetFeeToken(address(wbtc));
+        assertEq(settlement.feeToken(), address(wbtc));
+    }
+
+    /// @notice After a fee-token switch the old token can no longer be paid in, the new one
+    /// settles (it is an Approved Currency), and cashback already credited in the old token
+    /// stays withdrawable: the distributor keeps balances per token.
+    function test_FeeToken_SwitchMovesSettlementToNewTokenAndKeepsOldCashback() public {
+        vm.prank(operator);
+        uint256 oldFee = settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+        uint256 oldCashback = (oldFee * distributor.cashbackBps()) / 10_000;
+        assertEq(distributor.cashbackBalance(address(assetToken), address(usdt)), oldCashback);
+
+        _useFeeToken(address(wbtc));
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.NotFeeToken.selector, address(usdt)));
+        settlement.settle(address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6);
+
+        vm.prank(operator);
+        uint256 newFee = settlement.settle(address(assetToken), address(wbtc), buyer, seller, 5 ether, 1e8);
+        assertEq(wbtc.balanceOf(address(distributor)), newFee);
+        assertEq(wbtc.balanceOf(seller), 1e8 - newFee);
+
+        vm.prank(issuer);
+        distributor.withdraw(address(assetToken), address(usdt));
+        assertEq(usdt.balanceOf(issuer), oldCashback);
     }
 
     function test_Constructor_SetsListingRegistry() public view {
@@ -560,8 +688,8 @@ contract NiaraSettlementTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetNotEquity.selector, address(usdt)));
-        settlement.settle(address(usdt), address(wbtc), buyer, seller, 10e6, 1e8);
-        assertEq(distributor.cashbackBalance(address(usdt), address(wbtc)), 0);
+        settlement.settle(address(usdt), address(usdt), buyer, seller, 10e6, 1e6);
+        assertEq(distributor.cashbackBalance(address(usdt), address(usdt)), 0);
     }
 
     /// @notice A backed AssetToken (BackingGateway path) is not a factory token, so it cannot
@@ -589,6 +717,8 @@ contract NiaraSettlementTest is Test {
 
     function test_Settle_RevertsForUnlistedPaymentToken() public {
         MockUSDT unlisted = new MockUSDT();
+        // Even as the configured fee token, an unlisted token cannot be paid in.
+        _useFeeToken(address(unlisted));
         vm.prank(operator);
         vm.expectRevert(
             abi.encodeWithSelector(NiaraSettlement.PaymentTokenNotApprovedCurrency.selector, address(unlisted))
@@ -620,6 +750,7 @@ contract NiaraSettlementTest is Test {
         NativeAssetToken other = _issueListedNative(IListingRegistry.AssetClass.Equity, buyer, 1_000 ether);
         vm.prank(buyer);
         other.approve(address(settlement), type(uint256).max);
+        _useFeeToken(address(other));
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.PaymentTokenNotApprovedCurrency.selector, address(other)));
@@ -635,6 +766,7 @@ contract NiaraSettlementTest is Test {
         MockFeeOnTransferToken fot = new MockFeeOnTransferToken(100); // 1% burned per transfer
         fot.mint(buyer, 1_000_000e6);
         _listCurrency(address(fot));
+        _useFeeToken(address(fot));
         vm.prank(buyer);
         fot.approve(address(settlement), type(uint256).max);
 
@@ -663,6 +795,7 @@ contract NiaraSettlementTest is Test {
         shrink.mint(seller, 1_000_000e6);
         shrink.setDrainReceiver(true);
         _listCurrency(address(shrink));
+        _useFeeToken(address(shrink));
         vm.prank(buyer);
         shrink.approve(address(settlement), type(uint256).max);
 
@@ -683,6 +816,7 @@ contract NiaraSettlementTest is Test {
         MockFeeOnTransferToken fot = new MockFeeOnTransferToken(50);
         fot.mint(buyer, 1_000_000e6);
         _listCurrency(address(fot));
+        _useFeeToken(address(fot));
         vm.prank(buyer);
         fot.approve(address(settlement), type(uint256).max);
 

@@ -11,13 +11,15 @@ import {IListingRegistry} from "./interfaces/IListingRegistry.sol";
 
 /// @title NiaraSettlement
 /// @notice Atomic settlement between buyer and seller: in the same transaction it moves the
-/// AssetToken from seller to buyer, the payment (USDT or WBTC) from buyer to seller, and
-/// retains the protocol fee, in the settlement currency itself, with no swap, no DEX and
-/// no oracle. Any failure reverts everything.
+/// AssetToken from seller to buyer, the payment (USDT) from buyer to seller, and retains
+/// the protocol fee, in USDT, with no swap, no DEX and no oracle. Any failure reverts
+/// everything.
 ///
 /// Order-book mode only: the asset must have an `Approved` `Equity` listing and the payment
-/// token an `Approved` `Currency` listing in the ListingRegistry
-/// (EXCHANGE-MULTICHAIN-DESIGN.md, section 1). Every transfer is checked by balance delta,
+/// token must be the configured fee token (`feeToken`, USDT) with an `Approved` `Currency`
+/// listing in the ListingRegistry (EXCHANGE-MULTICHAIN-DESIGN.md, sections 1 and 3.4). Fees,
+/// and therefore all cashback, are always in USDT: the seller is the party receiving USDT,
+/// so the seller pays the fee, out of the USDT it receives. Every transfer is checked by balance delta,
 /// so a token that delivers less than requested (fee-on-transfer) can never break
 /// `paymentAmount == sellerProceeds + feeCharged`.
 /// @dev Never holds the parties' balances: it works entirely through `allowance`, moving only
@@ -37,8 +39,15 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
     /// @notice Hard, immutable fee cap: 100 bps (1%). Not even the admin can exceed it.
     uint16 public constant MAX_FEE_BPS = 100;
 
-    /// @notice Current fee, in bps, charged in the settlement currency. Default: 50 bps (0.5%).
+    /// @notice Current fee, in bps, charged in `feeToken`. Default: 50 bps (0.5%).
     uint16 public feeBps = 50;
+
+    /// @notice The only payment token `settle` accepts, and so the token every fee and all
+    /// cashback are paid in: USDT (Solana: `Config.fee_mint`). Changed only through the
+    /// timelock (`proposeSetFeeToken` / `executeSetFeeToken`), as a migration tool, not
+    /// routinely. Balances already credited in the CashbackDistributor are kept per token,
+    /// so they stay withdrawable after a switch.
+    address public feeToken;
 
     /// @notice Contract that receives the fee and credits cashback to the issuer when eligible.
     ICashbackDistributor public cashbackDistributor;
@@ -60,8 +69,11 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
     event FeeBpsChanged(uint16 oldFeeBps, uint16 newFeeBps);
     event CashbackDistributorChangeProposed(address indexed newCashbackDistributor, uint256 executeAfter);
     event CashbackDistributorChanged(address indexed oldCashbackDistributor, address indexed newCashbackDistributor);
+    event FeeTokenChangeProposed(address indexed newFeeToken, uint256 executeAfter);
+    event FeeTokenChanged(address indexed oldFeeToken, address indexed newFeeToken);
 
     error ZeroAddress();
+    error NotFeeToken(address paymentToken);
     error BuyerEqualsSeller();
     error ZeroAmount();
     error FeeExceedsCap(uint16 feeBps);
@@ -74,15 +86,24 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
     /// @param admin_ Holder of DEFAULT_ADMIN_ROLE and PAUSER_ROLE.
     /// @param cashbackDistributor_ CashbackDistributor that receives the fee.
     /// @param listingRegistry_ ListingRegistry that gates which assets and currencies settle.
+    /// @param feeToken_ The USDT token: the only payment token, and the fee currency.
     /// @param timelockDelay_ Delay (seconds) between proposal and execution of sensitive changes.
-    constructor(address admin_, address cashbackDistributor_, address listingRegistry_, uint256 timelockDelay_)
-        TimelockedAccessControl(timelockDelay_)
-    {
-        if (admin_ == address(0) || cashbackDistributor_ == address(0) || listingRegistry_ == address(0)) {
+    constructor(
+        address admin_,
+        address cashbackDistributor_,
+        address listingRegistry_,
+        address feeToken_,
+        uint256 timelockDelay_
+    ) TimelockedAccessControl(timelockDelay_) {
+        if (
+            admin_ == address(0) || cashbackDistributor_ == address(0) || listingRegistry_ == address(0)
+                || feeToken_ == address(0)
+        ) {
             revert ZeroAddress();
         }
         cashbackDistributor = ICashbackDistributor(cashbackDistributor_);
         listingRegistry = IListingRegistry(listingRegistry_);
+        feeToken = feeToken_;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(PAUSER_ROLE, admin_);
@@ -90,9 +111,11 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
 
     /// @notice Executes the atomic settlement of an already matched order.
     /// @param assetToken Token of the tokenized asset being traded.
-    /// @param paymentToken Settlement currency (USDT or WBTC).
+    /// @param paymentToken Settlement currency; must be `feeToken` (USDT). Passed explicitly
+    /// so a fee-token switch can never settle a match priced in the old token.
     /// @param buyer Party that receives the asset and pays in `paymentToken`.
-    /// @param seller Party that delivers the asset and receives `paymentToken`.
+    /// @param seller Party that delivers the asset and receives `paymentToken`, so it pays
+    /// the fee (the USDT receiver pays, spec section 3.4).
     /// @param assetAmount Amount of `assetToken` transferred from seller to buyer.
     /// @param paymentAmount Total amount of `paymentToken` the buyer pays; the fee is
     /// deducted from this amount before it reaches the seller.
@@ -109,6 +132,8 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         if (buyer == address(0) || seller == address(0)) revert ZeroAddress();
         if (buyer == seller) revert BuyerEqualsSeller();
         if (assetAmount == 0 || paymentAmount == 0) revert ZeroAmount();
+        // Fees are always in USDT, so the order book only pays in USDT (Solana: `NotFeeMint`).
+        if (paymentToken != feeToken) revert NotFeeToken(paymentToken);
 
         // Trading mode is fixed by asset class: only Approved Equity listings settle here
         // (FixedIncome/Credit/Currency trade P2P), and only against an Approved Currency.
@@ -197,6 +222,29 @@ contract NiaraSettlement is TimelockedAccessControl, Pausable, ReentrancyGuard {
         address old = address(cashbackDistributor);
         cashbackDistributor = ICashbackDistributor(newCashbackDistributor);
         emit CashbackDistributorChanged(old, newCashbackDistributor);
+    }
+
+    /// @notice Proposes a new fee token (the USDT the order book pays in, and the currency of
+    /// every fee and all cashback). Subject to the timelock. A migration tool (e.g. a
+    /// redeployed test USDT), not something routine.
+    /// @param newFeeToken The new fee token; it still needs an `Approved` `Currency` listing
+    /// for `settle` to accept it.
+    /// @return executeAfter Earliest timestamp at which the change can be executed.
+    function proposeSetFeeToken(address newFeeToken) external onlyRole(DEFAULT_ADMIN_ROLE) returns (uint256 executeAfter) {
+        if (newFeeToken == address(0)) revert ZeroAddress();
+        bytes32 actionId = keccak256(abi.encode("SET_FEE_TOKEN", newFeeToken));
+        executeAfter = _scheduleAction(actionId);
+        emit FeeTokenChangeProposed(newFeeToken, executeAfter);
+    }
+
+    /// @notice Executes a proposed fee-token change after the timelock delay.
+    /// @param newFeeToken The fee token given to `proposeSetFeeToken`.
+    function executeSetFeeToken(address newFeeToken) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        bytes32 actionId = keccak256(abi.encode("SET_FEE_TOKEN", newFeeToken));
+        _consumeAction(actionId);
+        address old = feeToken;
+        feeToken = newFeeToken;
+        emit FeeTokenChanged(old, newFeeToken);
     }
 
     /// @notice Pauses `settle` in an emergency.

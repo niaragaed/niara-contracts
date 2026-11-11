@@ -131,7 +131,9 @@ contract DeployNiara is Script {
         // The v1 deploy scripts, with chainid guards, are rewritten in Week 2.
         ListingRegistry registry = new ListingRegistry(cfg.admin, cfg.admin, cfg.timelockDelay);
         console2.log(string.concat("DEPLOYED_LISTING_REGISTRY_ADDRESS=", vm.toString(address(registry))));
-        settlement = new NiaraSettlement(cfg.admin, address(distributor), address(registry), cfg.timelockDelay);
+        // USDT is the fee token: the only payment token `settle` accepts.
+        settlement =
+            new NiaraSettlement(cfg.admin, address(distributor), address(registry), address(usdt), cfg.timelockDelay);
         gateway = new BackingGateway(cfg.admin, cfg.timelockDelay);
         // AssetClass fixed to EQUITY: the demo script (Demo.s.sol) needs a cashback-eligible
         // asset to exercise the "cashback credited" step.

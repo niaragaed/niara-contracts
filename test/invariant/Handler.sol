@@ -66,6 +66,15 @@ contract Handler is Test {
     /// @notice Successful settlements (sanity: shows the fuzzer reaches the happy path).
     uint256 public ghost_successfulSettlements;
 
+    /// @notice Successful settlements paid in a token other than `settlement.feeToken()`
+    /// (USDT). Must stay zero (spec invariant 12).
+    uint256 public ghost_settlementsOutsideFeeToken;
+
+    /// @notice Successful settlements where the USDT receiver (the seller) did not get
+    /// exactly `paymentAmount - fee`, or the buyer did not get its asset leg in full. Must
+    /// stay zero (spec invariant 12).
+    uint256 public ghost_feeNotPaidByUsdtReceiver;
+
     /// @notice Historical cashback credited with a Currency listing as the asset. Must stay zero.
     uint256 public ghost_cashbackCreditedToCurrency;
 
@@ -292,9 +301,17 @@ contract Handler is Test {
         IERC20(paymentToken).approve(address(settlement), paymentAmount);
 
         uint256 cashbackBefore = distributor.cashbackBalance(asset, paymentToken);
+        uint256 sellerPaymentBefore = IERC20(paymentToken).balanceOf(seller);
+        uint256 buyerAssetBefore = IERC20(asset).balanceOf(buyer);
         vm.prank(settlementOperator);
         uint256 feeCharged = settlement.settle(asset, paymentToken, buyer, seller, assetAmount, paymentAmount);
         _recordSettleGhosts(asset, paymentToken, feeCharged, cashbackBefore);
+
+        // The party receiving USDT (the seller) pays the fee out of it; the other party
+        // receives its leg in full.
+        bool sellerPaidFee = IERC20(paymentToken).balanceOf(seller) - sellerPaymentBefore == paymentAmount - feeCharged;
+        bool buyerGotFullLeg = IERC20(asset).balanceOf(buyer) - buyerAssetBefore == assetAmount;
+        if (!sellerPaidFee || !buyerGotFullLeg) ghost_feeNotPaidByUsdtReceiver++;
     }
 
     /// @dev Spans every listing situation: backed tokens (never listable), the native
@@ -309,13 +326,15 @@ contract Handler is Test {
         return address(nativeEquity); // weighted: most settles target the legal asset.
     }
 
-    /// @dev Listed currencies most of the time; sometimes a never-listed token or a
-    /// non-Currency listing (the native Equity) as payment.
+    /// @dev The fee token (USDT) most of the time; sometimes an Approved Currency that is
+    /// not the fee token (WBTC), a never-listed token or a non-Currency listing (the native
+    /// Equity) as payment.
     function _pickSettlePayment(uint256 seed) internal view returns (address) {
         uint256 pick = seed % 8;
         if (pick == 0) return address(unlistedPayment);
         if (pick == 1) return address(nativeEquity);
-        return pick % 2 == 0 ? address(usdt) : address(wbtc);
+        if (pick == 2) return address(wbtc);
+        return address(usdt);
     }
 
     function _pickAssetAmount(address asset, address seller, uint256 seed) internal view returns (uint256) {
@@ -360,6 +379,7 @@ contract Handler is Test {
         bool paymentOk = paymentListing.status == IListingRegistry.ListingStatus.Approved
             && paymentListing.assetClass == IListingRegistry.AssetClass.Currency;
         if (!assetOk || !paymentOk) ghost_illegalSettlements++;
+        if (paymentToken != settlement.feeToken()) ghost_settlementsOutsideFeeToken++;
         bool assetIsCurrency = assetListing.status != IListingRegistry.ListingStatus.None
             && assetListing.assetClass == IListingRegistry.AssetClass.Currency;
         if (assetIsCurrency) ghost_cashbackCreditedToCurrency += credited;

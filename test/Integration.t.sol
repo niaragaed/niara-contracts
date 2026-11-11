@@ -41,7 +41,9 @@ contract IntegrationTest is Test {
     function setUp() public {
         distributor = new CashbackDistributor(admin, TIMELOCK_DELAY);
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
-        settlement = new NiaraSettlement(admin, address(distributor), address(registry), TIMELOCK_DELAY);
+        usdt = new MockUSDT();
+        settlement =
+            new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);
         gateway = new BackingGateway(admin, TIMELOCK_DELAY);
         assetToken = new AssetToken(
             "Apple Inc. - Niara Tokenized Equity",
@@ -53,7 +55,6 @@ contract IntegrationTest is Test {
             admin,
             TIMELOCK_DELAY
         );
-        usdt = new MockUSDT();
 
         // Role wiring: every grant goes through the timelock, as in production.
         _grantRoleOn(address(distributor), distributor.SETTLEMENT_ROLE(), address(settlement));

@@ -67,9 +67,11 @@ redemptionAttest(requestId, proofHash)    [CUSTODIAN_ROLE]
 
 ### `NiaraSettlement.sol`
 
-Atomic settlement: in the same transaction it moves the `AssetToken` from seller to
-buyer, the payment (USDT or WBTC) from buyer to seller, and retains the fee, in the
-settlement currency itself, with no swap, no DEX and no oracle. Any failure reverts
+Atomic settlement: in the same transaction it moves the asset token from seller to
+buyer, the payment from buyer to seller, and retains the fee, with no swap, no DEX and
+no oracle. Payment, fee and cashback are always in USDT: `settle` only accepts the
+configured `feeToken` (`NotFeeToken` otherwise), changed only through the timelock, and
+the seller, who receives the USDT, pays the fee out of it. Any failure reverts
 everything. It works entirely through `allowance` and never holds the parties' balances.
 
 Fee: 50 bps (0.5%) by default, with a hard, immutable cap of 100 bps (1%) that not even
