@@ -95,7 +95,8 @@ contract P2PEscrowInvariantTest is Test {
 
     /// @dev The fuzz targets: every handler action, and nothing else (`init` in particular).
     function _handlerSelectors() internal pure returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](11);
+        selectors = new bytes4[](12);
+        selectors[11] = EscrowHandler.probeExpiryBoundary.selector;
         selectors[0] = EscrowHandler.openDeal.selector;
         selectors[1] = EscrowHandler.acceptDeal.selector;
         selectors[2] = EscrowHandler.cancelDeal.selector;
