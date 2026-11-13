@@ -191,7 +191,7 @@ contract EscrowHandler is Test {
 
         if (fault == 0) c.assetAmount = 0;
         else if (fault == 1) c.paymentAmount = 0;
-        else if (fault == 2) (c.assetAmount, c.paymentAmount) = (1 + (seed >> 64) % 300, 1 + (seed >> 80) % 300);
+        else if (fault == 2) (c.assetAmount, c.paymentAmount) = (1 + (seed >> 64) % 3, 1 + (seed >> 80) % 3);
         else if (fault == 3) c.counterparty = c.proposer;
         else if (fault == 4) c.counterparty = address(0);
         else if (fault == 5) c.expiresAt = uint64(block.timestamp);
@@ -228,9 +228,10 @@ contract EscrowHandler is Test {
         if (c.counterparty == address(0) || c.counterparty == c.proposer) return false;
         if (c.expiresAt <= block.timestamp || c.expiresAt > block.timestamp + 30 days) return false;
         if (!_marketOpen(c.asset, c.payment)) return false;
+        // The fee rounds up: whoever receives the USDT leg must be left with something
+        // (only a 1-unit USDT leg with an active fee fails this).
         uint256 usdtAmount = c.payment == usdt ? c.paymentAmount : c.assetAmount;
-        if (c.feeBps > 0 && (usdtAmount * c.feeBps) / 10_000 == 0) return false;
-        return true;
+        return usdtAmount - _ceilFee(usdtAmount, c.feeBps) > 0;
     }
 
     /// @dev Whether a deal in this market may open or execute right now: not paused, two
@@ -314,7 +315,7 @@ contract EscrowHandler is Test {
         // The fee is on the USDT leg, at the rates recorded when the deal opened; whoever
         // receives that leg pays it, the other party gets its leg in full.
         bool feeOnPayment = d.payment == usdt;
-        uint256 fee = ((feeOnPayment ? d.paymentAmount : d.assetAmount) * d.feeBps) / 10_000;
+        uint256 fee = _ceilFee(feeOnPayment ? d.paymentAmount : d.assetAmount, d.feeBps);
         uint256 cashback = registry.getListing(d.asset).cashbackEligible ? (fee * d.cashbackBps) / 10_000 : 0;
         uint256 assetNet = d.assetAmount - (feeOnPayment ? 0 : fee);
         uint256 paymentNet = d.paymentAmount - (feeOnPayment ? fee : 0);
@@ -540,6 +541,12 @@ contract EscrowHandler is Test {
     function _reusedDealId(address proposer, uint256 seed, bytes16 fresh) internal view returns (bytes16) {
         uint256 used = _usedIds[proposer].length;
         return used == 0 ? fresh : _usedIds[proposer][seed % used];
+    }
+
+    /// @dev The model's own fee formula, written independently of the contracts:
+    /// `ceil(amount * feeBps / 10_000)` (spec section 3.4).
+    function _ceilFee(uint256 amount, uint16 feeBps_) internal pure returns (uint256) {
+        return (amount * feeBps_ + 9_999) / 10_000;
     }
 
     /// @dev Spreads the fuzzer's inputs (often 0, 1 or other edge values) uniformly.

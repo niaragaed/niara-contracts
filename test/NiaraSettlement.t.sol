@@ -150,7 +150,7 @@ contract NiaraSettlementTest is Test {
 
     function test_Settle_TransfersAssetAndPayment_USDT() public {
         uint256 paymentAmount = 1_000e6; // 1000 USDT, 6 casas decimais
-        uint256 expectedFee = (paymentAmount * settlement.feeBps()) / 10_000;
+        uint256 expectedFee = (paymentAmount * settlement.feeBps() + 9_999) / 10_000; // ceil
 
         vm.prank(operator);
         uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, paymentAmount);
@@ -181,7 +181,7 @@ contract NiaraSettlementTest is Test {
     /// receives; the buyer receives its asset leg in full.
     function test_Settle_SellerReceivingUsdtPaysTheFee() public {
         uint256 paymentAmount = 1_000e6;
-        uint256 fee = (paymentAmount * settlement.feeBps()) / 10_000;
+        uint256 fee = (paymentAmount * settlement.feeBps() + 9_999) / 10_000; // ceil
 
         vm.prank(operator);
         settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 10 ether, paymentAmount);
@@ -193,11 +193,57 @@ contract NiaraSettlementTest is Test {
     }
 
     function test_Settle_FeeMathExact() public {
-        // Default feeBps = 50 (0.5%). 123_456_789 * 50 / 10000 = 617_283 (truncated).
+        // Default feeBps = 50 (0.5%). 123_456_789 * 50 / 10_000 = 617_283.945, rounded UP.
         uint256 paymentAmount = 123_456_789;
         vm.prank(operator);
         uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 1 ether, paymentAmount);
-        assertEq(feeCharged, 617_283);
+        assertEq(feeCharged, 617_284);
+        assertEq(usdt.balanceOf(seller), paymentAmount - 617_284);
+        assertEq(usdt.balanceOf(address(distributor)), 617_284);
+    }
+
+    /// @notice An exact multiple is not rounded: 0.5% of 200 is exactly 1.
+    function test_Settle_FeeIsExactWhenThereIsNoRemainder() public {
+        vm.prank(operator);
+        uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 1, 200);
+        assertEq(feeCharged, 1);
+    }
+
+    /// @notice One unit above an exact multiple already costs one more unit of fee:
+    /// 201 * 50 / 10_000 = 1.005 -> 2.
+    function test_Settle_FeeRoundsUpOnAnyRemainder() public {
+        vm.prank(operator);
+        uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 1, 201);
+        assertEq(feeCharged, 2);
+        assertEq(usdt.balanceOf(seller), 199);
+    }
+
+    /// @notice An amount whose fee used to truncate to zero (199 * 50 / 10_000 = 0.995) now
+    /// settles and pays a fee of 1: no amount trades fee-free while the fee is active.
+    function test_Settle_SmallAmountPaysAFeeInsteadOfTruncatingToZero() public {
+        vm.prank(operator);
+        uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 1, 199);
+        assertEq(feeCharged, 1);
+        assertEq(usdt.balanceOf(seller), 198);
+        assertEq(usdt.balanceOf(address(distributor)), 1);
+    }
+
+    /// @notice Fuzz: the fee is the smallest integer not below `paymentAmount * feeBps /
+    /// 10_000`, whatever the fee rate up to the cap.
+    function testFuzz_Settle_FeeIsTheCeiling(uint256 paymentAmount, uint16 feeBps_) public {
+        paymentAmount = bound(paymentAmount, 2, 1_000_000e6);
+        feeBps_ = uint16(bound(feeBps_, 0, settlement.MAX_FEE_BPS()));
+        _setFeeBps(feeBps_);
+
+        vm.prank(operator);
+        uint256 fee = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 1, paymentAmount);
+
+        uint256 exact = paymentAmount * feeBps_;
+        assertGe(fee * 10_000, exact);
+        assertTrue(fee == 0 || (fee - 1) * 10_000 < exact);
+        if (feeBps_ > 0) assertGt(fee, 0);
+        assertEq(usdt.balanceOf(seller), paymentAmount - fee);
+        assertGt(usdt.balanceOf(seller), 0);
     }
 
     function test_Settle_RevertsWithoutSellerAllowance() public {
@@ -244,13 +290,27 @@ contract NiaraSettlementTest is Test {
         settlement.settle(_nextMatchId(), address(0), address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
-    /// @notice Rounding: tiny amounts cannot truncate the fee to zero while
-    /// feeBps > 0; otherwise one could trade fee-free through micro-transactions.
-    function test_Settle_RevertsWhenPaymentAmountTooSmallForFeePrecision() public {
-        // feeBps = 50 → paymentAmount=1 gera fee = 0 por truncamento (1*50/10000 = 0).
+    /// @notice The fee rounds up, so a 1-unit payment would be all fee (ceil(1 * 50 /
+    /// 10_000) = 1): the seller, who receives the USDT, must be left with more than zero, or
+    /// the asset would change hands for nothing.
+    function test_Settle_RevertsWhenSellerWouldGetNothing() public {
         vm.prank(operator);
-        vm.expectRevert(NiaraSettlement.PaymentAmountTooSmallForFeePrecision.selector);
+        vm.expectRevert(NiaraSettlement.ZeroSellerProceeds.selector);
         settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 1, 1);
+
+        assertEq(assetToken.balanceOf(buyer), 0);
+        assertEq(usdt.balanceOf(address(distributor)), 0);
+    }
+
+    /// @notice The smallest payment that settles with an active fee is 2 units: fee 1,
+    /// seller 1.
+    function test_Settle_SmallestPaymentThatLeavesTheSellerSomething() public {
+        vm.prank(operator);
+        uint256 feeCharged = settlement.settle(_nextMatchId(), address(assetToken), address(usdt), buyer, seller, 1, 2);
+
+        assertEq(feeCharged, 1);
+        assertEq(usdt.balanceOf(seller), 1);
+        assertEq(usdt.balanceOf(address(distributor)), 1);
     }
 
     function test_Settle_AllowsZeroFeeWhenFeeBpsIsZero() public {
@@ -828,7 +888,7 @@ contract NiaraSettlementTest is Test {
         fot.approve(address(settlement), type(uint256).max);
 
         uint256 paymentAmount = 1_000e6;
-        uint256 fee = (paymentAmount * settlement.feeBps()) / 10_000;
+        uint256 fee = (paymentAmount * settlement.feeBps() + 9_999) / 10_000; // ceil
         uint256 sellerProceeds = paymentAmount - fee;
         uint256 delivered = sellerProceeds - (sellerProceeds * 100) / 10_000;
 
@@ -857,7 +917,7 @@ contract NiaraSettlementTest is Test {
         shrink.approve(address(settlement), type(uint256).max);
 
         uint256 paymentAmount = 1_000e6;
-        uint256 sellerProceeds = paymentAmount - (paymentAmount * settlement.feeBps()) / 10_000;
+        uint256 sellerProceeds = paymentAmount - (paymentAmount * settlement.feeBps() + 9_999) / 10_000; // ceil
 
         vm.prank(operator);
         vm.expectRevert(
@@ -887,7 +947,7 @@ contract NiaraSettlementTest is Test {
     /// @notice Fuzz: for any successful settlement, what the seller and the distributor
     /// received sums exactly to `paymentAmount`.
     function testFuzz_Settle_PaymentEqualsSellerPlusFee(uint256 paymentAmount, uint256 assetAmount) public {
-        paymentAmount = bound(paymentAmount, 200, 1_000_000e6); // 200 * 50 / 10000 = 1 (non-zero fee)
+        paymentAmount = bound(paymentAmount, 2, 1_000_000e6); // 2 is the smallest that leaves the seller something
         assetAmount = bound(assetAmount, 1, 1_000 ether);
 
         uint256 sellerBefore = usdt.balanceOf(seller);
@@ -901,6 +961,8 @@ contract NiaraSettlementTest is Test {
         uint256 distributorGot = usdt.balanceOf(address(distributor)) - distributorBefore;
         assertEq(sellerGot + distributorGot, paymentAmount);
         assertEq(distributorGot, fee);
+        assertGt(fee, 0);
+        assertGt(sellerGot, 0);
         assertEq(buyerBefore - usdt.balanceOf(buyer), paymentAmount);
         assertEq(assetToken.balanceOf(buyer), assetAmount);
     }
@@ -958,7 +1020,7 @@ contract NiaraSettlementTest is Test {
 
     function test_Settle_MarksMatchSettledAndEmitsMatchId() public {
         assertFalse(settlement.settledMatches(MATCH_ID));
-        uint256 fee = (1_000e6 * uint256(settlement.feeBps())) / 10_000;
+        uint256 fee = (1_000e6 * uint256(settlement.feeBps()) + 9_999) / 10_000; // ceil
 
         vm.expectEmit(true, true, true, true, address(settlement));
         emit NiaraSettlement.Settled(MATCH_ID, address(assetToken), address(usdt), buyer, seller, 10 ether, 1_000e6, fee);

@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol";
 import {ProtocolPausable} from "./governance/ProtocolPausable.sol";
@@ -185,7 +186,7 @@ contract P2PEscrow is TimelockedAccessControl, ProtocolPausable, ReentrancyGuard
     error WrongTradingMode(address assetToken);
     error InvalidPaymentToken(address paymentToken);
     error NotFeeToken();
-    error AmountTooSmallForFeePrecision();
+    error ZeroSellerProceeds();
     error Unauthorized();
     error DealNotOpen(bytes32 dealKey);
     error DealHasExpired(bytes32 dealKey);
@@ -260,14 +261,14 @@ contract P2PEscrow is TimelockedAccessControl, ProtocolPausable, ReentrancyGuard
         if (_deals[dealKey].status != DealStatus.None) revert DealAlreadyExists(dealKey);
 
         (bool feeOnPaymentLeg,,) = _requireP2PMarket(terms.assetToken, terms.paymentToken);
-        // The fee is part of the agreed terms: take the rates now. As in `settle`, an active
-        // fee may not truncate to zero, or tiny deals would trade fee-free. Checked here
-        // only: the rates cannot change afterwards, so a deal that opens can always pay.
+        // The fee is part of the agreed terms: take the rates now. As in `settle`, the fee
+        // rounds up, so whoever receives the USDT leg must still be left with something
+        // (`ZeroSellerProceeds`, the name Solana uses for both modes). Checked here only:
+        // the rates cannot change afterwards, so a deal that opens can always pay its fee.
         uint16 feeBps_ = settlement.feeBps();
         uint16 cashbackBps_ = settlement.cashbackDistributor().cashbackBps();
-        if (feeBps_ > 0 && _feeOf(feeOnPaymentLeg ? terms.paymentAmount : terms.assetAmount, feeBps_) == 0) {
-            revert AmountTooSmallForFeePrecision();
-        }
+        uint256 usdtAmount = feeOnPaymentLeg ? terms.paymentAmount : terms.assetAmount;
+        if (usdtAmount - _feeOf(usdtAmount, feeBps_) == 0) revert ZeroSellerProceeds();
 
         bool selling = terms.proposerSide == DealSide.Sell;
         address depositToken = selling ? terms.assetToken : terms.paymentToken;
@@ -484,9 +485,11 @@ contract P2PEscrow is TimelockedAccessControl, ProtocolPausable, ReentrancyGuard
         }
     }
 
-    /// @dev Same formula as `NiaraSettlement.settle`: `floor(amount * feeBps / 10_000)`.
+    /// @dev Same formula as `NiaraSettlement.settle` and as Solana (spec section 3.4):
+    /// `ceil(amount * feeBps / 10_000)`. The fee rounds up, so an active fee is never
+    /// truncated to zero.
     function _feeOf(uint256 amount, uint16 feeBps_) private pure returns (uint256) {
-        return (amount * feeBps_) / BPS_DENOMINATOR;
+        return Math.mulDiv(amount, feeBps_, BPS_DENOMINATOR, Math.Rounding.Ceil);
     }
 
     function _emitDealOpened(bytes32 dealKey) private {

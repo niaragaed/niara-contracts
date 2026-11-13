@@ -578,28 +578,85 @@ contract P2PEscrowTest is Test {
         assertEq(bond.balanceOf(address(escrow)), 0);
     }
 
-    /// @notice As in `settle`, an active fee may not truncate to zero.
-    function test_OpenDeal_RevertsWhenFeeWouldTruncateToZero() public {
+    /// @notice As in `settle`, the fee rounds up, so a 1-unit USDT leg would be all fee
+    /// (ceil(1 * 50 / 10_000) = 1): whoever receives the USDT must be left with more than
+    /// zero. Rejected at open, so a deal that opens can always pay its fee.
+    function test_OpenDeal_RevertsWhenUsdtReceiverWouldGetNothing() public {
         P2PEscrow.DealTerms memory terms = _terms(address(bond), address(usdt), SELL);
-        terms.paymentAmount = 199; // 199 * 50 / 10_000 = 0
-        _expectOpenRevert(terms, abi.encodeWithSelector(P2PEscrow.AmountTooSmallForFeePrecision.selector));
+        terms.paymentAmount = 1;
+        _expectOpenRevert(terms, abi.encodeWithSelector(P2PEscrow.ZeroSellerProceeds.selector));
+        assertEq(bond.balanceOf(address(escrow)), 0);
     }
 
-    function test_OpenDeal_SmallestAmountThatPaysAFee() public {
+    /// @notice The rule looks at the USDT leg, whichever it is: here USDT is the asset sold.
+    function test_OpenDeal_RevertsWhenUsdtReceiverWouldGetNothing_UsdtIsTheAssetLeg() public {
+        P2PEscrow.DealTerms memory terms = _terms(address(usdt), address(brl), SELL);
+        terms.assetAmount = 1;
+        _expectOpenRevert(terms, abi.encodeWithSelector(P2PEscrow.ZeroSellerProceeds.selector));
+    }
+
+    /// @notice The other leg may be a single unit: only the USDT leg carries the fee.
+    function test_OpenDeal_OneUnitOfTheNonUsdtLegIsFine() public {
         P2PEscrow.DealTerms memory terms = _terms(address(bond), address(usdt), SELL);
-        terms.paymentAmount = 200; // 200 * 50 / 10_000 = 1
+        terms.assetAmount = 1;
+        bytes32 dealKey = _open(DEAL_ID, terms);
+        assertEq(uint8(_status(dealKey)), uint8(P2PEscrow.DealStatus.Open));
+    }
+
+    /// @notice The smallest USDT leg that opens with an active fee is 2 units: fee 1,
+    /// receiver 1.
+    function test_OpenDeal_SmallestUsdtLegThatLeavesTheReceiverSomething() public {
+        P2PEscrow.DealTerms memory terms = _terms(address(bond), address(usdt), SELL);
+        terms.paymentAmount = 2;
         bytes32 dealKey = _open(DEAL_ID, terms);
         vm.prank(bob);
         escrow.acceptDeal(dealKey);
         assertEq(usdt.balanceOf(address(distributor)), 1);
-        assertEq(usdt.balanceOf(alice), CURRENCY_START + 199);
+        assertEq(usdt.balanceOf(alice), CURRENCY_START + 1);
     }
 
-    /// @notice The precision rule looks at the USDT leg, whichever it is.
-    function test_OpenDeal_FeePrecisionAppliesToTheAssetLegWhenUsdtIsSold() public {
+    /// @notice An amount whose fee used to truncate to zero (199 * 50 / 10_000 = 0.995) now
+    /// opens and pays a fee of 1: no deal trades fee-free while the fee is active.
+    function test_AcceptDeal_SmallAmountPaysAFeeInsteadOfTruncatingToZero() public {
+        P2PEscrow.DealTerms memory terms = _terms(address(bond), address(usdt), SELL);
+        terms.paymentAmount = 199;
+        bytes32 dealKey = _open(DEAL_ID, terms);
+        vm.prank(bob);
+        escrow.acceptDeal(dealKey);
+        assertEq(usdt.balanceOf(address(distributor)), 1);
+        assertEq(usdt.balanceOf(alice), CURRENCY_START + 198);
+    }
+
+    /// @notice The fee rounds up on any remainder: 201 * 50 / 10_000 = 1.005 -> 2; an exact
+    /// multiple (200 -> 1) is not rounded.
+    function test_AcceptDeal_FeeRoundsUpOnAnyRemainder() public {
+        P2PEscrow.DealTerms memory terms = _terms(address(bond), address(usdt), SELL);
+        terms.paymentAmount = 201;
+        bytes32 first = _open(DEAL_ID, terms);
+        vm.prank(bob);
+        escrow.acceptDeal(first);
+        assertEq(usdt.balanceOf(address(distributor)), 2);
+        assertEq(usdt.balanceOf(alice), CURRENCY_START + 199);
+
+        terms.paymentAmount = 200;
+        bytes32 second = _open(bytes16(keccak256("deal-0002")), terms);
+        vm.prank(bob);
+        escrow.acceptDeal(second);
+        assertEq(usdt.balanceOf(address(distributor)), 2 + 1);
+        assertEq(usdt.balanceOf(alice), CURRENCY_START + 199 + 199);
+    }
+
+    /// @notice The rounding is on the USDT leg when USDT is the asset sold too, and the
+    /// buyer of the USDT is the one who pays it: 201 USDT -> fee 2.
+    function test_AcceptDeal_FeeRoundsUpOnTheAssetLegWhenUsdtIsSold() public {
         P2PEscrow.DealTerms memory terms = _terms(address(usdt), address(brl), SELL);
-        terms.assetAmount = 199;
-        _expectOpenRevert(terms, abi.encodeWithSelector(P2PEscrow.AmountTooSmallForFeePrecision.selector));
+        terms.assetAmount = 201;
+        bytes32 dealKey = _open(DEAL_ID, terms);
+        vm.prank(bob);
+        escrow.acceptDeal(dealKey);
+        assertEq(usdt.balanceOf(address(distributor)), 2);
+        assertEq(usdt.balanceOf(bob), CURRENCY_START + 199);
+        assertEq(brl.balanceOf(alice), CURRENCY_START + PAYMENT_AMOUNT);
     }
 
     function test_OpenDeal_AllowsTinyAmountsWhenFeeIsZero() public {
@@ -798,8 +855,8 @@ contract P2PEscrowTest is Test {
         public
     {
         FuzzCase memory c;
-        c.assetAmount = bound(assetAmount, 10_000, NATIVE_START);
-        c.paymentAmount = bound(paymentAmount, 10_000, CURRENCY_START);
+        c.assetAmount = bound(assetAmount, 2, NATIVE_START);
+        c.paymentAmount = bound(paymentAmount, 2, CURRENCY_START);
         market = uint8(bound(market, 0, 3));
         c.assetToken = [address(bond), address(credit), address(brl), address(usdt)][market];
         c.usdtIsAsset = market == 3;
@@ -844,7 +901,11 @@ contract P2PEscrowTest is Test {
     }
 
     function _assertFuzzOutcome(FuzzCase memory c, Balances memory before, Balances memory afterDeal) internal view {
-        uint256 fee = ((c.usdtIsAsset ? c.assetAmount : c.paymentAmount) * 50) / 10_000;
+        // ceil(usdtAmount * 50 / 10_000): always at least 1, always below the amount.
+        uint256 usdtAmount = c.usdtIsAsset ? c.assetAmount : c.paymentAmount;
+        uint256 fee = (usdtAmount * 50 + 9_999) / 10_000;
+        assertGt(fee, 0);
+        assertLt(fee, usdtAmount);
 
         assertEq(afterDeal.sellerAsset, before.sellerAsset - c.assetAmount);
         assertEq(afterDeal.buyerPayment, before.buyerPayment - c.paymentAmount);

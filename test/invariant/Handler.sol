@@ -97,6 +97,18 @@ contract Handler is Test {
     /// stay zero (spec invariant 12).
     uint256 public ghost_feeNotPaidByUsdtReceiver;
 
+    /// @notice Successful settlements whose fee was not `ceil(paymentAmount * feeBps /
+    /// 10_000)`. Must stay zero (spec section 3.4).
+    uint256 public ghost_feeNotCeiling;
+
+    /// @notice Successful settlements that left the seller with nothing. Must stay zero
+    /// (`ZeroSellerProceeds`).
+    uint256 public ghost_sellerGotNothing;
+
+    /// @notice Successful settlements with an active fee that charged no fee. Must stay zero:
+    /// the fee rounds up, so no amount trades fee-free.
+    uint256 public ghost_feeFreeSettlements;
+
     /// @notice Historical cashback credited with a Currency listing as the asset. Must stay zero.
     uint256 public ghost_cashbackCreditedToCurrency;
 
@@ -367,6 +379,12 @@ contract Handler is Test {
             IERC20(c.paymentToken).balanceOf(c.seller) - c.sellerPaymentBefore == c.paymentAmount - feeCharged;
         bool buyerGotFullLeg = IERC20(c.asset).balanceOf(c.buyer) - c.buyerAssetBefore == c.assetAmount;
         if (!sellerPaidFee || !buyerGotFullLeg) ghost_feeNotPaidByUsdtReceiver++;
+
+        // The fee rounds up, and the seller is still left with something.
+        uint256 feeBps = settlement.feeBps();
+        if (feeCharged != (c.paymentAmount * feeBps + 9_999) / 10_000) ghost_feeNotCeiling++;
+        if (feeBps > 0 && feeCharged == 0) ghost_feeFreeSettlements++;
+        if (c.paymentAmount - feeCharged == 0) ghost_sellerGotNothing++;
     }
 
     /// @dev A fresh match id most of the time; the chaotic path replays one that already

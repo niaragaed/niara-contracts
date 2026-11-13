@@ -127,7 +127,7 @@ contract IntegrationTest is Test {
         vm.prank(settlementOperator);
         uint256 feeCharged = settlement.settle(_nextMatchId(), address(acme), address(usdt), buyer, seller, 100 ether, 10_000e6);
 
-        uint256 expectedFee = (10_000e6 * settlement.feeBps()) / 10_000;
+        uint256 expectedFee = (10_000e6 * settlement.feeBps() + 9_999) / 10_000; // ceil
         assertEq(feeCharged, expectedFee);
         assertEq(acme.balanceOf(buyer), 100 ether);
         assertEq(acme.balanceOf(seller), 900 ether);

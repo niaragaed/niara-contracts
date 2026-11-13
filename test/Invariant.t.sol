@@ -299,6 +299,11 @@ contract InvariantTest is Test {
         assertEq(settlement.feeToken(), address(usdt));
         assertEq(handler.ghost_settlementsOutsideFeeToken(), 0);
         assertEq(handler.ghost_feeNotPaidByUsdtReceiver(), 0);
+        // The fee is the ceiling of `paymentAmount * feeBps / 10_000` (spec section 3.4): it
+        // is never truncated to zero while active, and the seller still gets something.
+        assertEq(handler.ghost_feeNotCeiling(), 0, "fee is not the ceiling");
+        assertEq(handler.ghost_feeFreeSettlements(), 0, "settled fee-free with an active fee");
+        assertEq(handler.ghost_sellerGotNothing(), 0, "seller left with nothing");
 
         address[3] memory others = [address(wbtc), address(unlistedPayment), address(nativeEquity)];
         for (uint256 i = 0; i < others.length; i++) {

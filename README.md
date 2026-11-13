@@ -80,6 +80,11 @@ match settles at most once (`MatchAlreadySettled`), and `Settled` carries the `m
 A settlement that reverts does not consume its id. The all-zero id is rejected
 (`ZeroMatchId`).
 
+Fee rounding: `fee = ceil(paymentAmount * feeBps / 10_000)`, as on Solana. The fee rounds
+up, so an active fee is never truncated to zero and no amount trades fee-free; the seller
+must be left with more than zero (`ZeroSellerProceeds`), which only rules out a 1-unit
+payment. The cashback share of the fee still rounds down, so it never exceeds the fee.
+
 Fee: 50 bps (0.5%) by default, which is also the hard, immutable cap (`MAX_FEE_BPS = 50`:
 Niara charges at most 0.5%) that not even the admin can exceed; the timelocked setter can
 only lower the fee or bring it back up to the cap. Restricted to `SETTLEMENT_OPERATOR_ROLE` (Niara's order-matching
@@ -137,8 +142,9 @@ own transaction.
 **The fee is part of the agreed terms.** `openDeal` copies `NiaraSettlement.feeBps` and
 `CashbackDistributor.cashbackBps` onto the deal and `acceptDeal` charges those, so a
 timelocked change while the deal is open does not affect it. The fee uses the same formula
-as `settle` (rounded down; an active fee may not truncate to zero,
-`AmountTooSmallForFeePrecision`). The fee *token* is not copied: after a fee-token switch,
+as `settle`: `ceil(usdtAmount * feeBps / 10_000)`, and whoever receives the USDT must be
+left with more than zero (`ZeroSellerProceeds`, checked at `openDeal`). The fee *token* is
+not copied: after a fee-token switch,
 a deal whose USDT leg is the old token can only be refunded. The fee goes to the
 `CashbackDistributor`, which accounts for it through `recordDealFee` (ESCROW_ROLE, held
 by the escrow only) at the deal's own cashback rate.

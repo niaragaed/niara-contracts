@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol";
 import {ProtocolPausable} from "./governance/ProtocolPausable.sol";
@@ -87,7 +88,7 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
     error BuyerEqualsSeller();
     error ZeroAmount();
     error FeeExceedsCap(uint16 feeBps);
-    error PaymentAmountTooSmallForFeePrecision();
+    error ZeroSellerProceeds();
     error AssetListingNotApproved(address assetToken);
     error AssetNotEquity(address assetToken);
     error PaymentTokenNotApprovedCurrency(address paymentToken);
@@ -132,8 +133,10 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
     /// the fee (the USDT receiver pays, spec section 3.4).
     /// @param assetAmount Amount of `assetToken` transferred from seller to buyer.
     /// @param paymentAmount Total amount of `paymentToken` the buyer pays; the fee is
-    /// deducted from this amount before it reaches the seller.
-    /// @return feeCharged Fee retained, in `paymentToken`.
+    /// deducted from this amount before it reaches the seller, who must be left with more
+    /// than zero (`ZeroSellerProceeds`).
+    /// @return feeCharged Fee retained, in `paymentToken`:
+    /// `ceil(paymentAmount * feeBps / 10_000)`.
     function settle(
         bytes16 matchId,
         address assetToken,
@@ -163,12 +166,14 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
                 || paymentListing.assetClass != IListingRegistry.AssetClass.Currency
         ) revert PaymentTokenNotApprovedCurrency(paymentToken);
 
-        feeCharged = (paymentAmount * feeBps) / BPS_DENOMINATOR;
-        // If the fee is active (feeBps > 0), tiny amounts cannot truncate the fee to
-        // zero; otherwise one could trade fee-free with small enough amounts.
-        if (feeBps > 0 && feeCharged == 0) revert PaymentAmountTooSmallForFeePrecision();
-
+        // fee = ceil(paymentAmount * feeBps / 10_000), as on Solana (spec section 3.4). The
+        // fee rounds UP, so an active fee is never truncated to zero and no amount trades
+        // fee-free. Because it rounds up, a 1-unit payment would be all fee: the seller, who
+        // receives the USDT, must still get something, or the asset would change hands for
+        // nothing.
+        feeCharged = Math.mulDiv(paymentAmount, feeBps, BPS_DENOMINATOR, Math.Rounding.Ceil);
         uint256 sellerProceeds = paymentAmount - feeCharged;
+        if (sellerProceeds == 0) revert ZeroSellerProceeds();
 
         // Checks-effects-interactions: the match is marked settled and `Settled` is emitted
         // BEFORE any external call. A token with a hook (ERC-777/ERC-1363) that re-enters
