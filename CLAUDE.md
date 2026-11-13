@@ -227,15 +227,19 @@ applies to every Niara repository, including new ones: copy both files when crea
    `fix:` / `refactor:` / `chore:` / `test:`.
 4. Never `--force`, never rewrite history, never push unless asked, never create a
    remote repository unless asked.
+   - **Never use `git reset`, in any form**: no `--hard`, `--soft`, `--mixed`, `--keep`
+     or `--merge`, no bare `git reset`, no `git reset <commit>` and no
+     `git reset <path>` / `git reset -- <path>` (not even to unstage). It rewrites the
+     index or the branch, and some forms the working tree, with no way back.
    - **Never run a git command that changes or discards working-tree files.** Forbidden:
      `git checkout` (of a path, a branch or a commit), `git restore` without `--staged`
-     (which includes `--worktree` and `--staged --worktree`), `git reset --hard`,
-     `git stash` (in every form) and `git clean`, and anything else that would overwrite
-     or delete uncommitted work. The test is the working tree: if the command can change
-     or remove a file there, do not run it. To set work aside, commit it.
-   - **Unstaging is allowed:** `git restore --staged <path>` only changes the index and
-     never touches a working-tree file. Use that form to take a file out of a commit you
-     are preparing.
+     (which includes `--worktree` and `--staged --worktree`), `git stash` (in every form)
+     and `git clean`, and anything else that would overwrite or delete uncommitted work.
+     The test is the working tree: if the command can change or remove a file there, do
+     not run it. To set work aside, commit it.
+   - **The only way to unstage is `git restore --staged <path>`**: it only changes the
+     index and never touches a working-tree file. Use that form to take a file out of a
+     commit you are preparing; no other command is allowed for it.
    - For a temporary edit (e.g. a mutation check), start from a clean, committed tree,
      copy the file to a backup outside the repository before the edit, and put it back
      from that copy afterwards (a plain file copy, not a git command).
