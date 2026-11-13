@@ -275,8 +275,19 @@ the Base bridge from Sepolia). Copy `.env.example` to `.env` and fill in
 default to the deployer; set them (each with its own keystore) to keep the roles in
 distinct wallets, which `script/Demo.s.sol` requires.
 
-On a testnet the deployer is also the **admin of every contract**: a single key, which is
-fine for a testnet and must be stated as such. In production the admin is a multisig.
+**The deployer is the admin of every contract on testnet only.** On Sepolia and Base
+Sepolia that one key holds `DEFAULT_ADMIN_ROLE` on the `ListingRegistry`, the
+`CashbackDistributor`, `NiaraSettlement` and `P2PEscrow`, plus `PAUSER_ROLE` (the shared
+pause) and `TREASURY_ROLE` (protocol fees and escrow sweeps). A single key is acceptable
+there because everything is a test token with no value, and it must always be stated as
+such: the timelock delays what that key can change, it does not replace a second
+signature.
+
+**Mainnet uses a multisig as the admin**, never a single key (spec section 9, §9.6
+"Keys": admin in a multisig, a Safe on EVM; no key on a developer laptop). The multisig
+proposes and executes through the same timelock from its own interface. This script signs
+as the admin with one keystore, so it is a testnet tool: it reverts on any mainnet chain id
+and is not what a mainnet deployment would use.
 
 ### 2. Two-phase deployment (because of the real timelock)
 
