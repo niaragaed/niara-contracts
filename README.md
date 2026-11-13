@@ -284,8 +284,10 @@ such: the timelock delays what that key can change, it does not replace a second
 signature.
 
 **Mainnet uses a multisig as the admin**, never a single key (spec section 9, §9.6
-"Keys": admin in a multisig, a Safe on EVM; no key on a developer laptop). The multisig
-proposes and executes through the same timelock from its own interface. This script signs
+"Keys": `admin` in a multisig, and no key ever on a developer laptop). The spec names
+Squads, the Solana tool; on EVM the equivalent is a Safe, which is what
+`TimelockedAccessControl` is designed to have as the role holder. The multisig proposes
+and executes through the same timelock from its own interface. This script signs
 as the admin with one keystore, so it is a testnet tool: it reverts on any mainnet chain id
 and is not what a mainnet deployment would use.
 
