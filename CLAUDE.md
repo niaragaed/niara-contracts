@@ -235,12 +235,16 @@ no overriding).
 
 ## Known open items
 
-- Sepolia deployment completed (2026-07-22): both phases (`run()` + `executeWiring()`)
-  and `script/Demo.s.sol` ran with a real `--broadcast`, with the user's explicit
-  confirmation at each step. Addresses and transactions are documented in the README,
-  sections "Testnet deployment" / "Demo transactions". Any new deployment (redeploy,
-  another network) still requires an explicit request: never trigger `--broadcast` on
-  your own.
+- **The v1 exchange has NOT been deployed anywhere.** `script/Deploy.s.sol` and
+  `script/Demo.s.sol` (v1: registry, factory, settlement, escrow, mock test tokens) were
+  only rehearsed as dry runs against local Anvil nodes started with the Sepolia and Base
+  Sepolia chain ids (2026-11-12), without `--broadcast`. Deploying to Sepolia or Base
+  Sepolia requires an explicit request, and the user's confirmation at each step (phase
+  1, phase 2, demo): never trigger `--broadcast` on your own, not even against a local
+  node unless asked.
+- The July 2026 Sepolia deployment (2026-07-22) documented in the README ("Historical")
+  is the earlier backed model (`AssetToken` + `BackingGateway`), made with the previous
+  versions of the scripts. It is not the v1 exchange and predates the `ListingRegistry`.
 - `cashbackBps` parameter (see above): provisional.
 - No external audit has been done. Do not describe this code as audited in any future
   documentation.

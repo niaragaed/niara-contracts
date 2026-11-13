@@ -601,6 +601,7 @@ test/
   Invariant.t.sol + invariant/Handler.sol  (stateful fuzzing of the core invariants)
   script/DeployScript.t.sol      (both deployment phases run in-process, on each chain id)
   script/DemoScript.t.sol        (the three demo flows run in-process on a scripted deployment)
+  script/LocalSimulation.t.sol   (the rehearsal's Anvil-only guard; the scripts' environment readers)
   P2PEscrow.t.sol                (every path of the escrow, hostile tokens, log order)
   P2PEscrowInvariant.t.sol + invariant/EscrowHandler.sol
                                  (stateful fuzzing of the escrow: Solana invariants 6 and 7)
