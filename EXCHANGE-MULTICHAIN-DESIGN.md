@@ -49,7 +49,8 @@ A peer-to-peer tokenized securities exchange with **self-custody** and **curated
    charges a protocol fee in one currency, the **fee mint** (USDT, set in
    `Config`): the party that receives USDT pays the fee, out of the USDT it
    receives. A share of that fee is credited to the issuer (pull model), so
-   cashback is always in USDT too (§3.4).
+   cashback is always in USDT too (§3.4). **The fee is at most 0.5%**
+   (business rule), enforced on-chain as a hard cap.
 
 Accurate one-line description for pitches:
 **"Off-chain matching, atomic on-chain settlement, self-custody, curated listing."**
@@ -120,14 +121,14 @@ interface SettlementAdapter {
 
 | Account | Seeds | Fields |
 |---|---|---|
-| `Config` | `["config"]` | `admin`, `listing_authority`, `settlement_operator`, `treasury`, `fee_mint` (the USDT mint: every fee and all cashback are in it, §3.4; set at `initialize_config`, changed only through the timelock), `fee_bps: u16` (≤ `MAX_FEE_BPS = 100`), `cashback_bps: u16` (share **of the fee**, ≤ 10_000), `paused: bool`, `timelock_secs: i64`, `bump` |
+| `Config` | `["config"]` | `admin`, `listing_authority`, `settlement_operator`, `treasury`, `fee_mint` (the USDT mint: every fee and all cashback are in it, §3.4; set at `initialize_config`, changed only through the timelock), `fee_bps: u16` (≤ `MAX_FEE_BPS = 50`, i.e. 0.5%; §3.4), `cashback_bps: u16` (share **of the fee**, ≤ 10_000), `paused: bool`, `timelock_secs: i64`, `bump` |
 | `PendingChange` | `["pending", kind]` | proposed value, `execute_after: i64` (Clock `unix_timestamp`) |
 | `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `next_batch_no: u64` (next issuance batch; 1 after `submit_listing`, 0 for `Currency`), `issued: u64` (Σ executed batches), `burned: u64` (Σ `burn_with_reason`), `cashback_frozen: bool` (§9.5; false at creation), `bump` |
 | `IssuanceBatch` | `["batch", listing, batch_no]` (`batch_no` as `u64` LE) | `listing`, `batch_no`, `amount`, `recipient` (wallet), `doc_hash`, `status` (`Requested`/`Executed`/`Rejected`), `requested_at`, `resolved_at`, `bump`. Never closed: the on-chain issuance record (§3.12) |
 | Mint authority | `["mint_authority", asset_mint]` | PDA that holds the mint authority of every issuer-listed asset after `submit_listing`; signs `mint_to_checked` in `approve_issuance`. Holds no data |
 | `CashbackLedger` | `["cashback", listing, fee_mint]` | `listing`, `payment_mint` (= the fee mint it was created for), `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` for a cashback-eligible listing and the current `Config.fee_mint`, never lazily inside `settle` |
 | `FeeLedger` | `["fees", fee_mint]` | `payment_mint` (= the fee mint), `fees_collected` (gross fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`. **One**, for the fee mint (USDT); created with the fee vault by `init_fee_vault`. Protocol share available = `fees_collected − cashback_accrued − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
-| `SettlementRecord` | `["settled", order_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
+| `SettlementRecord` | `["settled", match_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
 | `Deal` | `["deal", proposer, deal_id]` (`deal_id: [u8;16]`, the off-chain negotiation UUID) | `deal_id`, `proposer`, `counterparty` (named; no open offers in v1), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `fee_bps`, `cashback_bps` (the config's rates at `open_deal`, charged at `accept_deal`: the fee is part of the agreed terms, §3.5), `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `opened_at`, `resolved_at`, `bump`, `vault_bump`. Never closed: the status is the replay guard (§3.5); the proposer pays its rent |
 | Deal vault | `["deal_vault", deal]` token account of the deposited mint, authority = the `Deal` PDA | holds the proposer's deposit until accept/cancel/expiry, then closed (rent to the proposer). Created by `open_deal` after its checks (the deposited mint depends on the side). A PDA rather than an ATA, for the same reason as the fee vault: anyone can create an ATA, so it could be front-run |
 | `Vault authority` | `["vault"]` | PDA signer for fee/cashback vaults and for delegated transfers |
@@ -147,8 +148,8 @@ interface SettlementAdapter {
 | `approve_listing` / `suspend_listing` / `delist` | listing_authority | change status, emit event |
 | `freeze_cashback` / `unfreeze_cashback` | listing_authority | set / clear `listing.cashback_frozen` (§9.5). No timelock, any listing status, allowed while paused; fails on a `Currency` listing (`NotCashbackEligible`) and when the flag would not change (`CashbackAlreadyFrozen` / `CashbackNotFrozen`). Emits `CashbackFreezeSet { listing, asset_mint, frozen, listing_authority }` |
 | `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, `Config.fee_mint`) before the listing's first settlement or deal |
-| `settle(order_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates; `payment_mint == Config.fee_mint` (see 3.4) |
-| `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment, one leg in the fee mint (§3.4); `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `now < expires_at ≤ now + 30 days`; stores the current `fee_bps`/`cashback_bps` on the deal; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` (with the stored rates) |
+| `settle(match_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates; `payment_mint == Config.fee_mint`; `match_id` not all zeros (see 3.4) |
+| `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment, one leg in the fee mint (§3.4); `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `deal_id` not all zeros (`ZeroDealId`); `now < expires_at ≤ now + 30 days`; stores the current `fee_bps`/`cashback_bps` on the deal; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` (with the stored rates) |
 | `accept_deal` | `deal.counterparty` | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges the fee on the fee-mint leg at the rates stored on the deal (not the current ones), accrues cashback, closes vault; only while `now < expires_at` (see 3.5). Emits `DealExecuted` |
 | `cancel_deal` | `deal.proposer` (while `Open`) | refund deposit, close vault. Emits `DealCancelled` |
 | `expire_deal` | anyone, once `now ≥ expires_at` | refund deposit to an account of the proposer, close vault (permissionless crank). Emits `DealExpired` |
@@ -196,6 +197,12 @@ fee, and therefore all cashback, is charged in it, in both trading modes:
   deals that is the seller (USDT is the payment). In a `Currency` deal it is
   whoever receives USDT: the seller when USDT is `payment_mint`, the buyer
   when USDT is the currency sold (`asset_mint`).
+- **How much.** At most **0.5%**: `fee_bps ≤ MAX_FEE_BPS = 50`. It is a
+  business rule (Niara charges at most 0.5%), enforced as a constant of the
+  program: `initialize_config` and `propose_change` reject a higher rate
+  (`FeeTooHigh`), `execute_change` re-validates it, and a deal stores the
+  rate of its `open_deal`, so no trade can ever be charged more. Raising the
+  cap takes a program upgrade, not a config change.
 - **Cashback** is a share of the fee, so it is in USDT too; only
   cashback-eligible listings (never `Currency`) accrue it.
 - **One fee vault, one fee ledger** (`["fee_vault", fee_mint]`,
@@ -214,16 +221,19 @@ fee, and therefore all cashback, is charged in it, in both trading modes:
 - Multi-currency payment with fee conversion (e.g. charging the fee of a
   BRL ↔ EUR deal in USDT) needs a price oracle and is out of v1 (§3.10).
 
-`order_id` is the off-chain **match (fill) id**, a 16-byte UUID (the
+`match_id` is the off-chain **match (fill) id**, a 16-byte UUID (the
 `matches.id` primary key), not the maker's order id: one order can be filled by
-several matches, and each match settles at most once. `payment_amount` is in
+several matches, and each match settles at most once. An all-zero id is
+rejected (`ZeroMatchId`): it is what an unset field looks like, never a real
+UUID, and the EVM `settle` rejects a zero `matchId` too (§4.2). `payment_amount` is in
 raw units of the payment mint; the program does no price conversion.
 
 Preconditions (all enforced on-chain):
 - `!config.paused`; signer is `config.settlement_operator`
+- `match_id != [0; 16]` (`ZeroMatchId`)
 - `asset_amount > 0`, `payment_amount > 0`
 - `buyer != seller`; neither is the vault authority
-- `["settled", order_id]` does not exist yet (replay guard: the operator
+- `["settled", match_id]` does not exist yet (replay guard: the operator
   cannot settle the same match twice, even within the delegated amounts)
 - asset listing: `status == Approved`, `asset_class == Equity`,
   `listing.asset_mint == asset_mint`
@@ -255,7 +265,7 @@ Each `transfer_checked` uses its own mint's decimals; zero-amount legs (e.g.
 3. `transfer_checked` payment: buyer → fee vault, `fee`
 4. `FeeLedger.fees_collected += fee`, `FeeLedger.cashback_accrued += cashback`,
    `CashbackLedger.accrued += cashback`
-5. `emit_cpi!(Settled { order_id, asset_mint, payment_mint, buyer, seller, asset_amount, payment_amount, fee, cashback })`
+5. `emit_cpi!(Settled { match_id, asset_mint, payment_mint, buyer, seller, asset_amount, payment_amount, fee, cashback })`
 
 ### 3.5 Custody model — DECISION (2026-10-22): delegate for listing, escrow for P2P
 
@@ -302,7 +312,8 @@ bilateral deal (OTC / block trade / counteroffers):
   the counterparty, which must not be the proposer (`SelfTrade`) or the
   default key (`InvalidAddress`); only that wallet can `accept_deal`
   (`Unauthorized`). `deal_id` is the 16-byte off-chain negotiation id, scoped
-  to the proposer (`["deal", proposer, deal_id]`).
+  to the proposer (`["deal", proposer, deal_id]`); an all-zero `deal_id` is
+  rejected (`ZeroDealId`), like a zero match id in `settle` (§3.4).
 - **Expiry.** `now < expires_at ≤ now + 30 days` at `open_deal`
   (`InvalidExpiry`, `MAX_DEAL_DURATION_SECS`). The deal is live while
   `now < expires_at` (`accept_deal` fails with `DealExpired` from
@@ -471,7 +482,7 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   drawn per case; BRL; EUR), plus a delegated buyer/seller pair for every
   asset × payment combination (including invalid ones), then runs random
   sequences of `settle` (valid and invalid markets, zero amounts, replayed
-  ids, wrong signer, fills that leave the seller nothing), listing status
+  and all-zero ids, wrong signer, fills that leave the seller nothing), listing status
   changes, pause/unpause, both withdrawals (incl. overdraws and wrong signers),
   timelocked fee/cashback changes with out-of-range values, re-delegations,
   `init_cashback_ledger`, donations straight into the fee vault and
@@ -505,7 +516,7 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   payment leg or on the asset leg; and nine invalid ones: no USD leg
   (bond/credit paid in BRL/EUR, BRL ↔ EUR), `Equity` asset, `Equity` or
   `FixedIncome` payment, same mint), `open_deal` with zero amounts, reused
-  ids and expiries in and out of the 30-day window, then `accept_deal`,
+  and all-zero ids and expiries in and out of the 30-day window, then `accept_deal`,
   `cancel_deal` and `expire_deal` on tracked deals (wrong signers, a crank
   naming its own refund account, replays of resolved deals) and donations
   into deal vaults. The outcome of every escrow call is predicted exactly
@@ -541,7 +552,9 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
      `sweep_excess` moves them to the treasury, and **after a sweep it is
      strict equality**. Fuzzing tracks donations and checks
      `vault == unwithdrawn + unswept donations`
-  5. `fee_bps ≤ MAX_FEE_BPS` always, even after timelocked changes
+  5. `fee_bps ≤ MAX_FEE_BPS` (50 bps, 0.5%) always, even after timelocked
+     changes; fuzzing also checks it on every fee charged
+     (`fee ≤ ceil(0.5% × amount)`) and on the rate stored in every deal
   6. an escrowed deposit always ends in exactly one place: counterparty (executed)
      or proposer (cancelled/expired). It is never stranded and never paid twice
   7. no `accept_deal` after `expires_at`; no `expire_deal` before it
@@ -687,10 +700,11 @@ Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
   cashback-eligible.
 - Deploy scripts with chainid guards: Sepolia `11155111`, Base Sepolia `84532`.
 - Same invariant fuzzing suite extended with the listing invariant.
-- **`P2PEscrow`** (EVM mirror of 3.5): `openDeal` (deposit), `acceptDeal` (atomic
-  swap + fee + cashback via `CashbackDistributor`), `cancelDeal`, `expireDeal`.
-  Accepts only `FixedIncome`/`Credit`/`Currency` listings.
-  Priority: after the Solana escrow is done. Cut it first on EVM if late.
+- **`P2PEscrow`** (EVM mirror of 3.5), **implemented**: `openDeal` (deposit),
+  `acceptDeal(dealKey)` (atomic swap + fee + cashback via `CashbackDistributor`),
+  `cancelDeal`, `expireDeal`, `sweepExcess`.
+  Accepts only `FixedIncome`/`Credit`/`Currency` listings. What it shares with
+  the Solana escrow and where it differs: §4.2.
 
 Note: verify whether the July 2026 Sepolia deployment of niara-contracts is still
 live and documented; v1 needs a **new deployment anyway** (new registry + factory).
@@ -732,6 +746,23 @@ Aligned on both chains:
   `Currency` listing too and is switched only through the timelock
   (`proposeSetFeeToken` / `executeSetFeeToken`); the seller, who receives the USDT,
   pays the fee;
+- **fee rounding**: both chains round the fee **up**,
+  `fee = ceil(usdt_amount × fee_bps / 10 000)`, so a non-zero rate never yields a zero
+  fee, and both reject a trade whose USDT receiver would get nothing after it, under
+  the same error name: `ZeroSellerProceeds` on Solana (`settle`, `open_deal`),
+  `ZeroSellerProceeds()` on EVM (`settle`, `openDeal`);
+- **fee cap 0.5%** (business rule, §3.4): `fee_bps ≤ 50` on both chains. Solana:
+  `MAX_FEE_BPS = 50`; the EVM cap must be set to the same value;
+- **P2P escrow** (§3.5; EVM `P2PEscrow`): the same asset classes
+  (`FixedIncome`/`Credit`/`Currency`, never `Equity`); a named counterparty (no open
+  offers); expiry at most 30 days ahead; `fee_bps` and `cashback_bps` snapshotted on the
+  deal at open and charged at accept; a USDT leg on every deal, and the USDT receiver
+  pays the fee; pause and listing status block open and accept but never cancel or
+  expire; the fee token is not snapshotted (after a fee-token switch a deal in the old
+  token can only be refunded);
+- **zero ids rejected**: a zero `match_id` (`settle`) and a zero `deal_id`
+  (`open_deal` / `openDeal`) are rejected on both chains. An all-zero id is what an
+  unset field looks like, never a real UUID;
 - **one shared pause** with the same scope and principle (§3.3); where it lives differs,
   see the table;
 - **per-listing cashback freeze** (§9.5). EVM: `ListingRegistry.freezeCashback` /
@@ -742,7 +773,7 @@ Aligned on both chains:
 - **on-chain replay protection**: a match id settles at most once. EVM:
   `settle(bytes16 matchId, ...)` sets `settledMatches[matchId]` before any transfer and
   reverts `MatchAlreadySettled` on a second attempt; `Settled` carries `matchId` first,
-  like Solana's `order_id` (a storage slot instead of a `SettlementRecord` account, so
+  like Solana's `match_id` (a storage slot instead of a `SettlementRecord` account, so
   no rent).
 
 What still differs, on purpose:
@@ -752,12 +783,15 @@ What still differs, on purpose:
 | Asset token origin | Issuer creates the mint; `submit_listing` checks `supply == 0` and moves the mint authority to the program PDA | Issuer deploys through `AssetTokenFactory`; the token's only minter is the `ListingRegistry` from birth (no hand-over, no "finish metadata first" step) | An EVM token's code is fixed at deploy, so a factory gives a known implementation; on Solana the issuer's mint must be accepted and checked |
 | Asset-side safety check | Mint extension allowlist + no freeze authority, at listing and again in `settle` | Only factory tokens can be submitted (plain ERC-20: no fees, rebasing, hooks, pause) | Same goal (known token behavior), enforced by the implementation instead of by inspecting the mint |
 | Listing class and `doc_hash` | Arguments of `submit_listing` | Fixed at `createAssetToken`; `submitListing(token)` copies them from the token | Listing can never disagree with the instrument |
-| Where the pause lives | One `Config.paused`, set by `admin`; stops `settle`, `open_deal`/`accept_deal`, withdrawals, `sweep_excess` and `approve_issuance` together | One pause too, held by `ListingRegistry` (`pause`/`unpause`, `PAUSER_ROLE` = admin); stops `approveIssuance`, and `NiaraSettlement.settle` and both `CashbackDistributor` withdrawals read it (`ProtocolPausable`, `EnforcedPause()`); those two contracts have no pause of their own. `BackingGateway`/`AssetToken` (backed model, no Solana counterpart) keep theirs | EVM has no `Config` account; the registry is the contract every other one already reads. Same scope and same principle |
+| Where the pause lives | One `Config.paused`, set by `admin`; stops `settle`, `open_deal`/`accept_deal`, withdrawals, `sweep_excess` and `approve_issuance` together; `cancel_deal`/`expire_deal` never read it | One pause too, held by `ListingRegistry` (`pause`/`unpause`, `PAUSER_ROLE` = admin); stops `approveIssuance`, and `NiaraSettlement.settle`, both `CashbackDistributor` withdrawals and `P2PEscrow.openDeal`/`acceptDeal` read it (`ProtocolPausable`, `EnforcedPause()`); those contracts have no pause of their own, and `cancelDeal`/`expireDeal` never read it. `BackingGateway`/`AssetToken` (backed model, no Solana counterpart) keep theirs | EVM has no `Config` account; the registry is the contract every other one already reads. Same scope and same principle |
 | Batch and burn bookkeeping | `Listing.issued` / `Listing.burned` counters; `burn_with_reason` is a program instruction (`CurrencyNotIssued` for currencies) | No counters in the registry; supply = Σ `IssuanceExecuted` − Σ `TokensBurned`, derivable from events. `burnWithReason` lives on `NativeAssetToken` and emits `TokensBurned` there; currencies simply don't have it | On EVM the token is Niara's own code, so the burn path can live in it |
 | Invariant 11 | `supply ≤ issued − burned` on-chain (holders can burn directly through the token program) | `supply == Σ executed − Σ burned` strictly: `NativeAssetToken` has no other burn path | EVM token has no generic `burn` |
 | Issuance destination | Batch names a wallet; `approve_issuance` takes any token account owned by it; `IssuanceExecuted` has `destination` | Batch names an address that receives the mint; `IssuanceExecuted` has no `destination` | ERC-20 balances live at the address, no separate token account |
-| Event vs effect order | `approve_issuance` mints, then updates state and emits | `approveIssuance` marks the batch, emits `IssuanceExecuted`, then mints (checks-effects-interactions, see CLAUDE.md) | EVM external calls can re-enter; SPL token CPIs cannot |
-| Fee rounding | `fee = ceil(payment × fee_bps / 10 000)`; `ZeroSellerProceeds` if the seller would get 0 | `fee = floor(...)`, reverts `PaymentAmountTooSmallForFeePrecision` if it truncates to 0 while `feeBps > 0` | Pre-existing EVM behavior, kept unchanged; both prevent fee-free trades |
+| Event vs effect order | `approve_issuance` mints, then updates state and emits. The escrow instructions do the same: token transfers and vault close first, then the deal status and the event | `approveIssuance` marks the batch, emits `IssuanceExecuted`, then mints (checks-effects-interactions, see CLAUDE.md). The `P2PEscrow` functions do the same: deal status and event first, then the token transfers | EVM external calls can re-enter; SPL token CPIs cannot |
+| Deal identity | One `Deal` account per deal, the PDA `["deal", proposer, deal_id]`; `accept_deal`, `cancel_deal` and `expire_deal` take that account | A storage entry keyed by `dealKey = keccak256(proposer, dealId)`; `acceptDeal(dealKey)` and the refund functions take the key | Solana addresses state by account, EVM by mapping key. Both scope the id to the proposer, so two proposers can use the same `deal_id` |
+| Tokens sent to the escrow | Every exit releases the deal vault's whole balance; the excess goes with the deposit and is reported as `vault_excess` (§3.5) | Every exit moves exactly the deposit; tokens sent to the contract stay there until the treasury takes them with `sweepExcess` | A Solana token account can only be closed empty and each deal has its own vault, so the excess must leave with the deposit. On EVM one contract holds every deposit: a stray transfer blocks nothing and belongs to no deal |
+| Deal fee accounting | `accept_deal` updates the `FeeLedger` and the `CashbackLedger` itself (same program as `settle`) | `P2PEscrow` calls `CashbackDistributor.recordDealFee`, which only `ESCROW_ROLE` may call | On EVM the escrow and the distributor are separate contracts, so the distributor must restrict who can record a fee |
+| Error names | `DealExpired` (accept from `expires_at` on) | `DealHasExpired` | Name only, the condition is the same. On Solana the error shares its name with the `DealExpired` event; the EVM error has its own. `ZeroSellerProceeds` has the same name on both chains (see the fee rounding item above) |
 | Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
 | Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, one `FeeLedger` for the fee mint, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; balances are kept per (asset, token) and per token, so only USDT ever accrues, and a fee-token switch leaves old balances withdrawable; no ledger accounts, no sweep | Pre-existing EVM distributor; `settle` alone enforces the fee token |
 | Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; blocked while paused and while the listing's cashback is frozen (`Listing.cashbackFrozen`, read from the registry) | Pre-existing EVM distributor's payout shape (no amount, no destination) kept |
@@ -778,7 +812,7 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
 - Operator keys **never** in the frontend, never in `NEXT_PUBLIC_*`, never in git.
 - Idempotent: a match is settled at most once (unique constraint on `match_id`
   off-chain; on Solana also on-chain, since `settle` takes the match UUID as
-  `order_id` and creates `["settled", order_id]`).
+  `match_id` and creates `["settled", match_id]`).
 
 ---
 
@@ -791,8 +825,8 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
   place order → match → settle → issuer withdraws cashback. Chain selector: Solana / Sepolia / Base Sepolia.
 - Deploy on **Vercel**.
 - **Niara-Register:** extend the indexer to capture `ListingApproved`
-  (both listing paths, §4.1), `Settled`, `DealExecuted` (Solana; EVM once
-  `P2PEscrow` exists), `IssuanceExecuted` and `TokensBurned`
+  (both listing paths, §4.1), `Settled`, `DealExecuted` (Solana program and
+  EVM `P2PEscrow`), `IssuanceExecuted` and `TokensBurned`
   on all three chains into the "Global registry" area (today empty
   because the Exchange has not operated for real). On EVM, `TokensBurned` is
   emitted by each `NativeAssetToken` (not by the registry), so the indexer
@@ -819,10 +853,10 @@ Narrative: *the Exchange operates, the Register proves it.*
 | 5 | Register indexer for 3 chains; Vercel deploy; signed order intents (if time) | Register shows real Exchange settlements |
 | 6 | Buffer; 2-person test on 2 devices per chain; README/docs; **record the demo video** | interview package ready |
 
-Cut order if behind schedule (last to first): UI polish → EVM `P2PEscrow` →
-signed intents (document as trust assumption) → Base deploy (trivial to add
-later). **Never cut:** Solana settle, Solana P2P escrow, issuer cashback, honest
-labeling.
+Cut order if behind schedule (last to first): UI polish → signed intents
+(document as trust assumption) → Base deploy (trivial to add later). EVM
+`P2PEscrow` was on this list and is now implemented (§4). **Never cut:** Solana
+settle, Solana P2P escrow, issuer cashback, honest labeling.
 
 ---
 
