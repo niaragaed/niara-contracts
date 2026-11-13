@@ -292,18 +292,49 @@ contract NiaraSettlementTest is Test {
         settlement.proposeSetFeeBps(tooHigh);
     }
 
+    /// @notice Business rule: Niara charges at most 0.5%. The cap is 50 bps and the default
+    /// fee sits exactly at it.
+    function test_FeeBps_CapIs50BpsAndDefaultIsAtTheCap() public view {
+        assertEq(settlement.MAX_FEE_BPS(), 50);
+        assertEq(settlement.feeBps(), settlement.MAX_FEE_BPS());
+    }
+
+    /// @notice 51 bps, one above the cap, can be neither proposed nor executed.
+    function test_FeeBps_51BpsIsRejected() public {
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.FeeExceedsCap.selector, uint16(51)));
+        settlement.proposeSetFeeBps(51);
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.FeeExceedsCap.selector, uint16(51)));
+        settlement.executeSetFeeBps(51);
+    }
+
+    /// @notice The old cap (100 bps) is no longer reachable.
+    function test_FeeBps_100BpsIsRejected() public {
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.FeeExceedsCap.selector, uint16(100)));
+        settlement.proposeSetFeeBps(100);
+    }
+
+    /// @notice After being lowered, the fee can be brought back up to the cap, not above.
+    function test_FeeBps_CanReturnToTheCapAfterBeingLowered() public {
+        _setFeeBps(10);
+        _setFeeBps(50);
+        assertEq(settlement.feeBps(), 50);
+    }
+
     function test_FeeBps_ChangeRequiresTimelock() public {
         vm.prank(admin);
-        settlement.proposeSetFeeBps(80);
+        settlement.proposeSetFeeBps(30);
 
         vm.prank(admin);
         vm.expectRevert();
-        settlement.executeSetFeeBps(80);
+        settlement.executeSetFeeBps(30);
     }
 
     function test_FeeBps_ChangeSucceedsAfterDelay() public {
-        _setFeeBps(80);
-        assertEq(settlement.feeBps(), 80);
+        _setFeeBps(30);
+        assertEq(settlement.feeBps(), 30);
     }
 
     function test_CashbackDistributor_ChangeRequiresTimelock() public {

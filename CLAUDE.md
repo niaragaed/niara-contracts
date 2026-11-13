@@ -38,7 +38,7 @@ value. Design decisions already made (and why) are documented in README.md, sect
   (`test_Invariant_MintBeyondAttestedIsImpossibleRegardlessOfCaller` in
   `test/BackingGateway.t.sol`, and the tests in `test/AssetToken.t.sol`).
 - **Never remove or weaken `nonReentrant`, `SafeERC20` or the hard bps caps**
-  (`NiaraSettlement.MAX_FEE_BPS = 100`, `CashbackDistributor.MAX_CASHBACK_BPS =
+  (`NiaraSettlement.MAX_FEE_BPS = 50`, `CashbackDistributor.MAX_CASHBACK_BPS =
   10_000`) without discussing it explicitly with the user. They are core security
   invariants of the model, not implementation details.
 - **Changes to roles, fee, cashback or reference wallets go through the timelock**

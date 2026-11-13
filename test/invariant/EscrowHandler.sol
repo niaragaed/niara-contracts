@@ -484,7 +484,7 @@ contract EscrowHandler is Test {
 
     /// @notice Timelocked fee change (0 to MAX_FEE_BPS). Deals already open keep their rate.
     function changeFeeBps(uint256 seed) external {
-        uint16 newFeeBps = uint16(seed % 101);
+        uint16 newFeeBps = uint16(seed % 51);
         vm.prank(admin);
         settlement.proposeSetFeeBps(newFeeBps);
         vm.warp(block.timestamp + timelockDelay);

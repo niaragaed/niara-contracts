@@ -80,8 +80,9 @@ match settles at most once (`MatchAlreadySettled`), and `Settled` carries the `m
 A settlement that reverts does not consume its id. The all-zero id is rejected
 (`ZeroMatchId`).
 
-Fee: 50 bps (0.5%) by default, with a hard, immutable cap of 100 bps (1%) that not even
-the admin can exceed. Restricted to `SETTLEMENT_OPERATOR_ROLE` (Niara's order-matching
+Fee: 50 bps (0.5%) by default, which is also the hard, immutable cap (`MAX_FEE_BPS = 50`:
+Niara charges at most 0.5%) that not even the admin can exceed; the timelocked setter can
+only lower the fee or bring it back up to the cap. Restricted to `SETTLEMENT_OPERATOR_ROLE` (Niara's order-matching
 engine): allowance authorizes moving funds, but only the authorized operator decides
 when to trigger a settlement.
 

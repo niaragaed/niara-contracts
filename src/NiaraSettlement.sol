@@ -38,10 +38,12 @@ contract NiaraSettlement is TimelockedAccessControl, ProtocolPausable, Reentranc
 
     uint16 private constant BPS_DENOMINATOR = 10_000;
 
-    /// @notice Hard, immutable fee cap: 100 bps (1%). Not even the admin can exceed it.
-    uint16 public constant MAX_FEE_BPS = 100;
+    /// @notice Hard, immutable fee cap: 50 bps (0.5%). Business rule: Niara charges at most
+    /// 0.5%. Not even the admin can exceed it.
+    uint16 public constant MAX_FEE_BPS = 50;
 
-    /// @notice Current fee, in bps, charged in `feeToken`. Default: 50 bps (0.5%).
+    /// @notice Current fee, in bps, charged in `feeToken`. Default: 50 bps (0.5%), the cap:
+    /// the timelocked setter can only lower it or bring it back up to the cap.
     uint16 public feeBps = 50;
 
     /// @notice The only payment token `settle` accepts, and so the token every fee and all

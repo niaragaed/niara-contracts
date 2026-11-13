@@ -1087,14 +1087,16 @@ contract P2PEscrowTest is Test {
     // ── Fee and cashback rates are fixed at open ───────────────────────────────────────
 
     function test_FeeSnapshot_RaiseWhileOpenDoesNotApply() public {
+        _setFeeBps(20);
         bytes32 dealKey = _open(DEAL_ID, _terms(address(bond), address(usdt), SELL));
-        _setFeeBps(100);
-        assertEq(escrow.getDeal(dealKey).feeBps, 50);
+        _setFeeBps(50);
+        assertEq(escrow.getDeal(dealKey).feeBps, 20);
 
         vm.prank(bob);
         escrow.acceptDeal(dealKey);
-        assertEq(usdt.balanceOf(address(distributor)), FEE);
-        assertEq(usdt.balanceOf(alice), CURRENCY_START + PAYMENT_AMOUNT - FEE);
+        // 20 bps of 1,000 USDT, not 50.
+        assertEq(usdt.balanceOf(address(distributor)), 2e6);
+        assertEq(usdt.balanceOf(alice), CURRENCY_START + PAYMENT_AMOUNT - 2e6);
     }
 
     function test_FeeSnapshot_CutWhileOpenDoesNotApply() public {
@@ -1111,7 +1113,7 @@ contract P2PEscrowTest is Test {
     function test_FeeSnapshot_DealOpenedAtZeroFeeExecutesFeeFreeAfterARaise() public {
         _setFeeBps(0);
         bytes32 dealKey = _open(DEAL_ID, _terms(address(bond), address(usdt), SELL));
-        _setFeeBps(100);
+        _setFeeBps(50);
 
         vm.expectEmit(true, true, true, true, address(escrow));
         emit P2PEscrow.DealExecuted(
@@ -1126,13 +1128,13 @@ contract P2PEscrowTest is Test {
     }
 
     function test_FeeSnapshot_DealsOpenedAfterAChangeUseTheNewRate() public {
-        _setFeeBps(100);
+        _setFeeBps(20);
         bytes32 dealKey = _open(DEAL_ID, _terms(address(bond), address(usdt), SELL));
-        assertEq(escrow.getDeal(dealKey).feeBps, 100);
+        assertEq(escrow.getDeal(dealKey).feeBps, 20);
 
         vm.prank(bob);
         escrow.acceptDeal(dealKey);
-        assertEq(usdt.balanceOf(address(distributor)), 10e6);
+        assertEq(usdt.balanceOf(address(distributor)), 2e6);
     }
 
     function test_CashbackSnapshot_ChangeWhileOpenDoesNotApply() public {
