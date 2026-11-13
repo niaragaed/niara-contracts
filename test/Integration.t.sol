@@ -48,7 +48,7 @@ contract IntegrationTest is Test {
 
     function setUp() public {
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
-        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 1_000);
         usdt = new MockUSDT();
         settlement =
             new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);

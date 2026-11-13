@@ -47,7 +47,9 @@ contract P2PEscrowInvariantTest is Test {
 
     function setUp() public {
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
-        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
+        // 2000 bps: the rate script/Deploy.s.sol constructs the distributor with. The handler
+        // then moves it anywhere in 0..10_000 through the timelock.
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 2_000);
         MockUSDT usdt = new MockUSDT();
         settlement =
             new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);

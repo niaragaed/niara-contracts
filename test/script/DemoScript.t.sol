@@ -193,8 +193,8 @@ contract DemoScriptTest is Test {
         assertEq(usdt.balanceOf(roles.issuer), 15e6);
     }
 
-    /// @notice The flows charge whatever rates the deployment has: with the cashback at the
-    /// contract default (1000 bps) the issuer gets 10% of each fee.
+    /// @notice The flows charge whatever rates the deployment has: after a timelocked change
+    /// of the cashback share to 1000 bps, the issuer gets 10% of each fee instead of 20%.
     function test_Flows_FollowTheDeployedCashbackRate() public {
         vm.prank(roles.deployer);
         d.distributor.proposeSetCashbackBps(1_000);

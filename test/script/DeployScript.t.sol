@@ -107,12 +107,26 @@ contract DeployScriptTest is Test {
     }
 
     /// @notice The fee is 50 bps (the contract default and its cap); phase 1 does not touch
-    /// it. The cashback rate is still the contract default: it changes only in phase 2.
-    function test_Phase1_FeeIs50BpsAndCashbackIsOnlyProposed() public {
+    /// it. The cashback rate is 2000 bps from the first block: it is a constructor argument
+    /// of the CashbackDistributor, with nothing proposed for it.
+    function test_Phase1_FeeIs50BpsAndCashbackIs2000BpsFromConstruction() public {
         (, NiaraScriptBase.Deployment memory d) = _phase1();
         assertEq(d.settlement.feeBps(), 50);
         assertEq(d.settlement.MAX_FEE_BPS(), 50);
-        assertEq(d.distributor.cashbackBps(), 1_000);
+        assertEq(d.distributor.cashbackBps(), 2_000);
+        assertEq(d.distributor.pendingActions(keccak256(abi.encode("SET_CASHBACK_BPS", uint16(2_000)))), 0);
+    }
+
+    /// @notice Whatever rate is configured (`CASHBACK_BPS`) is the one the distributor is
+    /// constructed with, including both ends of the range.
+    function test_Phase1_ConstructsTheDistributorWithTheConfiguredCashbackRate() public {
+        uint16[3] memory rates = [uint16(0), 1_500, 10_000];
+        for (uint256 i = 0; i < rates.length; i++) {
+            DeployNiara.Config memory cfg = _config();
+            cfg.cashbackBps = rates[i];
+            NiaraScriptBase.Deployment memory d = script.deployAndPropose(cfg);
+            assertEq(d.distributor.cashbackBps(), rates[i]);
+        }
     }
 
     /// @notice Phase 1 grants nothing: every sensitive change is only scheduled.
@@ -134,7 +148,6 @@ contract DeployScriptTest is Test {
         assertEq(
             d.distributor.pendingActions(keccak256(abi.encode("GRANT_ROLE", escrowRole, address(d.escrow)))), expected
         );
-        assertEq(d.distributor.pendingActions(keccak256(abi.encode("SET_CASHBACK_BPS", uint16(2_000)))), expected);
         assertEq(d.settlement.pendingActions(keccak256(abi.encode("GRANT_ROLE", operatorRole, operator))), expected);
         assertEq(script.wiringExecutableAt(cfg, d), expected);
     }
@@ -255,7 +268,9 @@ contract DeployScriptTest is Test {
         assertEq(script.wiringExecutableAt(cfg, d), 0);
     }
 
-    function test_Phase2_SetsCashbackTo2000BpsAndKeepsFeeAt50() public {
+    /// @notice Phase 2 neither sets nor changes a rate: cashback stays at the constructed
+    /// 2000 bps and the fee at 50 bps.
+    function test_Phase2_LeavesCashbackAt2000BpsAndFeeAt50() public {
         (, NiaraScriptBase.Deployment memory d) = _bothPhases();
         assertEq(d.distributor.cashbackBps(), 2_000);
         assertEq(d.settlement.feeBps(), 50);
@@ -309,17 +324,39 @@ contract DeployScriptTest is Test {
         script.verifyWiring(cfg, d);
     }
 
-    /// @notice With the cashback rate left at the contract's current value there is nothing
-    /// to propose or execute for it.
-    function test_Phase2_NoCashbackProposalWhenTheRateIsAlreadyTheTarget() public {
-        DeployNiara.Config memory cfg = _config();
-        cfg.cashbackBps = 1_000;
-        NiaraScriptBase.Deployment memory d = script.deployAndPropose(cfg);
-        assertEq(d.distributor.pendingActions(keccak256(abi.encode("SET_CASHBACK_BPS", uint16(1_000)))), 0);
+    /// @notice The deployment never uses the timelock for the cashback rate, but the timelock
+    /// still governs it afterwards: an immediate change is impossible, and a proposed one
+    /// applies only after the delay.
+    function test_AfterDeployment_CashbackChangesOnlyThroughTheTimelock() public {
+        (DeployNiara.Config memory cfg, NiaraScriptBase.Deployment memory d) = _bothPhases();
+
+        vm.prank(deployer);
+        d.distributor.proposeSetCashbackBps(3_000);
+        vm.prank(deployer);
+        vm.expectRevert();
+        d.distributor.executeSetCashbackBps(3_000);
+        assertEq(d.distributor.cashbackBps(), 2_000);
 
         vm.warp(block.timestamp + cfg.timelockDelay);
+        vm.prank(deployer);
+        d.distributor.executeSetCashbackBps(3_000);
+        assertEq(d.distributor.cashbackBps(), 3_000);
+    }
+
+    /// @notice Phase 2 does not change the rate, so a `CASHBACK_BPS` that differs from the
+    /// one phase 1 deployed with is reported instead of silently ignored.
+    function test_Phase2_RevertsWhenTheConfiguredCashbackIsNotTheDeployedOne() public {
+        (DeployNiara.Config memory cfg, NiaraScriptBase.Deployment memory d) = _phase1();
+        vm.warp(block.timestamp + cfg.timelockDelay);
+        cfg.cashbackBps = 1_000;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DeployNiara.WiringIncomplete.selector, "cashback rate is not the configured CASHBACK_BPS"
+            )
+        );
         script.executeWiringOn(cfg, d);
-        assertEq(d.distributor.cashbackBps(), 1_000);
+        assertEq(d.distributor.cashbackBps(), 2_000);
     }
 
     /// @notice One key for every role (the defaults when only DEPLOYER_ADDRESS is set).
@@ -362,7 +399,20 @@ contract DeployScriptTest is Test {
 
     function test_VerifyWiring_RevertsBeforePhase2() public {
         (DeployNiara.Config memory cfg, NiaraScriptBase.Deployment memory d) = _phase1();
-        vm.expectRevert(abi.encodeWithSelector(DeployNiara.WiringIncomplete.selector, "cashback rate"));
+        vm.expectRevert(
+            abi.encodeWithSelector(DeployNiara.WiringIncomplete.selector, "SETTLEMENT_ROLE -> NiaraSettlement")
+        );
+        script.verifyWiring(cfg, d);
+    }
+
+    function test_VerifyWiring_RevertsWhenTheCashbackRateIsNotTheConfiguredOne() public {
+        (DeployNiara.Config memory cfg, NiaraScriptBase.Deployment memory d) = _bothPhases();
+        cfg.cashbackBps = 2_500;
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DeployNiara.WiringIncomplete.selector, "cashback rate is not the configured CASHBACK_BPS"
+            )
+        );
         script.verifyWiring(cfg, d);
     }
 

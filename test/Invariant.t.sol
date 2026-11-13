@@ -56,7 +56,8 @@ contract InvariantTest is Test {
 
     function _deployContracts() internal {
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
-        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
+        // 2000 bps: the rate script/Deploy.s.sol constructs the distributor with.
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 2_000);
         usdt = new MockUSDT();
         settlement =
             new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);

@@ -16,9 +16,9 @@ import {TestnetMockToken} from "./tokens/TestnetMockToken.sol";
 /// other chain id reverts `UnsupportedChain`.
 ///
 /// The two phases exist because of the protocol's real timelock
-/// (`TimelockedAccessControl.MIN_TIMELOCK_DELAY` = 1 hour). Roles and the cashback rate
-/// change only through propose -> wait -> execute, and there is no shortcut, not even on a
-/// testnet (see CLAUDE.md).
+/// (`TimelockedAccessControl.MIN_TIMELOCK_DELAY` = 1 hour). Roles change only through
+/// propose -> wait -> execute, and there is no shortcut, not even on a testnet (see
+/// CLAUDE.md).
 ///
 /// PHASE 1, `run()`: deploys the two mock test tokens, the ListingRegistry (which creates
 /// the AssetTokenFactory), the CashbackDistributor, NiaraSettlement and P2PEscrow, and
@@ -26,7 +26,6 @@ import {TestnetMockToken} from "./tokens/TestnetMockToken.sol";
 ///   - SETTLEMENT_ROLE on the distributor  -> NiaraSettlement
 ///   - ESCROW_ROLE on the distributor      -> P2PEscrow
 ///   - SETTLEMENT_OPERATOR_ROLE            -> the settlement operator
-///   - cashback rate                       -> `CASHBACK_BPS` (2000 bps = 20% of the fee)
 /// Nothing can trade yet: without those roles `settle` and `acceptDeal` revert.
 ///
 /// PHASE 2, `executeWiring()`: once the timelock has really elapsed on-chain, EXECUTES those
@@ -36,7 +35,9 @@ import {TestnetMockToken} from "./tokens/TestnetMockToken.sol";
 /// `verify()`: read-only check of a finished deployment.
 ///
 /// Parameters: the fee is 50 bps, the contract's default and its hard cap (`MAX_FEE_BPS`);
-/// the script only checks it. The cashback share is `CASHBACK_BPS` (default 2000). The
+/// the script only checks it. The cashback share is `CASHBACK_BPS` (default 2000 bps = 20%
+/// of the fee), passed to the CashbackDistributor's constructor: it is the contract's rate
+/// from its first block, and only later changes go through the timelock. The
 /// deployer is the admin of every contract: on a testnet that is one key, and it must be
 /// stated as such; in production the admin is a multisig, which proposes and executes
 /// through its own interface rather than through this script.
@@ -49,8 +50,8 @@ contract DeployNiara is NiaraScriptBase {
     /// default; the script fails if the deployed value differs.
     uint16 public constant FEE_BPS = 50;
 
-    /// @notice Cashback share of the fee set by this deployment unless `CASHBACK_BPS` says
-    /// otherwise: 2000 bps = 20% of the fee.
+    /// @notice Cashback share of the fee the CashbackDistributor is constructed with unless
+    /// `CASHBACK_BPS` says otherwise: 2000 bps = 20% of the fee.
     uint16 public constant DEFAULT_CASHBACK_BPS = 2_000;
 
     uint256 public constant DEFAULT_TIMELOCK_DELAY = 1 hours;
@@ -70,6 +71,8 @@ contract DeployNiara is NiaraScriptBase {
         /// @dev SETTLEMENT_OPERATOR_ROLE on NiaraSettlement.
         address operator;
         uint256 timelockDelay;
+        /// @dev Constructor argument of the CashbackDistributor in phase 1. The later
+        /// phases only check that the deployed rate is still this one.
         uint16 cashbackBps;
     }
 
@@ -148,7 +151,10 @@ contract DeployNiara is NiaraScriptBase {
         // protocol's single, shared pause.
         d.registry = new ListingRegistry(cfg.deployer, cfg.listingAuthority, cfg.timelockDelay);
         d.factory = d.registry.factory();
-        d.distributor = new CashbackDistributor(cfg.deployer, address(d.registry), cfg.timelockDelay);
+        // The cashback share is a constructor argument: in force from the first block, with
+        // nothing to propose or execute for it.
+        d.distributor =
+            new CashbackDistributor(cfg.deployer, address(d.registry), cfg.timelockDelay, cfg.cashbackBps);
         // The mock USDT is the fee token: the only payment `settle` accepts, and one leg of
         // every P2P deal.
         d.settlement = new NiaraSettlement(
@@ -162,7 +168,6 @@ contract DeployNiara is NiaraScriptBase {
         d.distributor.proposeGrantRole(d.distributor.SETTLEMENT_ROLE(), address(d.settlement));
         d.distributor.proposeGrantRole(d.distributor.ESCROW_ROLE(), address(d.escrow));
         d.settlement.proposeGrantRole(d.settlement.SETTLEMENT_OPERATOR_ROLE(), cfg.operator);
-        if (d.distributor.cashbackBps() != cfg.cashbackBps) d.distributor.proposeSetCashbackBps(cfg.cashbackBps);
 
         vm.stopBroadcast();
     }
@@ -199,12 +204,11 @@ contract DeployNiara is NiaraScriptBase {
         if (!d.settlement.hasRole(operatorRole, cfg.operator)) {
             d.settlement.executeGrantRole(operatorRole, cfg.operator);
         }
-        if (d.distributor.cashbackBps() != cfg.cashbackBps) d.distributor.executeSetCashbackBps(cfg.cashbackBps);
         vm.stopBroadcast();
 
         // Listing a currency is not timelocked (it is an operational listing decision), but
-        // it is done here, after the wiring, so nothing is tradable before the cashback rate
-        // and the roles are in place.
+        // it is done here, after the wiring, so nothing is tradable before the roles are in
+        // place.
         vm.startBroadcast(cfg.listingAuthority);
         if (_notListed(d, address(d.mockUsdt))) d.registry.listCurrency(address(d.mockUsdt));
         if (_notListed(d, address(d.mockBrl))) d.registry.listCurrency(address(d.mockBrl));
@@ -219,18 +223,20 @@ contract DeployNiara is NiaraScriptBase {
     /// @param d The phase 1 deployment.
     /// @return executeAfter The latest `executeAfter` among the pending proposals.
     function wiringExecutableAt(Config memory cfg, Deployment memory d) public view returns (uint256 executeAfter) {
-        bytes32[4] memory actions = [
-            keccak256(abi.encode("GRANT_ROLE", d.distributor.SETTLEMENT_ROLE(), address(d.settlement))),
-            keccak256(abi.encode("GRANT_ROLE", d.distributor.ESCROW_ROLE(), address(d.escrow))),
-            keccak256(abi.encode("SET_CASHBACK_BPS", cfg.cashbackBps)),
-            keccak256(abi.encode("GRANT_ROLE", d.settlement.SETTLEMENT_OPERATOR_ROLE(), cfg.operator))
+        uint256[3] memory pending = [
+            d.distributor.pendingActions(
+                keccak256(abi.encode("GRANT_ROLE", d.distributor.SETTLEMENT_ROLE(), address(d.settlement)))
+            ),
+            d.distributor.pendingActions(
+                keccak256(abi.encode("GRANT_ROLE", d.distributor.ESCROW_ROLE(), address(d.escrow)))
+            ),
+            d.settlement.pendingActions(
+                keccak256(abi.encode("GRANT_ROLE", d.settlement.SETTLEMENT_OPERATOR_ROLE(), cfg.operator))
+            )
         ];
-        for (uint256 i = 0; i < 3; i++) {
-            uint256 at = d.distributor.pendingActions(actions[i]);
-            if (at > executeAfter) executeAfter = at;
+        for (uint256 i = 0; i < pending.length; i++) {
+            if (pending[i] > executeAfter) executeAfter = pending[i];
         }
-        uint256 operatorAt = d.settlement.pendingActions(actions[3]);
-        if (operatorAt > executeAfter) executeAfter = operatorAt;
     }
 
     /// @notice Checks that the deployment is fully wired and configured. Reverts
@@ -240,7 +246,9 @@ contract DeployNiara is NiaraScriptBase {
     function verifyWiring(Config memory cfg, Deployment memory d) public view {
         if (d.settlement.feeBps() != FEE_BPS) revert WiringIncomplete("fee is not 50 bps");
         if (d.settlement.MAX_FEE_BPS() != FEE_BPS) revert WiringIncomplete("fee cap is not 50 bps");
-        if (d.distributor.cashbackBps() != cfg.cashbackBps) revert WiringIncomplete("cashback rate");
+        if (d.distributor.cashbackBps() != cfg.cashbackBps) {
+            revert WiringIncomplete("cashback rate is not the configured CASHBACK_BPS");
+        }
         if (!d.distributor.hasRole(d.distributor.SETTLEMENT_ROLE(), address(d.settlement))) {
             revert WiringIncomplete("SETTLEMENT_ROLE -> NiaraSettlement");
         }

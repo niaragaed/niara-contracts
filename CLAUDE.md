@@ -144,10 +144,13 @@ mirroring Solana invariants 6 and 7) must keep passing on any change to that con
 
 ## Parameter still to be defined
 
-`CashbackDistributor.cashbackBps` is at **1000 bps (10% of the fee)**, a provisional
-value. See the code comment: *"TO BE DEFINED: 1% of the fee equals 0.005% of volume,
-probably not enough. See the whitepaper, section 4."* Do not treat this number as
-final; if the user asks to adjust it, that is expected.
+`CashbackDistributor.cashbackBps` has no default in the contract: it is a constructor
+parameter, bounded by `MAX_CASHBACK_BPS`, and `script/Deploy.s.sol` passes **2000 bps (20%
+of the fee)** (`CASHBACK_BPS`). After deployment it changes only through the timelock. The
+value is still provisional. See the code comment: *"TO BE DEFINED: the right share is still
+a business decision (1% of the fee equals 0.005% of volume, probably not enough). See the
+whitepaper, section 4."* Do not treat this number as final; if the user asks to adjust it,
+that is expected. Do not reintroduce a hardcoded default in the contract.
 
 ---
 
@@ -166,8 +169,10 @@ final; if the user asks to adjust it, that is expected.
     (84532) and revert `UnsupportedChain` anywhere else (`script/NiaraScriptBase.sol`). Do
     not add a chain, and never a mainnet, without an explicit request.
   - Deploy parameters: fee 50 bps (the contract default and cap, only checked by the
-    script) and cashback `CASHBACK_BPS` (default 2000), proposed in phase 1 and executed in
-    phase 2 like every role grant. The script's logic is tested in-process by
+    script) and cashback `CASHBACK_BPS` (default 2000), passed to the `CashbackDistributor`
+    constructor in phase 1. The deployment proposes and executes only the three role
+    grants; it never uses the timelock for the cashback rate, and phase 2 only checks it.
+    The script's logic is tested in-process by
     `test/script/DeployScript.t.sol`; a local simulation uses Anvil started with one of the
     two chain ids, without `--broadcast`.
   - `script/tokens/TestnetMockToken.sol` is a test token with no value (open mint). It is

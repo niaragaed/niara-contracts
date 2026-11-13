@@ -48,7 +48,7 @@ contract NiaraSettlementTest is Test {
 
     function setUp() public {
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
-        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 1_000);
         usdt = new MockUSDT();
         wbtc = new MockWBTC();
         settlement =
@@ -398,7 +398,8 @@ contract NiaraSettlementTest is Test {
     }
 
     function test_CashbackDistributor_ChangeRequiresTimelock() public {
-        CashbackDistributor newDistributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
+        CashbackDistributor newDistributor =
+            new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 1_000);
 
         vm.prank(admin);
         settlement.proposeSetCashbackDistributor(address(newDistributor));

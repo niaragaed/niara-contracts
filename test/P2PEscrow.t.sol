@@ -47,7 +47,8 @@ contract P2PEscrowTest is Test {
     uint256 public constant CURRENCY_START = 1_000_000 ether;
     uint256 public constant ASSET_AMOUNT = 10 ether;
     uint256 public constant PAYMENT_AMOUNT = 1_000e6;
-    /// @dev Default fee (50 bps) and cashback (10% of the fee) on PAYMENT_AMOUNT.
+    /// @dev Fee (50 bps, the default) and cashback (10% of the fee, the rate this suite's
+    /// distributor is constructed with) on PAYMENT_AMOUNT.
     uint256 public constant FEE = 5e6;
     uint256 public constant CASHBACK = 5e5;
     uint64 public constant LIFETIME = 7 days;
@@ -60,7 +61,8 @@ contract P2PEscrowTest is Test {
 
     function setUp() public {
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
-        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
+        // 1000 bps: the cashback rate the expected figures of this suite are written for.
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 1_000);
         usdt = new MockUSDT();
         brl = new MockUSDT();
         eur = new MockUSDT();

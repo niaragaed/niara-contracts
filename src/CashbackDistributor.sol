@@ -31,11 +31,12 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
     /// @notice Hard cap: cashback can never exceed 100% of the fee received.
     uint16 public constant MAX_CASHBACK_BPS = 10_000;
 
-    // TO BE DEFINED: 1% of the fee equals 0.005% of volume, probably not enough.
-    // See the whitepaper, section 4.
-    /// @notice Share of the fee, in bps, passed on to the issuer. Provisional default: 1000 bps
-    /// (10% of the fee).
-    uint16 public cashbackBps = 1_000;
+    // TO BE DEFINED: the right share is still a business decision (1% of the fee equals
+    // 0.005% of volume, probably not enough). See the whitepaper, section 4.
+    /// @notice Share of the fee, in bps, passed on to the issuer. There is no default: it is
+    /// set at deployment (constructor), bounded by `MAX_CASHBACK_BPS`, and from then on it
+    /// changes only through the timelock (`proposeSetCashbackBps` / `executeSetCashbackBps`).
+    uint16 public cashbackBps;
 
     /// @notice Accumulated cashback balance, per asset and per settlement currency, that
     /// the issuer can withdraw.
@@ -64,11 +65,15 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
     /// @param admin_ Holder of DEFAULT_ADMIN_ROLE and TREASURY_ROLE.
     /// @param listingRegistry_ ListingRegistry holding the shared protocol pause.
     /// @param timelockDelay_ Delay (seconds) between proposal and execution of sensitive changes.
-    constructor(address admin_, address listingRegistry_, uint256 timelockDelay_)
+    /// @param cashbackBps_ Initial share of the fee passed on to the issuer, in bps, at most
+    /// `MAX_CASHBACK_BPS`. Later changes go through the timelock.
+    constructor(address admin_, address listingRegistry_, uint256 timelockDelay_, uint16 cashbackBps_)
         TimelockedAccessControl(timelockDelay_)
         ProtocolPausable(listingRegistry_)
     {
         if (admin_ == address(0) || listingRegistry_ == address(0)) revert ZeroAddress();
+        if (cashbackBps_ > MAX_CASHBACK_BPS) revert CashbackBpsExceedsCap(cashbackBps_);
+        cashbackBps = cashbackBps_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(TREASURY_ROLE, admin_);
     }

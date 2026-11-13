@@ -115,9 +115,14 @@ allowed while paused) set `Listing.cashbackFrozen`; while it is set,
 continues, so nothing is lost: everything credited is withdrawable after unfreezing.
 `Currency` listings, which never accrue cashback, cannot be frozen.
 
-Cashback share: **1000 bps (10% of the fee), a provisional value**. See the code
-comment: *"TO BE DEFINED: 1% of the fee equals 0.005% of volume, probably not enough.
-See the whitepaper, section 4."*
+Cashback share: `cashbackBps` has **no default in the contract**. It is a constructor
+parameter, bounded by the hard cap `MAX_CASHBACK_BPS = 10_000` (100% of the fee;
+`CashbackBpsExceedsCap` above it), so the rate is in force from the contract's first block.
+The testnet deployment constructs it with **2000 bps (20% of the fee)**. After deployment
+the rate changes only through the timelock (`proposeSetCashbackBps` /
+`executeSetCashbackBps`). The number is still provisional; see the code comment: *"TO BE
+DEFINED: the right share is still a business decision (1% of the fee equals 0.005% of
+volume, probably not enough). See the whitepaper, section 4."*
 
 ### `P2PEscrow.sol`
 
@@ -230,8 +235,9 @@ tokens with no value; the code has not been audited.
 `script/Deploy.s.sol` deploys the v1 exchange: `ListingRegistry` (which creates the
 `AssetTokenFactory`), `CashbackDistributor`, `NiaraSettlement`, `P2PEscrow`, and two test
 tokens. Parameters: **fee 50 bps** (the contract's default and hard cap; the script only
-checks it) and **cashback 2000 bps** (20% of the fee, `CASHBACK_BPS`), set through the
-timelock.
+checks it) and **cashback 2000 bps** (20% of the fee, `CASHBACK_BPS`), passed to the
+`CashbackDistributor` constructor in phase 1, so it applies from the first block with
+nothing to propose or execute. Any later change of either rate goes through the timelock.
 
 ### 1. The deployer: a Foundry keystore, never a key in `.env`
 
@@ -280,10 +286,10 @@ use `sepolia`; for Base Sepolia use `--rpc-url base_sepolia`. The two deployment
 independent and their addresses are kept apart by the chain-id suffix of the `DEPLOYED_*`
 variables.
 
-**Phase 1: deploy the contracts and propose the wiring** (`SETTLEMENT_ROLE` to
-`NiaraSettlement`, `ESCROW_ROLE` to `P2PEscrow`, `SETTLEMENT_OPERATOR_ROLE` to the
-operator, cashback rate to `CASHBACK_BPS`). Always run it first **without** `--broadcast`
-(a dry run: nothing is sent) and read the output:
+**Phase 1: deploy the contracts** (the `CashbackDistributor` is constructed with
+`CASHBACK_BPS`) **and propose the wiring** (`SETTLEMENT_ROLE` to `NiaraSettlement`,
+`ESCROW_ROLE` to `P2PEscrow`, `SETTLEMENT_OPERATOR_ROLE` to the operator). Always run it
+first **without** `--broadcast` (a dry run: nothing is sent) and read the output:
 
 ```bash
 forge script script/Deploy.s.sol --rpc-url sepolia --account niara-evm-deployer
@@ -300,9 +306,10 @@ Nothing can trade yet: without the roles, `settle` and `acceptDeal` revert, and 
 is listed.
 
 **Wait `TIMELOCK_DELAY` seconds** (1 hour by default; phase 1 prints the timestamp), then
-run **phase 2**, which executes the proposals, lists the two test currencies and verifies
-the result. It refuses to run early (`TimelockStillRunning`) and can simply be run again
-if it stopped halfway:
+run **phase 2**, which executes the three role grants, lists the two test currencies and
+verifies the result (including that the deployed cashback rate is still `CASHBACK_BPS`;
+phase 2 never changes it). It refuses to run early (`TimelockStillRunning`) and can simply
+be run again if it stopped halfway:
 
 ```bash
 forge script script/Deploy.s.sol --sig "executeWiring()" --rpc-url sepolia --account niara-evm-deployer --broadcast

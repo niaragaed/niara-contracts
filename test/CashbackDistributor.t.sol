@@ -29,13 +29,15 @@ contract CashbackDistributorTest is Test {
     address public treasuryTarget = makeAddr("treasuryTarget");
 
     uint256 public constant TIMELOCK_DELAY = 2 days;
+    /// @dev Rate this suite's distributor is constructed with (the contract has no default).
+    uint16 public constant INITIAL_CASHBACK_BPS = 1_000;
 
     bytes32 public settlementRole;
     bytes32 public treasuryRole;
 
     function setUp() public {
         registry = new ListingRegistry(admin, admin, TIMELOCK_DELAY);
-        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY);
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, INITIAL_CASHBACK_BPS);
         settlementRole = distributor.SETTLEMENT_ROLE();
         treasuryRole = distributor.TREASURY_ROLE();
 
@@ -238,16 +240,92 @@ contract CashbackDistributorTest is Test {
 
     function test_Constructor_RevertsForZeroAdmin() public {
         vm.expectRevert(CashbackDistributor.ZeroAddress.selector);
-        new CashbackDistributor(address(0), address(registry), TIMELOCK_DELAY);
+        new CashbackDistributor(address(0), address(registry), TIMELOCK_DELAY, INITIAL_CASHBACK_BPS);
     }
 
     function test_Constructor_RevertsForZeroListingRegistry() public {
         vm.expectRevert(CashbackDistributor.ZeroAddress.selector);
-        new CashbackDistributor(admin, address(0), TIMELOCK_DELAY);
+        new CashbackDistributor(admin, address(0), TIMELOCK_DELAY, INITIAL_CASHBACK_BPS);
     }
 
     function test_Constructor_SetsListingRegistry() public view {
         assertEq(address(distributor.listingRegistry()), address(registry));
+    }
+
+    // ── cashbackBps: constructor parameter ─────────────────────────────────────────────
+
+    /// @notice There is no default: the rate is the one given at deployment.
+    function test_Constructor_SetsCashbackBps() public {
+        assertEq(distributor.cashbackBps(), INITIAL_CASHBACK_BPS);
+
+        CashbackDistributor other = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 2_000);
+        assertEq(other.cashbackBps(), 2_000);
+    }
+
+    function test_Constructor_AcceptsZeroCashback() public {
+        CashbackDistributor other = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 0);
+        assertEq(other.cashbackBps(), 0);
+    }
+
+    /// @notice The hard cap binds the constructor like every later change: 100% of the fee is
+    /// the most that can be passed on.
+    function test_Constructor_AcceptsCashbackAtTheCap() public {
+        CashbackDistributor other = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 10_000);
+        assertEq(other.cashbackBps(), other.MAX_CASHBACK_BPS());
+    }
+
+    function test_Constructor_RevertsForCashbackAboveTheCap() public {
+        vm.expectRevert(abi.encodeWithSelector(CashbackDistributor.CashbackBpsExceedsCap.selector, uint16(10_001)));
+        new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 10_001);
+    }
+
+    function testFuzz_Constructor_CashbackBoundedByTheCap(uint16 cashbackBps_) public {
+        if (cashbackBps_ > 10_000) {
+            vm.expectRevert(abi.encodeWithSelector(CashbackDistributor.CashbackBpsExceedsCap.selector, cashbackBps_));
+            new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, cashbackBps_);
+        } else {
+            CashbackDistributor other =
+                new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, cashbackBps_);
+            assertEq(other.cashbackBps(), cashbackBps_);
+        }
+    }
+
+    /// @notice A distributor constructed with a rate credits at that rate at once, with no
+    /// proposal or wait.
+    function test_Constructor_RateAppliesFromTheFirstFee() public {
+        CashbackDistributor other = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 2_000);
+        vm.prank(admin);
+        other.proposeGrantRole(settlementRole, settlementCaller);
+        vm.warp(block.timestamp + TIMELOCK_DELAY);
+        vm.prank(admin);
+        other.executeGrantRole(settlementRole, settlementCaller);
+
+        usdt.mint(address(other), 1_000e6);
+        vm.prank(settlementCaller);
+        other.recordFee(address(equityToken), address(usdt), 1_000e6);
+
+        assertEq(other.cashbackBalance(address(equityToken), address(usdt)), 200e6);
+        assertEq(other.protocolBalance(address(usdt)), 800e6);
+    }
+
+    /// @notice The constructor sets the starting rate only: afterwards the timelock governs
+    /// every change, and nothing takes effect before the delay.
+    function test_CashbackBps_AfterConstructionOnlyTheTimelockChangesIt() public {
+        vm.prank(admin);
+        uint256 executeAfter = distributor.proposeSetCashbackBps(2_000);
+        assertEq(executeAfter, block.timestamp + TIMELOCK_DELAY);
+        assertEq(distributor.cashbackBps(), INITIAL_CASHBACK_BPS);
+
+        vm.warp(executeAfter - 1);
+        vm.prank(admin);
+        vm.expectRevert();
+        distributor.executeSetCashbackBps(2_000);
+        assertEq(distributor.cashbackBps(), INITIAL_CASHBACK_BPS);
+
+        vm.warp(executeAfter);
+        vm.prank(admin);
+        distributor.executeSetCashbackBps(2_000);
+        assertEq(distributor.cashbackBps(), 2_000);
     }
 
     // ── Shared protocol pause (held by the ListingRegistry) ───────────────────────────
