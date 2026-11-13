@@ -25,6 +25,11 @@ value. Design decisions already made (and why) are documented in README.md, sect
 
 - **Never commit a private key, a real `.env` or any secret.** `.env.example` exists
   only to document the format; real values stay local, outside git.
+- **No private key or mnemonic in `.env`, ever, and no script that reads one**
+  (`vm.envUint("PRIVATE_KEY")` and the like are forbidden). Signers are Foundry keystores
+  (`~/.foundry/keystores`, passed with `--account`); scripts name them by address
+  (`vm.startBroadcast(address)`). Do not create, import or unlock a keystore yourself:
+  give the user the commands.
 - **No deployment to any network without an explicit request from the user**, neither
   testnet nor mainnet. For now this repository is code and local tests only
   (`forge build` / `forge test`).
@@ -157,6 +162,16 @@ final; if the user asks to adjust it, that is expected.
   `executeWiring()` after the timelock has really elapsed) and `Demo.s.sol` (full flow
   as real transactions). Only used on an explicit deploy request: never trigger
   `--broadcast` on your own; see the README section "Testnet deployment".
+  - **Chain guard:** the scripts run only on Ethereum Sepolia (11155111) and Base Sepolia
+    (84532) and revert `UnsupportedChain` anywhere else (`script/NiaraScriptBase.sol`). Do
+    not add a chain, and never a mainnet, without an explicit request.
+  - Deploy parameters: fee 50 bps (the contract default and cap, only checked by the
+    script) and cashback `CASHBACK_BPS` (default 2000), proposed in phase 1 and executed in
+    phase 2 like every role grant. The script's logic is tested in-process by
+    `test/script/DeployScript.t.sol`; a local simulation uses Anvil started with one of the
+    two chain ids, without `--broadcast`.
+  - `script/tokens/TestnetMockToken.sol` is a test token with no value (open mint). It is
+    deployment tooling, never to be used or described as a real currency.
 
 ## No AI attribution (hard rule)
 

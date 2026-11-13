@@ -166,8 +166,8 @@ Deposits and every leg of an acceptance are checked by balance delta
 (`TransferAmountMismatch`), so a fee-on-transfer token can never enter the escrow.
 Refunds deliberately have no such check: a refund must not gain a way to revert.
 
-Not in the deploy scripts yet: `script/Deploy.s.sol` does not deploy `P2PEscrow` or grant
-it `ESCROW_ROLE` on the distributor.
+`script/Deploy.s.sol` deploys it and grants it `ESCROW_ROLE` on the distributor through
+the timelock (see "Testnet deployment").
 
 ### `governance/TimelockedAccessControl.sol`
 
@@ -220,66 +220,131 @@ needed for a testnet deployment (see the section below).
 
 ---
 
-## Testnet deployment (Sepolia)
+## Testnet deployment (Sepolia and Base Sepolia)
 
-⚠️ Sepolia only. Never mainnet without an explicit request (see CLAUDE.md). Always use
-a **throwaway** wallet created only for testnet, with no real value. The private key
-lives only in the local `.env` (already in `.gitignore`; check with `git status` before
-any commit).
+⚠️ Testnets only: Ethereum Sepolia (chain id 11155111) and Base Sepolia (84532). The
+scripts revert `UnsupportedChain` on any other chain id, mainnets included. Never mainnet
+without an explicit request (see CLAUDE.md). Everything deployed is test code moving test
+tokens with no value; the code has not been audited.
 
-### 1. Prepare the wallet and get test ETH
+`script/Deploy.s.sol` deploys the v1 exchange: `ListingRegistry` (which creates the
+`AssetTokenFactory`), `CashbackDistributor`, `NiaraSettlement`, `P2PEscrow`, and two test
+tokens. Parameters: **fee 50 bps** (the contract's default and hard cap; the script only
+checks it) and **cashback 2000 bps** (20% of the fee, `CASHBACK_BPS`), set through the
+timelock.
 
-1. Generate a new wallet just for this (`cast wallet new`, MetaMask in test mode, etc.).
-   Never reuse a wallet with real funds.
-2. Request Sepolia ETH from a faucet, for example:
-   - https://sepoliafaucet.com/
-   - https://www.alchemy.com/faucets/ethereum-sepolia
-   - https://cloud.google.com/application/web3/faucet/ethereum/sepolia
-3. Copy `.env.example` to `.env` and fill in `RPC_URL` (a Sepolia endpoint: Alchemy,
-   Infura, etc.), `PRIVATE_KEY` (the throwaway wallet's key) and `ETHERSCAN_API_KEY`
-   (for contract verification).
+### 1. The deployer: a Foundry keystore, never a key in `.env`
+
+No script reads a private key or a mnemonic, and `.env` holds none. Every signer is an
+encrypted Foundry keystore in `~/.foundry/keystores`, named on the command line with
+`--account`; forge asks for its password when it signs.
+
+Create a **new, dedicated** deployer used for nothing else. Either generate it straight
+into a keystore (the private key is never displayed):
+
+```bash
+# Git Bash / macOS / Linux
+cast wallet new ~/.foundry/keystores niara-evm-deployer
+# PowerShell
+cast wallet new "$env:USERPROFILE\.foundry\keystores" niara-evm-deployer
+```
+
+or import a key you generated elsewhere (hidden prompts for the key and for a password):
+
+```bash
+cast wallet import niara-evm-deployer --interactive
+```
+
+Then:
+
+```bash
+cast wallet list                                   # the keystore is there
+cast wallet address --account niara-evm-deployer   # its address -> DEPLOYER_ADDRESS
+```
+
+Fund that address with test ETH on each chain (a Sepolia faucet; a Base Sepolia faucet or
+the Base bridge from Sepolia). Copy `.env.example` to `.env` and fill in
+`SEPOLIA_RPC_URL`, `BASE_SEPOLIA_RPC_URL`, `ETHERSCAN_API_KEY` (verification only) and
+`DEPLOYER_ADDRESS`. `LISTING_AUTHORITY_ADDRESS` and `OPERATOR_ADDRESS` are optional and
+default to the deployer; set them (each with its own keystore) to keep the roles in
+distinct wallets, which `script/Demo.s.sol` requires.
+
+On a testnet the deployer is also the **admin of every contract**: a single key, which is
+fine for a testnet and must be stated as such. In production the admin is a multisig.
 
 ### 2. Two-phase deployment (because of the real timelock)
 
-`TimelockedAccessControl.MIN_TIMELOCK_DELAY` is 1 hour; that wait cannot be skipped,
-not even on testnet (see CLAUDE.md). That is why deployment has two phases:
+`TimelockedAccessControl.MIN_TIMELOCK_DELAY` is 1 hour; that wait cannot be skipped, not
+even on testnet (see CLAUDE.md). That is why deployment has two phases. The commands below
+use `sepolia`; for Base Sepolia use `--rpc-url base_sepolia`. The two deployments are
+independent and their addresses are kept apart by the chain-id suffix of the `DEPLOYED_*`
+variables.
 
-**Phase 1: deploy the contracts and schedule (propose) all the role wiring:**
-
-```bash
-forge script script/Deploy.s.sol --rpc-url sepolia
-```
-
-Always run first **without** `--broadcast` (simulation/dry run) and check the output
-before broadcasting for real. Only after confirming, add `--broadcast --verify`:
-
-```bash
-forge script script/Deploy.s.sol --rpc-url sepolia --broadcast --verify
-```
-
-The output lists the deployed addresses (`DEPLOYED_*`); copy them into your local
-`.env`.
-
-**Wait `TIMELOCK_DELAY` seconds** (1 hour by default), then run phase 2, which
-executes (consumes) the phase 1 proposals:
+**Phase 1: deploy the contracts and propose the wiring** (`SETTLEMENT_ROLE` to
+`NiaraSettlement`, `ESCROW_ROLE` to `P2PEscrow`, `SETTLEMENT_OPERATOR_ROLE` to the
+operator, cashback rate to `CASHBACK_BPS`). Always run it first **without** `--broadcast`
+(a dry run: nothing is sent) and read the output:
 
 ```bash
-forge script script/Deploy.s.sol --sig "executeWiring()" --rpc-url sepolia --broadcast
+forge script script/Deploy.s.sol --rpc-url sepolia --account niara-evm-deployer
 ```
 
-### 3. Demo script
-
-With the wiring complete, `script/Demo.s.sol` runs the protocol's full flow as real
-transactions: `requestBacking → attestBacking → mintAttested → settle → cashback
-credited → withdraw`. It needs the same `DEPLOYED_*` variables in `.env`:
+Only after checking the dry run, broadcast:
 
 ```bash
-forge script script/Demo.s.sol --rpc-url sepolia --broadcast
+forge script script/Deploy.s.sol --rpc-url sepolia --account niara-evm-deployer --broadcast --verify
 ```
 
-The demo "buyer" is an account derived automatically by the script (no second private
-key needed); it receives a little test ETH and USDT from the deployer just to approve
-its own side of the settlement.
+The output prints three `DEPLOYED_*_<chainid>` lines; copy them into your local `.env`.
+Nothing can trade yet: without the roles, `settle` and `acceptDeal` revert, and no currency
+is listed.
+
+**Wait `TIMELOCK_DELAY` seconds** (1 hour by default; phase 1 prints the timestamp), then
+run **phase 2**, which executes the proposals, lists the two test currencies and verifies
+the result. It refuses to run early (`TimelockStillRunning`) and can simply be run again
+if it stopped halfway:
+
+```bash
+forge script script/Deploy.s.sol --sig "executeWiring()" --rpc-url sepolia --account niara-evm-deployer --broadcast
+```
+
+If the listing authority is a distinct wallet, it signs the two currency listings: add its
+keystore with a second `--account <name>`.
+
+Read-only check of a finished deployment, any time:
+
+```bash
+forge script script/Deploy.s.sol --sig "verify()" --rpc-url sepolia
+```
+
+### 3. Test tokens
+
+The deployment includes two instances of `script/tokens/TestnetMockToken.sol`:
+`Niara Mock USDT (TESTNET ONLY - NO VALUE)` (`mockUSDT`, the fee token) and
+`Niara Mock BRL (TESTNET ONLY - NO VALUE)` (`mockBRL`), 6 decimals each. They are **test
+tokens with no value**: not USDT, not BRL, not issued by or affiliated with any stablecoin
+issuer. Anyone can mint them (`mint`, up to 1,000,000 per call), which is exactly why they
+can never be worth anything, and lets testers fund their own wallets.
+
+### 4. Local simulation (no network, no broadcast)
+
+`test/script/DeployScript.t.sol` runs both phases in-process on each supported chain id
+(part of `forge test`). To run the real script entry points against a local node, start
+Anvil with a supported chain id and point the script at it, without `--broadcast`:
+
+```bash
+anvil --chain-id 11155111
+forge script script/Deploy.s.sol --rpc-url http://127.0.0.1:8545
+```
+
+## Historical: the July 2026 Sepolia deployment (backed model)
+
+The transactions below are the record of the first Sepolia deployment (2026-07-22),
+made with the previous versions of `script/Deploy.s.sol` and `script/Demo.s.sol`, which
+deployed the backed model (`AssetToken` + `BackingGateway`) and read the deployer key from
+`.env`. Those versions were replaced by the v1 scripts above (they are in the git
+history); the contracts they deployed predate the `ListingRegistry` and are not the v1
+exchange.
 
 ### Demo transactions (Sepolia)
 
@@ -450,6 +515,9 @@ src/
   CashbackDistributor.sol
   P2PEscrow.sol
 script/
+  NiaraScriptBase.sol    (chain guard: Sepolia / Base Sepolia only; deployed addresses per chain)
+  tokens/
+    TestnetMockToken.sol (test tokens with no value: mock USDT and mock BRL)
   Deploy.s.sol           (phase 1: deploy + propose the wiring; phase 2 via --sig "executeWiring()")
   Demo.s.sol             (full flow as real transactions, for public demonstration)
   PresentationDemo.s.sol (2nd demo: same contracts, roles in distinct wallets, for presentations)
@@ -468,6 +536,7 @@ test/
   TimelockedAccessControl.t.sol
   Integration.t.sol              (full flow: backing → settlement → cashback → redemption)
   Invariant.t.sol + invariant/Handler.sol  (stateful fuzzing of the core invariants)
+  script/DeployScript.t.sol      (both deployment phases run in-process, on each chain id)
   P2PEscrow.t.sol                (every path of the escrow, hostile tokens, log order)
   P2PEscrowInvariant.t.sol + invariant/EscrowHandler.sol
                                  (stateful fuzzing of the escrow: Solana invariants 6 and 7)
