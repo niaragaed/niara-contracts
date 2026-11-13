@@ -172,6 +172,10 @@ final; if the user asks to adjust it, that is expected.
     two chain ids, without `--broadcast`.
   - `script/tokens/TestnetMockToken.sol` is a test token with no value (open mint). It is
     deployment tooling, never to be used or described as a real currency.
+  - `Demo.s.sol` runs three flows (equity on the order book, fixed-income P2P deal,
+    mock BRL <-> mock USDT currency deal) with six distinct role wallets, tested in-process
+    by `test/script/DemoScript.t.sol`. `LocalSimulation.s.sol` chains both deploy phases
+    and the demo in one dry run; it only runs against Anvil and is never broadcast.
 
 ## No AI attribution (hard rule)
 

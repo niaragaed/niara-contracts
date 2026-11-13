@@ -337,14 +337,77 @@ anvil --chain-id 11155111
 forge script script/Deploy.s.sol --rpc-url http://127.0.0.1:8545
 ```
 
+### 5. Demo: three flows, six distinct wallets
+
+With both phases complete, `script/Demo.s.sol` runs the exchange end to end as real,
+traceable transactions. Every step is signed by the wallet of its role:
+
+| Flow | Steps | Figures (test tokens) |
+|---|---|---|
+| 1. **Equity**, order book | issuer creates and submits `Niara Demo Equity (TEST)` → listing authority approves → issuer requests an **issuance batch** → listing authority approves it (the registry mints to investor B) → B and A approve → operator **`settle`** → issuer **withdraws cashback** | 100 shares for 10,000 mock USDT; fee 50; cashback 10 (20%) |
+| 2. **Fixed income**, P2P deal | issuer creates and lists `Niara Demo Bond 2030 (TEST)`, batch issued to investor A → A **`openDeal`** (escrows 50 bonds, names B) → B **`acceptDeal`** paying mock USDT → issuer withdraws cashback | 50 bonds for 5,000 mock USDT; fee 25 (paid by A, who receives the USDT); cashback 5 |
+| 3. **Currency**, P2P deal | investor B **`openDeal`** buying mock BRL with mock USDT (escrows the USDT, names A) → A **`acceptDeal`** delivering the BRL | 5,500 mock BRL for 1,000 mock USDT; fee 5 (paid by A, who receives the USDT); **no cashback** |
+
+The six roles must be **six different wallets** (the script refuses to run otherwise):
+deployer/admin, listing authority, settlement operator, issuing company, investor A and
+investor B. The deployer takes no part in the flows; it only tops up the other wallets'
+gas (`DEMO_GAS_FUNDING_WEI`, default 0.02 test ETH each; 0 to fund them yourself). The
+investors take their mock USDT / mock BRL from the tokens' own faucet.
+
+Because the listing authority and the operator are fixed at deployment, set
+`LISTING_AUTHORITY_ADDRESS` and `OPERATOR_ADDRESS` to their own wallets **before phase 1**.
+Create the five extra keystores the same way as the deployer's, and put their addresses
+(never their keys) in `.env`:
+
+```bash
+cast wallet new ~/.foundry/keystores niara-demo-listing-authority   # -> LISTING_AUTHORITY_ADDRESS
+cast wallet new ~/.foundry/keystores niara-demo-operator            # -> OPERATOR_ADDRESS
+cast wallet new ~/.foundry/keystores niara-demo-issuer              # -> DEMO_ISSUER_ADDRESS
+cast wallet new ~/.foundry/keystores niara-demo-investor-a          # -> DEMO_INVESTOR_A_ADDRESS
+cast wallet new ~/.foundry/keystores niara-demo-investor-b          # -> DEMO_INVESTOR_B_ADDRESS
+```
+
+Dry run first (nothing is sent, no keystore needed), then broadcast with one `--account`
+per wallet; forge asks for each password:
+
+```bash
+forge script script/Demo.s.sol --rpc-url sepolia
+
+forge script script/Demo.s.sol --rpc-url sepolia --broadcast \
+  --account niara-evm-deployer --account niara-demo-listing-authority \
+  --account niara-demo-operator --account niara-demo-issuer \
+  --account niara-demo-investor-a --account niara-demo-investor-b
+```
+
+Single flows: `--sig "runEquityFlow()"`, `--sig "runFixedIncomeFlow()"`,
+`--sig "runCurrencyFlow()"`; the gas top-up alone: `--sig "runFundGas()"`. Each run
+creates new instruments, so the demo can be repeated. `test/script/DemoScript.t.sol` runs
+all of it in-process as part of `forge test`.
+
+### 6. Full local simulation in one command
+
+`script/LocalSimulation.s.sol` chains deploy phase 1, the timelock wait (a simulated clock
+jump), phase 2 and the three demo flows in a single dry run against a local Anvil. It
+refuses to run against anything that is not Anvil, and it is never broadcast:
+
+```bash
+anvil --chain-id 11155111            # or --chain-id 84532 for the Base Sepolia path
+forge script script/LocalSimulation.s.sol --rpc-url http://127.0.0.1:8545 --skip-simulation
+```
+
+It uses Anvil's well-known development accounts as the six role wallets. A dry run proves
+the scripts' logic, order and figures on each chain id; it does not exercise keystore
+signing or the real one-hour wait.
+
 ## Historical: the July 2026 Sepolia deployment (backed model)
 
 The transactions below are the record of the first Sepolia deployment (2026-07-22),
-made with the previous versions of `script/Deploy.s.sol` and `script/Demo.s.sol`, which
-deployed the backed model (`AssetToken` + `BackingGateway`) and read the deployer key from
-`.env`. Those versions were replaced by the v1 scripts above (they are in the git
-history); the contracts they deployed predate the `ListingRegistry` and are not the v1
-exchange.
+made with the previous versions of `script/Deploy.s.sol` and `script/Demo.s.sol`, and with
+`script/PresentationDemo.s.sol`, which deployed and exercised the backed model
+(`AssetToken` + `BackingGateway`) and read the deployer key from `.env`. Those versions
+were replaced by the v1 scripts above and `PresentationDemo.s.sol` was removed (all three
+are in the git history, last at commit `e8daf42`); the contracts they deployed predate
+the `ListingRegistry` and are not the v1 exchange.
 
 ### Demo transactions (Sepolia)
 
@@ -519,8 +582,8 @@ script/
   tokens/
     TestnetMockToken.sol (test tokens with no value: mock USDT and mock BRL)
   Deploy.s.sol           (phase 1: deploy + propose the wiring; phase 2 via --sig "executeWiring()")
-  Demo.s.sol             (full flow as real transactions, for public demonstration)
-  PresentationDemo.s.sol (2nd demo: same contracts, roles in distinct wallets, for presentations)
+  Demo.s.sol             (three flows as real transactions, six distinct role wallets)
+  LocalSimulation.s.sol  (both deploy phases + the demo in one dry run, local Anvil only)
 test/
   mocks/
     MockUSDT.sol                 (6 decimals)
@@ -537,6 +600,7 @@ test/
   Integration.t.sol              (full flow: backing → settlement → cashback → redemption)
   Invariant.t.sol + invariant/Handler.sol  (stateful fuzzing of the core invariants)
   script/DeployScript.t.sol      (both deployment phases run in-process, on each chain id)
+  script/DemoScript.t.sol        (the three demo flows run in-process on a scripted deployment)
   P2PEscrow.t.sol                (every path of the escrow, hostile tokens, log order)
   P2PEscrowInvariant.t.sol + invariant/EscrowHandler.sol
                                  (stateful fuzzing of the escrow: Solana invariants 6 and 7)
