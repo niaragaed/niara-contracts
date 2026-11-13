@@ -227,10 +227,18 @@ applies to every Niara repository, including new ones: copy both files when crea
    `fix:` / `refactor:` / `chore:` / `test:`.
 4. Never `--force`, never rewrite history, never push unless asked, never create a
    remote repository unless asked.
-   - **Never use `git checkout`, `git restore` or `git reset` on uncommitted work**:
-     they discard it with no way back. Commit it or `git stash` it first. For a
-     temporary edit (e.g. a mutation check), start from a clean, committed tree and
-     restore the file from a backup copy taken before the edit.
+   - **Never run a git command that changes or discards working-tree files.** Forbidden:
+     `git checkout` (of a path, a branch or a commit), `git restore` without `--staged`
+     (which includes `--worktree` and `--staged --worktree`), `git reset --hard`,
+     `git stash` (in every form) and `git clean`, and anything else that would overwrite
+     or delete uncommitted work. The test is the working tree: if the command can change
+     or remove a file there, do not run it. To set work aside, commit it.
+   - **Unstaging is allowed:** `git restore --staged <path>` only changes the index and
+     never touches a working-tree file. Use that form to take a file out of a commit you
+     are preparing.
+   - For a temporary edit (e.g. a mutation check), start from a clean, committed tree,
+     copy the file to a backup outside the repository before the edit, and put it back
+     from that copy afterwards (a plain file copy, not a git command).
 5. If something breaks or becomes ambiguous: **stop and explain**, do not improvise.
 
 Git identity for this repository: the one the user configured locally (no `--global`,
