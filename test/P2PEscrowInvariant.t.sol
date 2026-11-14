@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test, console2} from "forge-std/Test.sol";
+import {console2} from "forge-std/Test.sol";
+import {ListingFeeHelpers} from "./helpers/ListingFeeHelpers.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {P2PEscrow} from "../src/P2PEscrow.sol";
 import {NiaraSettlement} from "../src/NiaraSettlement.sol";
@@ -23,7 +24,7 @@ import {EscrowHandler} from "./invariant/EscrowHandler.sol";
 /// The `EscrowHandler` predicts the outcome of every escrow call from its own model and
 /// tracks every party's balance of every token; the functions below check, after EVERY
 /// call of the sequence, that the contract agrees with the model.
-contract P2PEscrowInvariantTest is Test {
+contract P2PEscrowInvariantTest is ListingFeeHelpers {
     P2PEscrow public escrow;
     NiaraSettlement public settlement;
     CashbackDistributor public distributor;
@@ -45,6 +46,10 @@ contract P2PEscrowInvariantTest is Test {
     /// @dev bond (FixedIncome), credit (Credit), equity (Equity), usdt, brl, eur.
     address[] internal tokens;
 
+    /// @dev Listing fees the three instruments paid at setup (spec §3.13): protocol revenue
+    /// already in the distributor before the first deal.
+    uint256 internal setupListingFees;
+
     function setUp() public {
         registry = new ListingRegistry(admin, listingAuthority, TIMELOCK_DELAY);
         // 2000 bps: the rate script/Deploy.s.sol constructs the distributor with. The handler
@@ -62,6 +67,7 @@ contract P2PEscrowInvariantTest is Test {
         vm.warp(block.timestamp + TIMELOCK_DELAY);
         vm.prank(admin);
         distributor.executeGrantRole(escrowRole, address(escrow));
+        _wireListingFee(registry, distributor, address(settlement), admin);
 
         actors.push(makeAddr("trader1"));
         actors.push(makeAddr("trader2"));
@@ -127,8 +133,7 @@ contract P2PEscrowInvariantTest is Test {
         token = factory.createAssetToken("Instrument", "INST", assetClass, keccak256("doc"));
         vm.prank(issuer);
         registry.submitListing(token);
-        vm.prank(listingAuthority);
-        registry.approveListing(token);
+        setupListingFees += _approveByFee(registry, listingAuthority, token);
     }
 
     /// @dev Native instruments through approved issuance batches, currencies minted.
@@ -243,8 +248,9 @@ contract P2PEscrowInvariantTest is Test {
     }
 
     /// @notice The distributor's books equal the fees and cashback the model computed from
-    /// each deal's own rates: USDT only, cashback only for the eligible listings, never for
-    /// a Currency.
+    /// each deal's own rates, plus the listing fees paid at setup (protocol revenue, no
+    /// cashback share): USDT only, cashback only for the eligible listings, never for a
+    /// Currency.
     function invariant_FeeAccountingMatchesTheDeals() public view {
         address usdt = tokens[3];
         uint256 cashbackTotal;
@@ -258,8 +264,13 @@ contract P2PEscrowInvariantTest is Test {
                 assertEq(IERC20(tokens[t]).balanceOf(address(distributor)), 0, "distributor holds a non-USDT token");
             }
         }
-        assertEq(distributor.protocolBalance(usdt), handler.ghost_protocolFees(), "protocol fees != model");
-        assertEq(IERC20(usdt).balanceOf(address(distributor)), cashbackTotal + handler.ghost_protocolFees());
+        assertEq(distributor.listingFeesCollected(usdt), setupListingFees, "listing fees != setup");
+        assertEq(
+            distributor.protocolBalance(usdt), handler.ghost_protocolFees() + setupListingFees, "protocol fees != model"
+        );
+        assertEq(
+            IERC20(usdt).balanceOf(address(distributor)), cashbackTotal + handler.ghost_protocolFees() + setupListingFees
+        );
     }
 
     /// @notice A sweep moves exactly the donations, never part of a deposit.

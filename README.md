@@ -97,12 +97,16 @@ Receives the fee (already transferred by `NiaraSettlement`) and credits the issu
 *pull* pattern: amounts accumulate per (asset, settlement currency) and the issuer
 withdraws whenever it wants via `withdraw`. It only credits if
 `AssetToken.cashbackEligible()` is true. The rest of the fee becomes protocol revenue,
-withdrawable by the treasury.
+withdrawable by the treasury. Listing fees (below) land here too, through
+`recordListingFee` (LISTING_REGISTRY_ROLE, held by the registry only): all of a listing
+fee is protocol revenue, with no cashback share, also counted on its own in
+`listingFeesCollected`.
 
 **One shared pause.** `ListingRegistry.pause()` (PAUSER_ROLE, the admin) is the
 protocol's single circuit breaker, the EVM mirror of Solana's `Config.paused`: while it
-is on, `ListingRegistry.approveIssuance`, `NiaraSettlement.settle` and both
-`CashbackDistributor` withdrawals revert with `EnforcedPause()`. `NiaraSettlement` and
+is on, `ListingRegistry.approveIssuance`, `ListingRegistry.payListingFee`,
+`NiaraSettlement.settle` and both `CashbackDistributor` withdrawals revert with
+`EnforcedPause()`. `NiaraSettlement` and
 `CashbackDistributor` have no pause of their own; they read the registry's
 (`governance/ProtocolPausable.sol`). Principle: a pause blocks payouts based on protocol
 accounting, never a user reclaiming their own escrowed deposit. `BackingGateway` and
@@ -123,6 +127,36 @@ the rate changes only through the timelock (`proposeSetCashbackBps` /
 `executeSetCashbackBps`). The number is still provisional; see the code comment: *"TO BE
 DEFINED: the right share is still a business decision (1% of the fee equals 0.005% of
 volume, probably not enough). See the whitepaper, section 4."*
+
+### `ListingRegistry.sol`: the on-chain listing fee
+
+Mirror of `EXCHANGE-MULTICHAIN-DESIGN.md` §3.13. Paying the listing fee is the only way an
+issuer listing is approved for the first time:
+
+- `submitListing` (issuer): `Pending`.
+- `quoteListing(token, valuation, listingFeeBps, expiresAt)` (listing authority): a
+  `Pending` or `Quoted` non-`Currency` listing becomes `Quoted`. `valuation > 0`, in base
+  units of the fee token; `1 <= listingFeeBps <= MAX_LISTING_FEE_BPS = 100` (1%, a hard
+  cap; the 0.1% floor is pricing policy); `now < expiresAt <= now + 30 days`. The fee is
+  `ceil(valuation * listingFeeBps / 10_000)`, in the fee token in force now, which the quote
+  records. Re-quoting replaces the quote, also after it expired. Allowed while paused.
+  Quoting a `Currency` listing reverts (`CurrencyHasNoListingFee`).
+- `payListingFee(token)` (issuer): while `now < quoteExpiresAt`, in the recorded fee token
+  (which must still be `NiaraSettlement.feeToken()`; after a fee-token switch the authority
+  re-quotes), moves the fee from the issuer to the `CashbackDistributor` (balance-delta
+  checked) and approves the listing. Emits `ListingFeePaid`, then `ListingApproved`.
+  Blocked while paused. Payable once.
+- `approveListing` only reinstates a `Suspended` listing (any class, free); on a `Pending`
+  or `Quoted` listing it reverts `ListingFeeNotPaid`. A listing is rejected with `delist`,
+  from `Pending` or `Quoted`.
+- Issuance batches can be requested while `Pending` or `Quoted` and execute only once the
+  listing is `Approved`; they charge no listing fee. `Currency` listings (`listCurrency`)
+  are created `Approved` and never pay one.
+
+The registry reads the fee token and the distributor from `NiaraSettlement`, through a link
+set with the timelock (`proposeSetSettlement` / `executeSetSettlement`; the settlement's
+`listingRegistry()` must be this registry). Until it is set, no fee can be quoted or paid.
+The valuation is public: it is stored on-chain and carried by the events.
 
 ### `P2PEscrow.sol`
 
@@ -301,8 +335,10 @@ variables.
 
 **Phase 1: deploy the contracts** (the `CashbackDistributor` is constructed with
 `CASHBACK_BPS`) **and propose the wiring** (`SETTLEMENT_ROLE` to `NiaraSettlement`,
-`ESCROW_ROLE` to `P2PEscrow`, `SETTLEMENT_OPERATOR_ROLE` to the operator). Always run it
-first **without** `--broadcast` (a dry run: nothing is sent) and read the output:
+`ESCROW_ROLE` to `P2PEscrow`, `LISTING_REGISTRY_ROLE` to the `ListingRegistry`,
+`SETTLEMENT_OPERATOR_ROLE` to the operator, and the registry's link to `NiaraSettlement`
+for the listing fee). Always run it first **without** `--broadcast` (a dry run: nothing is
+sent) and read the output:
 
 ```bash
 forge script script/Deploy.s.sol --rpc-url sepolia --account niara-evm-deployer
@@ -315,13 +351,14 @@ forge script script/Deploy.s.sol --rpc-url sepolia --account niara-evm-deployer 
 ```
 
 The output prints three `DEPLOYED_*_<chainid>` lines; copy them into your local `.env`.
-Nothing can trade yet: without the roles, `settle` and `acceptDeal` revert, and no currency
-is listed.
+Nothing can trade yet: without the roles, `settle` and `acceptDeal` revert, no currency
+is listed, and without the settlement link no listing fee can be quoted, so no issuer
+listing can be approved.
 
 **Wait `TIMELOCK_DELAY` seconds** (1 hour by default; phase 1 prints the timestamp), then
-run **phase 2**, which executes the three role grants, lists the two test currencies and
-verifies the result (including that the deployed cashback rate is still `CASHBACK_BPS`;
-phase 2 never changes it). It refuses to run early (`TimelockStillRunning`) and can simply
+run **phase 2**, which executes the four role grants and the settlement link, lists the
+two test currencies and verifies the result (including that the deployed cashback rate is
+still `CASHBACK_BPS`; phase 2 never changes it). It refuses to run early (`TimelockStillRunning`) and can simply
 be run again if it stopped halfway:
 
 ```bash
@@ -364,8 +401,8 @@ traceable transactions. Every step is signed by the wallet of its role:
 
 | Flow | Steps | Figures (test tokens) |
 |---|---|---|
-| 1. **Equity**, order book | issuer creates and submits `Niara Demo Equity (TEST)` → listing authority approves → issuer requests an **issuance batch** → listing authority approves it (the registry mints to investor B) → B and A approve → operator **`settle`** → issuer **withdraws cashback** | 100 shares for 10,000 mock USDT; fee 50; cashback 10 (20%) |
-| 2. **Fixed income**, P2P deal | issuer creates and lists `Niara Demo Bond 2030 (TEST)`, batch issued to investor A → A **`openDeal`** (escrows 50 bonds, names B) → B **`acceptDeal`** paying mock USDT → issuer withdraws cashback | 50 bonds for 5,000 mock USDT; fee 25 (paid by A, who receives the USDT); cashback 5 |
+| 1. **Equity**, order book | issuer creates and submits `Niara Demo Equity (TEST)` → listing authority **quotes the listing fee** → issuer **pays it** (the listing is approved) → issuer requests an **issuance batch** → listing authority approves it (the registry mints to investor B) → B and A approve → operator **`settle`** → issuer **withdraws cashback** | listing fee 1,000 mock USDT (1,000,000 valuation at 10 bps); 100 shares for 10,000 mock USDT; fee 50; cashback 10 (20%) |
+| 2. **Fixed income**, P2P deal | issuer creates `Niara Demo Bond 2030 (TEST)` and pays its quoted listing fee, batch issued to investor A → A **`openDeal`** (escrows 50 bonds, names B) → B **`acceptDeal`** paying mock USDT → issuer withdraws cashback | listing fee 1,000 mock USDT; 50 bonds for 5,000 mock USDT; fee 25 (paid by A, who receives the USDT); cashback 5 |
 | 3. **Currency**, P2P deal | investor B **`openDeal`** buying mock BRL with mock USDT (escrows the USDT, names A) → A **`acceptDeal`** delivering the BRL | 5,500 mock BRL for 1,000 mock USDT; fee 5 (paid by A, who receives the USDT); **no cashback** |
 
 The six roles must be **six different wallets** (the script refuses to run otherwise):

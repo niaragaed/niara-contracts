@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {console2} from "forge-std/Test.sol";
+import {ListingFeeHelpers} from "./helpers/ListingFeeHelpers.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {BackingGateway} from "../src/BackingGateway.sol";
 import {NiaraSettlement} from "../src/NiaraSettlement.sol";
@@ -16,11 +17,18 @@ import {Handler} from "./invariant/Handler.sol";
 
 /// @notice Stateful fuzzing invariant tests (Foundry `invariant_*`): the `Handler`
 /// runs random sequences of request/attest/mint/burn (via redemptionAttest)/settle/
-/// redeem, listing status changes and native issuance/burns, triggered by different actors
-/// (operator, custodian, settlementOperator, listing authority, native issuer and three
-/// traders), and the functions below check that the protocol's core invariants hold
-/// after EVERY call in the sequence, not only in hand-written scenarios.
-contract InvariantTest is Test {
+/// redeem, listing status changes, listing-fee quotes and payments (spec §3.13) and native
+/// issuance/burns, triggered by different actors (operator, custodian, settlementOperator,
+/// listing authority, native issuer and three traders), and the functions below check that
+/// the protocol's core invariants hold after EVERY call in the sequence, not only in
+/// hand-written scenarios.
+///
+/// Listing fee, like the Solana fuzzer: the two seeded instruments are approved by quote and
+/// payment at setup, and three more issuer listings (Equity, FixedIncome, Credit) start
+/// `Pending`. Random `quoteListing` and `payListingFee` calls have their outcome predicted
+/// exactly, `approveListing` never approves an unpaid listing, and issuance on the new
+/// listings is requested while `Pending` or `Quoted` and executes only once paid.
+contract InvariantTest is ListingFeeHelpers {
     AssetToken public assetEquity;
     AssetToken public assetCommodity;
     BackingGateway public gateway;
@@ -47,6 +55,10 @@ contract InvariantTest is Test {
 
     uint256 public seededNativeEquitySupply;
     uint256 public seededNativeBondSupply;
+
+    /// @dev The three listings that start Pending, and the listing fees paid at setup.
+    address[] public feeListings;
+    uint256 public setupListingFees;
 
     function setUp() public {
         _deployContracts();
@@ -114,11 +126,30 @@ contract InvariantTest is Test {
         }
     }
 
+    /// @dev Submit, then approve by quoting and paying the listing fee (spec §3.13).
     function _submitAndApprove(NativeAssetToken token) internal {
         vm.prank(nativeIssuer);
         registry.submitListing(address(token));
-        vm.prank(listingAuthority);
-        registry.approveListing(address(token));
+        setupListingFees += _approveByFee(registry, listingAuthority, address(token));
+    }
+
+    /// @dev Three more issuer listings, one per issuer class, left Pending for the fuzzer.
+    function _submitFeeListings() internal {
+        AssetTokenFactory factory = registry.factory();
+        IListingRegistry.AssetClass[3] memory classes = [
+            IListingRegistry.AssetClass.Equity,
+            IListingRegistry.AssetClass.FixedIncome,
+            IListingRegistry.AssetClass.Credit
+        ];
+        for (uint256 i = 0; i < classes.length; i++) {
+            vm.prank(nativeIssuer);
+            address token = factory.createAssetToken("Fee Listing", "FEE", classes[i], keccak256(abi.encode("fee", i)));
+            vm.prank(nativeIssuer);
+            registry.submitListing(token);
+            feeListings.push(token);
+        }
+        vm.prank(nativeIssuer);
+        usdt.approve(address(registry), type(uint256).max);
     }
 
     function _seedBatch(NativeAssetToken token, address to, uint256 amount) internal {
@@ -130,6 +161,7 @@ contract InvariantTest is Test {
 
     function _wireRoles() internal {
         // Role wiring: every grant goes through the timelock, as in production.
+        _wireListingFee(registry, distributor, address(settlement), admin);
         _grantRoleOn(address(distributor), distributor.SETTLEMENT_ROLE(), address(settlement));
         _grantRoleOn(address(settlement), settlement.SETTLEMENT_OPERATOR_ROLE(), settlementOperator);
         _grantRoleOn(address(gateway), gateway.OPERATOR_ROLE(), operator);
@@ -152,6 +184,7 @@ contract InvariantTest is Test {
         _listAndSeed(actors);
         seededNativeEquitySupply = nativeEquity.totalSupply();
         seededNativeBondSupply = nativeBond.totalSupply();
+        _submitFeeListings();
 
         handler = new Handler(
             Handler.Config({
@@ -178,6 +211,8 @@ contract InvariantTest is Test {
             })
         );
 
+        handler.initListingFee(feeListings);
+
         // Restricts the invariant fuzzer to the Handler, and within it only to protocol
         // actions, never to helpers inherited from Test (e.g. IS_TEST).
         targetContract(address(handler));
@@ -185,7 +220,7 @@ contract InvariantTest is Test {
     }
 
     function _handlerSelectors() internal pure returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](19);
+        selectors = new bytes4[](21);
         selectors[0] = Handler.requestBacking.selector;
         selectors[1] = Handler.attestBacking.selector;
         selectors[2] = Handler.mintAttested.selector;
@@ -205,6 +240,8 @@ contract InvariantTest is Test {
         selectors[16] = Handler.rejectIssuance.selector;
         selectors[17] = Handler.toggleRegistryPause.selector;
         selectors[18] = Handler.toggleCashbackFreeze.selector;
+        selectors[19] = Handler.quoteListing.selector;
+        selectors[20] = Handler.payListingFee.selector;
     }
 
     function _grantRoleOn(address target, bytes32 role, address account) internal {
@@ -330,6 +367,63 @@ contract InvariantTest is Test {
             seededNativeBondSupply + handler.ghost_nativeIssued(address(nativeBond))
                 - handler.ghost_nativeBurned(address(nativeBond))
         );
+        for (uint256 i = 0; i < feeListings.length; i++) {
+            assertEq(
+                NativeAssetToken(feeListings[i]).totalSupply(),
+                handler.ghost_nativeIssued(feeListings[i]) - handler.ghost_nativeBurned(feeListings[i])
+            );
+        }
+    }
+
+    // ── Invariant 13: listing fee (EXCHANGE-MULTICHAIN-DESIGN.md §3.13) ────────────────
+
+    /// @notice Every `quoteListing` / `payListingFee` outcome was the predicted one, and
+    /// `approveListing` never approved an unpaid listing.
+    function invariant_Inv13_ListingFeeOutcomesMatchThePrediction() public view {
+        assertEq(handler.ghost_listingFeeMismatches(), 0, "listing-fee outcome != prediction");
+        assertEq(handler.ghost_unpaidApprovals(), 0, "approveListing approved an unpaid listing");
+    }
+
+    /// @notice Every non-Currency listing that is Approved or Suspended paid exactly
+    /// `ceil(valuation * listingFeeBps / 10_000)`, once, with `1 <= listingFeeBps <= 100`;
+    /// an unpaid listing has paid nothing; Currency listings have no quote; and the
+    /// distributor's `listingFeesCollected` is the sum of what was paid, every fee counted
+    /// as protocol revenue (spec invariant 13).
+    function invariant_Inv13_ListingFeePaidOnceAndExactly() public view {
+        address[5] memory issuerListings =
+            [address(nativeEquity), address(nativeBond), feeListings[0], feeListings[1], feeListings[2]];
+        uint256 sum;
+        for (uint256 i = 0; i < issuerListings.length; i++) {
+            address token = issuerListings[i];
+            IListingRegistry.ListingStatus status = registry.getListing(token).status;
+            ListingRegistry.ListingFeeQuote memory quote = registry.getListingFeeQuote(token);
+            bool approvedOnce =
+                status == IListingRegistry.ListingStatus.Approved || status == IListingRegistry.ListingStatus.Suspended;
+            if (approvedOnce) {
+                assertGe(quote.listingFeeBps, 1);
+                assertLe(quote.listingFeeBps, registry.MAX_LISTING_FEE_BPS());
+                assertEq(quote.listingFee, (quote.valuation * quote.listingFeeBps + 9_999) / 10_000);
+                assertEq(quote.listingFeePaid, quote.listingFee, "approved without paying the quoted fee");
+            }
+            if (status == IListingRegistry.ListingStatus.Pending || status == IListingRegistry.ListingStatus.Quoted) {
+                assertEq(quote.listingFeePaid, 0, "a payment without approval");
+            }
+            assertLe(handler.ghost_listingFeePayments(token), 1, "paid twice");
+            sum += quote.listingFeePaid;
+        }
+        assertEq(distributor.listingFeesCollected(address(usdt)), sum, "ledger != sum of payments");
+        assertEq(sum, setupListingFees + handler.ghost_sumListingFeesPaid(), "payments != model");
+        assertEq(distributor.listingFeesCollected(address(wbtc)), 0);
+        address[2] memory currencies = [address(usdt), address(wbtc)];
+        for (uint256 c = 0; c < currencies.length; c++) {
+            assertEq(registry.getListingFeeQuote(currencies[c]).listingFee, 0, "a Currency listing was quoted");
+        }
+    }
+
+    /// @dev Printed with `-vv`: how much of the listing-fee paths the last run exercised.
+    function afterInvariant() public view {
+        console2.log("listing-fee quotes  ", handler.ghost_quotes());
+        console2.log("listing-fee payments", handler.ghost_payments());
     }
 
     /// @notice No batch executes unless the listing is Approved and the registry is not

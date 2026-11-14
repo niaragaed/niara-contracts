@@ -23,10 +23,14 @@ import {TestnetMockToken} from "./tokens/TestnetMockToken.sol";
 /// PHASE 1, `run()`: deploys the two mock test tokens, the ListingRegistry (which creates
 /// the AssetTokenFactory), the CashbackDistributor, NiaraSettlement and P2PEscrow, and
 /// PROPOSES the wiring:
-///   - SETTLEMENT_ROLE on the distributor  -> NiaraSettlement
-///   - ESCROW_ROLE on the distributor      -> P2PEscrow
-///   - SETTLEMENT_OPERATOR_ROLE            -> the settlement operator
-/// Nothing can trade yet: without those roles `settle` and `acceptDeal` revert.
+///   - SETTLEMENT_ROLE on the distributor        -> NiaraSettlement
+///   - ESCROW_ROLE on the distributor            -> P2PEscrow
+///   - LISTING_REGISTRY_ROLE on the distributor  -> ListingRegistry (records listing fees)
+///   - SETTLEMENT_OPERATOR_ROLE                  -> the settlement operator
+///   - the registry's settlement link            -> NiaraSettlement (fee token and
+///     distributor of the listing fee, spec §3.13)
+/// Nothing can trade yet: without those roles `settle` and `acceptDeal` revert, and without
+/// the link no listing fee can be quoted or paid, so no issuer listing can be approved.
 ///
 /// PHASE 2, `executeWiring()`: once the timelock has really elapsed on-chain, EXECUTES those
 /// proposals, lists the two mock currencies (signed by the listing authority) and verifies
@@ -82,6 +86,10 @@ contract DeployNiara is NiaraScriptBase {
     error TimelockStillRunning(uint256 executeAfter, uint256 nowTimestamp);
     error ListingAuthorityMismatch(address configured);
     error WiringIncomplete(string what);
+
+    /// @notice Number of timelocked proposals phase 1 makes (four role grants and the
+    /// registry's settlement link).
+    uint256 public constant WIRING_PROPOSALS = 5;
 
     // ── Entry points ───────────────────────────────────────────────────────────────────
 
@@ -167,7 +175,9 @@ contract DeployNiara is NiaraScriptBase {
 
         d.distributor.proposeGrantRole(d.distributor.SETTLEMENT_ROLE(), address(d.settlement));
         d.distributor.proposeGrantRole(d.distributor.ESCROW_ROLE(), address(d.escrow));
+        d.distributor.proposeGrantRole(d.distributor.LISTING_REGISTRY_ROLE(), address(d.registry));
         d.settlement.proposeGrantRole(d.settlement.SETTLEMENT_OPERATOR_ROLE(), cfg.operator);
+        d.registry.proposeSetSettlement(address(d.settlement));
 
         vm.stopBroadcast();
     }
@@ -192,6 +202,7 @@ contract DeployNiara is NiaraScriptBase {
 
         bytes32 settlementRole = d.distributor.SETTLEMENT_ROLE();
         bytes32 escrowRole = d.distributor.ESCROW_ROLE();
+        bytes32 listingRegistryRole = d.distributor.LISTING_REGISTRY_ROLE();
         bytes32 operatorRole = d.settlement.SETTLEMENT_OPERATOR_ROLE();
 
         vm.startBroadcast(cfg.deployer);
@@ -201,8 +212,14 @@ contract DeployNiara is NiaraScriptBase {
         if (!d.distributor.hasRole(escrowRole, address(d.escrow))) {
             d.distributor.executeGrantRole(escrowRole, address(d.escrow));
         }
+        if (!d.distributor.hasRole(listingRegistryRole, address(d.registry))) {
+            d.distributor.executeGrantRole(listingRegistryRole, address(d.registry));
+        }
         if (!d.settlement.hasRole(operatorRole, cfg.operator)) {
             d.settlement.executeGrantRole(operatorRole, cfg.operator);
+        }
+        if (address(d.registry.settlement()) != address(d.settlement)) {
+            d.registry.executeSetSettlement(address(d.settlement));
         }
         vm.stopBroadcast();
 
@@ -223,16 +240,20 @@ contract DeployNiara is NiaraScriptBase {
     /// @param d The phase 1 deployment.
     /// @return executeAfter The latest `executeAfter` among the pending proposals.
     function wiringExecutableAt(Config memory cfg, Deployment memory d) public view returns (uint256 executeAfter) {
-        uint256[3] memory pending = [
+        uint256[WIRING_PROPOSALS] memory pending = [
             d.distributor.pendingActions(
                 keccak256(abi.encode("GRANT_ROLE", d.distributor.SETTLEMENT_ROLE(), address(d.settlement)))
             ),
             d.distributor.pendingActions(
                 keccak256(abi.encode("GRANT_ROLE", d.distributor.ESCROW_ROLE(), address(d.escrow)))
             ),
+            d.distributor.pendingActions(
+                keccak256(abi.encode("GRANT_ROLE", d.distributor.LISTING_REGISTRY_ROLE(), address(d.registry)))
+            ),
             d.settlement.pendingActions(
                 keccak256(abi.encode("GRANT_ROLE", d.settlement.SETTLEMENT_OPERATOR_ROLE(), cfg.operator))
-            )
+            ),
+            d.registry.pendingActions(keccak256(abi.encode("SET_SETTLEMENT", address(d.settlement))))
         ];
         for (uint256 i = 0; i < pending.length; i++) {
             if (pending[i] > executeAfter) executeAfter = pending[i];
@@ -255,8 +276,14 @@ contract DeployNiara is NiaraScriptBase {
         if (!d.distributor.hasRole(d.distributor.ESCROW_ROLE(), address(d.escrow))) {
             revert WiringIncomplete("ESCROW_ROLE -> P2PEscrow");
         }
+        if (!d.distributor.hasRole(d.distributor.LISTING_REGISTRY_ROLE(), address(d.registry))) {
+            revert WiringIncomplete("LISTING_REGISTRY_ROLE -> ListingRegistry");
+        }
         if (!d.settlement.hasRole(d.settlement.SETTLEMENT_OPERATOR_ROLE(), cfg.operator)) {
             revert WiringIncomplete("SETTLEMENT_OPERATOR_ROLE -> operator");
+        }
+        if (address(d.registry.settlement()) != address(d.settlement)) {
+            revert WiringIncomplete("ListingRegistry.settlement -> NiaraSettlement");
         }
         if (!d.registry.hasRole(d.registry.LISTING_AUTHORITY_ROLE(), cfg.listingAuthority)) {
             revert WiringIncomplete("LISTING_AUTHORITY_ROLE -> listing authority");

@@ -23,4 +23,10 @@ interface ICashbackDistributor {
     function recordDealFee(address assetToken, address feeToken, uint256 feeAmount, uint16 dealCashbackBps)
         external
         returns (uint256 cashbackAmount);
+
+    /// @notice Records a listing fee already transferred to this contract, all of it as
+    /// protocol revenue (no cashback share).
+    /// @dev The caller (the ListingRegistry) is responsible for having transferred `amount`
+    /// of `feeToken` to the CashbackDistributor before the call.
+    function recordListingFee(address assetToken, address feeToken, uint256 amount) external;
 }

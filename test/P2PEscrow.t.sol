@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test, Vm} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Test.sol";
+import {ListingFeeHelpers} from "./helpers/ListingFeeHelpers.sol";
 import {P2PEscrow} from "../src/P2PEscrow.sol";
 import {NiaraSettlement} from "../src/NiaraSettlement.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
@@ -19,7 +20,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 /// @notice Unit tests of P2PEscrow, the EVM mirror of the Solana deals. `alice` is the
 /// proposer and `bob` the named counterparty unless a test says otherwise.
-contract P2PEscrowTest is Test {
+contract P2PEscrowTest is ListingFeeHelpers {
     P2PEscrow public escrow;
     NiaraSettlement public settlement;
     CashbackDistributor public distributor;
@@ -73,6 +74,7 @@ contract P2PEscrowTest is Test {
         treasuryRole = escrow.TREASURY_ROLE();
         escrowRole = distributor.ESCROW_ROLE();
         _distributorGrantRole(distributor, escrowRole, address(escrow));
+        _wireListingFee(registry, distributor, address(settlement), admin);
 
         bond = _issueListedNative(IListingRegistry.AssetClass.FixedIncome);
         credit = _issueListedNative(IListingRegistry.AssetClass.Credit);
@@ -108,7 +110,9 @@ contract P2PEscrowTest is Test {
         target.executeGrantRole(role, account);
     }
 
-    /// @dev A listed, approved native instrument with NATIVE_START issued to alice and bob.
+    /// @dev A listed native instrument, approved by paying its listing fee (spec §3.13; the
+    /// treasury then withdraws it, so the distributor holds only deal fees), with
+    /// NATIVE_START issued to alice and bob.
     function _issueListedNative(IListingRegistry.AssetClass assetClass) internal returns (NativeAssetToken token) {
         // Resolved before the prank: `registry.factory()` is an external call and would
         // consume it (see the note at the top of test/AssetToken.t.sol).
@@ -117,8 +121,7 @@ contract P2PEscrowTest is Test {
         token = NativeAssetToken(factory.createAssetToken("Instrument", "INST", assetClass, DOC_HASH));
         vm.prank(issuer);
         registry.submitListing(address(token));
-        vm.prank(listingAuthority);
-        registry.approveListing(address(token));
+        _approveByFeeAndWithdraw(registry, distributor, listingAuthority, admin, makeAddr("listingFeeSink"), address(token));
         address[2] memory holders = [alice, bob];
         for (uint256 i = 0; i < holders.length; i++) {
             vm.prank(issuer);
@@ -493,6 +496,21 @@ contract P2PEscrowTest is Test {
 
         _expectOpenRevert(
             _terms(pending, address(usdt), SELL), abi.encodeWithSelector(P2PEscrow.ListingNotApproved.selector, pending)
+        );
+    }
+
+    /// @notice A listing whose fee is quoted but not paid is not tradable (spec §3.13).
+    function test_OpenDeal_RevertsForQuotedAsset() public {
+        AssetTokenFactory factory = registry.factory();
+        vm.prank(issuer);
+        address quoted = factory.createAssetToken("Quoted", "QTD", IListingRegistry.AssetClass.FixedIncome, DOC_HASH);
+        vm.prank(issuer);
+        registry.submitListing(quoted);
+        vm.prank(listingAuthority);
+        registry.quoteListing(quoted, 1_000_000e6, 10, uint64(block.timestamp + 1 days));
+
+        _expectOpenRevert(
+            _terms(quoted, address(usdt), SELL), abi.encodeWithSelector(P2PEscrow.ListingNotApproved.selector, quoted)
         );
     }
 

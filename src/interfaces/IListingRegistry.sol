@@ -17,13 +17,16 @@ interface IListingRegistry {
         Currency
     }
 
-    /// @notice Listing lifecycle. `None` means "no listing". `Delisted` is final.
+    /// @notice Listing lifecycle. `None` means "no listing". `Delisted` is final. `Quoted`
+    /// (an issuer listing with an open listing-fee quote, spec §3.13) is appended last, as
+    /// on Solana, so the earlier values keep their numbers.
     enum ListingStatus {
         None,
         Pending,
         Approved,
         Suspended,
-        Delisted
+        Delisted,
+        Quoted
     }
 
     struct Listing {

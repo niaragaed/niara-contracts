@@ -7,6 +7,8 @@ import {DeployNiara} from "../../script/Deploy.s.sol";
 import {DemoNiaraFlows} from "../../script/Demo.s.sol";
 import {NiaraScriptBase} from "../../script/NiaraScriptBase.sol";
 import {NativeAssetToken} from "../../src/NativeAssetToken.sol";
+import {ListingRegistry} from "../../src/ListingRegistry.sol";
+import {NiaraSettlement} from "../../src/NiaraSettlement.sol";
 import {IListingRegistry} from "../../src/interfaces/IListingRegistry.sol";
 
 /// @notice Runs `script/Demo.s.sol` in-process on top of a deployment made by
@@ -55,12 +57,14 @@ contract DemoScriptTest is Test {
     // ── Flow 1: equity ─────────────────────────────────────────────────────────────────
 
     /// @notice 100 shares for 10,000 mock USDT at 50 bps: fee 50, of which 20% (10) is the
-    /// issuer's cashback and 40 stays with the protocol.
+    /// issuer's cashback and 40 stays with the protocol, on top of the 1,000 mock USDT
+    /// listing fee (all protocol revenue).
     function test_EquityFlow_IssuesSettlesAndPaysCashback() public {
         DemoNiaraFlows.Outcome memory out = demo.equityFlow(roles, d);
 
         assertEq(out.fee, 50e6);
         assertEq(out.cashback, 10e6);
+        assertEq(out.listingFee, 1_000e6);
 
         IERC20 share = IERC20(out.instrument);
         assertEq(share.totalSupply(), 1_000 ether);
@@ -70,9 +74,23 @@ contract DemoScriptTest is Test {
         assertEq(usdt.balanceOf(roles.investorA), 0);
         assertEq(usdt.balanceOf(roles.investorB), 9_950e6);
         assertEq(usdt.balanceOf(roles.issuer), 10e6);
-        assertEq(usdt.balanceOf(address(d.distributor)), 40e6);
-        assertEq(d.distributor.protocolBalance(address(usdt)), 40e6);
+        assertEq(usdt.balanceOf(address(d.distributor)), 1_040e6);
+        assertEq(d.distributor.protocolBalance(address(usdt)), 1_040e6);
         assertEq(d.distributor.cashbackBalance(out.instrument, address(usdt)), 0);
+    }
+
+    /// @notice The share is approved by the listing fee (spec §3.13): 1,000,000 mock USDT
+    /// valuation at 10 bps, quoted by the listing authority and paid by the issuer.
+    function test_EquityFlow_PaysTheQuotedListingFee() public {
+        DemoNiaraFlows.Outcome memory out = demo.equityFlow(roles, d);
+
+        ListingRegistry.ListingFeeQuote memory quote = d.registry.getListingFeeQuote(out.instrument);
+        assertEq(quote.valuation, 1_000_000e6);
+        assertEq(quote.listingFeeBps, 10);
+        assertEq(quote.listingFee, 1_000e6);
+        assertEq(quote.listingFeePaid, 1_000e6);
+        assertEq(quote.listingFeeToken, address(usdt));
+        assertEq(d.distributor.listingFeesCollected(address(usdt)), 1_000e6);
     }
 
     function test_EquityFlow_CreatesAnApprovedEquityListingNamedAsATest() public {
@@ -93,13 +111,15 @@ contract DemoScriptTest is Test {
 
     // ── Flow 2: fixed income ───────────────────────────────────────────────────────────
 
-    /// @notice 50 bonds for 5,000 mock USDT: fee 25, cashback 5, protocol 20. The seller
-    /// (investor A, the proposer) receives the USDT and pays the fee.
+    /// @notice 50 bonds for 5,000 mock USDT: fee 25, cashback 5, protocol 20 (plus the bond's
+    /// 1,000 mock USDT listing fee). The seller (investor A, the proposer) receives the USDT
+    /// and pays the fee.
     function test_FixedIncomeFlow_DealExecutesAndPaysCashback() public {
         DemoNiaraFlows.Outcome memory out = demo.fixedIncomeFlow(roles, d);
 
         assertEq(out.fee, 25e6);
         assertEq(out.cashback, 5e6);
+        assertEq(out.listingFee, 1_000e6);
 
         IERC20 bond = IERC20(out.instrument);
         assertEq(bond.totalSupply(), 500 ether);
@@ -111,7 +131,7 @@ contract DemoScriptTest is Test {
         assertEq(usdt.balanceOf(roles.investorA), 4_975e6);
         assertEq(usdt.balanceOf(roles.investorB), 0);
         assertEq(usdt.balanceOf(roles.issuer), 5e6);
-        assertEq(d.distributor.protocolBalance(address(usdt)), 20e6);
+        assertEq(d.distributor.protocolBalance(address(usdt)), 1_020e6);
     }
 
     function test_FixedIncomeFlow_CreatesAnApprovedFixedIncomeListingNamedAsATest() public {
@@ -135,6 +155,7 @@ contract DemoScriptTest is Test {
         assertEq(out.instrument, address(brl));
         assertEq(out.fee, 5e6);
         assertEq(out.cashback, 0);
+        assertEq(out.listingFee, 0, "a currency pays no listing fee");
 
         assertEq(brl.balanceOf(roles.investorB), 5_500e6);
         assertEq(brl.balanceOf(roles.investorA), 0);
@@ -151,13 +172,15 @@ contract DemoScriptTest is Test {
     // ── All three ──────────────────────────────────────────────────────────────────────
 
     /// @notice The three flows together: fees 50 + 25 + 5 = 80 mock USDT, of which 15 went to
-    /// the issuer as cashback and 65 is protocol revenue, all of it in the distributor.
+    /// the issuer as cashback and 65 is protocol revenue, plus two listing fees of 1,000
+    /// (protocol revenue, no cashback): 2,065 in the distributor.
     function test_RunAll_TotalsAcrossTheThreeFlows() public {
         demo.runAll(roles, d);
 
         assertEq(usdt.balanceOf(roles.issuer), 15e6);
-        assertEq(d.distributor.protocolBalance(address(usdt)), 65e6);
-        assertEq(usdt.balanceOf(address(d.distributor)), 65e6);
+        assertEq(d.distributor.protocolBalance(address(usdt)), 2_065e6);
+        assertEq(d.distributor.listingFeesCollected(address(usdt)), 2_000e6);
+        assertEq(usdt.balanceOf(address(d.distributor)), 2_065e6);
         assertEq(brl.balanceOf(address(d.distributor)), 0);
         assertEq(usdt.balanceOf(address(d.escrow)), 0);
         // Investor A: bought shares (-10,000 from the faucet), sold bonds (+4,975), sold BRL (+995).
@@ -184,7 +207,8 @@ contract DemoScriptTest is Test {
         demo.runAll(roles, d);
 
         assertEq(usdt.balanceOf(roles.issuer), 30e6);
-        assertEq(d.distributor.protocolBalance(address(usdt)), 130e6);
+        assertEq(d.distributor.protocolBalance(address(usdt)), 4_130e6);
+        assertEq(d.distributor.listingFeesCollected(address(usdt)), 4_000e6);
     }
 
     function test_RunAll_OnBaseSepolia() public {
@@ -295,6 +319,43 @@ contract DemoScriptTest is Test {
         demo.currencyFlow(roles, d);
     }
 
+    /// @notice Without the registry's link to this NiaraSettlement no listing fee can be paid
+    /// here: the demo says so up front.
+    function test_RequireReady_RevertsWhenTheRegistryIsLinkedElsewhere() public {
+        NiaraSettlement other = new NiaraSettlement(
+            roles.deployer, address(d.distributor), address(d.registry), address(usdt), cfg.timelockDelay
+        );
+        vm.prank(roles.deployer);
+        d.registry.proposeSetSettlement(address(other));
+        vm.warp(block.timestamp + cfg.timelockDelay);
+        vm.prank(roles.deployer);
+        d.registry.executeSetSettlement(address(other));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DemoNiaraFlows.DemoNotReady.selector, "registry not linked to NiaraSettlement (deploy phase 2 not run?)"
+            )
+        );
+        demo.equityFlow(roles, d);
+    }
+
+    function test_RequireReady_RevertsWhenTheRegistryCannotRecordListingFees() public {
+        bytes32 role = d.distributor.LISTING_REGISTRY_ROLE();
+        vm.prank(roles.deployer);
+        d.distributor.proposeRevokeRole(role, address(d.registry));
+        vm.warp(block.timestamp + cfg.timelockDelay);
+        vm.prank(roles.deployer);
+        d.distributor.executeRevokeRole(role, address(d.registry));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DemoNiaraFlows.DemoNotReady.selector,
+                "ListingRegistry lacks LISTING_REGISTRY_ROLE (deploy phase 2 not run?)"
+            )
+        );
+        demo.fixedIncomeFlow(roles, d);
+    }
+
     function test_RequireReady_PassesOnAFinishedDeployment() public view {
         demo.requireReady(roles, d);
     }
@@ -364,5 +425,8 @@ contract DemoScriptTest is Test {
         assertEq(demo.FX_BRL_AMOUNT(), 5_500e6);
         assertEq(demo.FX_USDT_AMOUNT(), 1_000e6);
         assertEq(demo.DEAL_LIFETIME(), 1 days);
+        assertEq(demo.LISTING_VALUATION(), 1_000_000e6);
+        assertEq(demo.LISTING_FEE_BPS(), 10);
+        assertEq(demo.QUOTE_LIFETIME(), 7 days);
     }
 }

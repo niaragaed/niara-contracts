@@ -86,6 +86,9 @@ explaining why:
   `emit RedemptionRequestCancelled` before the `safeTransfer` that returns the tokens.
 - `ListingRegistry.approveIssuance`: batch `Executed`, `resolvedAt` and
   `emit IssuanceExecuted` before `NativeAssetToken.mint`.
+- `ListingRegistry.payListingFee`: `listingFeePaid`, status `Approved`, `approvedAt`,
+  `emit ListingFeePaid` and `emit ListingApproved` before the `safeTransferFrom` that pulls
+  the listing fee into the distributor.
 - `CashbackDistributor.withdraw`: the cashback balance zeroed and
   `emit CashbackWithdrawn` before the `safeTransfer` to the issuer.
 - `CashbackDistributor.withdrawProtocolFees`: the protocol balance decreased and
@@ -111,6 +114,7 @@ weaken these tests when changing those functions:
   (these three in `test/BackingGateway.t.sol`)
 - `test_ApproveIssuance_EmitsIssuanceExecutedBeforeExternalTransfer`
   (`test/ListingRegistry.t.sol`)
+- `test_PayListingFee_EmitsListingFeePaidBeforeExternalTransfer` (`test/ListingFee.t.sol`)
 - `test_Withdraw_EmitsCashbackWithdrawnBeforeExternalTransfer`
 - `test_WithdrawProtocolFees_EmitsProtocolFeesWithdrawnBeforeExternalTransfer`
   (these two in `test/CashbackDistributor.t.sol`)
@@ -133,7 +137,8 @@ the fee transfer, because the distributor accounts for a fee that must already b
 its balance. It is an internal protocol call and any failure reverts the whole
 transaction, event included. It is commented in the code; if you need to change that
 order, discuss it first. `P2PEscrow.acceptDeal` has the same exception for the same
-reason: `cashbackDistributor.recordDealFee` comes after the fee transfer.
+reason: `cashbackDistributor.recordDealFee` comes after the fee transfer. So does
+`ListingRegistry.payListingFee`: `recordListingFee` comes after the listing-fee transfer.
 
 **P2PEscrow refunds are never blocked.** `cancelDeal` and `expireDeal` must not read the
 registry, `NiaraSettlement` or the pause, and must not gain any new way to revert (no
@@ -170,8 +175,9 @@ that is expected. Do not reintroduce a hardcoded default in the contract.
     not add a chain, and never a mainnet, without an explicit request.
   - Deploy parameters: fee 50 bps (the contract default and cap, only checked by the
     script) and cashback `CASHBACK_BPS` (default 2000), passed to the `CashbackDistributor`
-    constructor in phase 1. The deployment proposes and executes only the three role
-    grants; it never uses the timelock for the cashback rate, and phase 2 only checks it.
+    constructor in phase 1. The deployment proposes and executes only the four role
+    grants and the registry's settlement link (the listing fee needs it); it never uses the
+    timelock for the cashback rate, and phase 2 only checks it.
     The script's logic is tested in-process by
     `test/script/DeployScript.t.sol`; a local simulation uses Anvil started with one of the
     two chain ids, without `--broadcast`.

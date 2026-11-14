@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
+import {NiaraSettlement} from "../src/NiaraSettlement.sol";
+import {ListingFeeHelpers} from "./helpers/ListingFeeHelpers.sol";
 import {ListingRegistry} from "../src/ListingRegistry.sol";
 import {AssetTokenFactory} from "../src/AssetTokenFactory.sol";
 import {NativeAssetToken} from "../src/NativeAssetToken.sol";
@@ -15,7 +17,7 @@ import {MaliciousHookToken} from "./mocks/MaliciousHookToken.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
-contract CashbackDistributorTest is Test {
+contract CashbackDistributorTest is ListingFeeHelpers {
     CashbackDistributor public distributor;
     ListingRegistry public registry;
     AssetToken public equityToken;
@@ -423,8 +425,15 @@ contract CashbackDistributorTest is Test {
     // ── Per-listing cashback freeze (spec §9.5) ────────────────────────────────────────
 
     /// @dev A listed native Equity whose issuer is `issuer`. The registry's listing authority
-    /// is `admin` in this suite.
+    /// is `admin` in this suite. The listing is approved by paying its listing fee (spec
+    /// §3.13), which needs a NiaraSettlement linked to the registry; the treasury then
+    /// withdraws that fee, so this suite's figures only count the fees it records itself.
     function _listedNative() internal returns (NativeAssetToken token) {
+        if (address(registry.settlement()) == address(0)) {
+            NiaraSettlement settlement =
+                new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);
+            _wireListingFee(registry, distributor, address(settlement), admin);
+        }
         AssetTokenFactory factory = registry.factory();
         vm.prank(issuer);
         token = NativeAssetToken(
@@ -432,8 +441,7 @@ contract CashbackDistributorTest is Test {
         );
         vm.prank(issuer);
         registry.submitListing(address(token));
-        vm.prank(admin);
-        registry.approveListing(address(token));
+        _approveByFeeAndWithdraw(registry, distributor, admin, admin, makeAddr("listingFeeSink"), address(token));
     }
 
     function _recordNativeFee(NativeAssetToken asset, uint256 feeAmount) internal {
@@ -808,5 +816,92 @@ contract CashbackDistributorTest is Test {
         NativeAssetToken acme = _listedNative();
         _pauseProtocol();
         assertEq(_recordDealFee(address(acme), 1_000e6, 2_500), 250e6);
+    }
+
+    // ── recordListingFee (ListingRegistry, spec §3.13) ─────────────────────────────────
+
+    address internal registryCaller = makeAddr("registryCaller");
+
+    function _grantListingRegistryRole() internal returns (bytes32 role) {
+        role = distributor.LISTING_REGISTRY_ROLE();
+        _grantRole(role, registryCaller);
+    }
+
+    function test_RecordListingFee_OnlyListingRegistryRole() public {
+        bytes32 role = _grantListingRegistryRole();
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, role));
+        distributor.recordListingFee(address(equityToken), address(usdt), 100e6);
+    }
+
+    /// @notice The listing-fee entry point is separate from the trading-fee ones, both ways.
+    function test_RecordListingFee_RolesAreNotInterchangeable() public {
+        bytes32 role = _grantListingRegistryRole();
+        vm.prank(settlementCaller);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, settlementCaller, role)
+        );
+        distributor.recordListingFee(address(equityToken), address(usdt), 100e6);
+
+        vm.prank(registryCaller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, registryCaller, settlementRole
+            )
+        );
+        distributor.recordFee(address(equityToken), address(usdt), 100e6);
+    }
+
+    function test_RecordListingFee_RevertsForZeroAmount() public {
+        _grantListingRegistryRole();
+        vm.prank(registryCaller);
+        vm.expectRevert(CashbackDistributor.ZeroFeeAmount.selector);
+        distributor.recordListingFee(address(equityToken), address(usdt), 0);
+    }
+
+    /// @notice All of a listing fee is protocol revenue: no cashback share, even for a
+    /// cashback-eligible asset, and it is counted apart from trading fees.
+    function test_RecordListingFee_AllProtocolRevenueNoCashback() public {
+        _grantListingRegistryRole();
+        _recordFee(equityToken, 1_000e6); // a trading fee first: 100 cashback, 900 protocol
+        usdt.mint(address(distributor), 5_000e6);
+
+        vm.recordLogs();
+        vm.prank(registryCaller);
+        distributor.recordListingFee(address(equityToken), address(usdt), 5_000e6);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1, "only ListingFeeRecorded: no CashbackCredited");
+        assertEq(logs[0].topics[0], keccak256("ListingFeeRecorded(address,address,uint256)"));
+        assertEq(address(uint160(uint256(logs[0].topics[1]))), address(equityToken));
+        assertEq(address(uint160(uint256(logs[0].topics[2]))), address(usdt));
+        assertEq(abi.decode(logs[0].data, (uint256)), 5_000e6);
+
+        assertEq(distributor.cashbackBalance(address(equityToken), address(usdt)), 100e6);
+        assertEq(distributor.protocolBalance(address(usdt)), 900e6 + 5_000e6);
+        assertEq(distributor.listingFeesCollected(address(usdt)), 5_000e6);
+    }
+
+    /// @notice Listing fees are withdrawable by the treasury with the trading fees' protocol
+    /// share; `listingFeesCollected` is a historical sum that withdrawals do not reduce.
+    function test_RecordListingFee_WithdrawableByTreasury() public {
+        _grantListingRegistryRole();
+        usdt.mint(address(distributor), 5_000e6);
+        vm.prank(registryCaller);
+        distributor.recordListingFee(address(equityToken), address(usdt), 5_000e6);
+
+        vm.prank(admin);
+        distributor.withdrawProtocolFees(address(usdt), treasuryTarget, 5_000e6);
+        assertEq(usdt.balanceOf(treasuryTarget), 5_000e6);
+        assertEq(distributor.protocolBalance(address(usdt)), 0);
+        assertEq(distributor.listingFeesCollected(address(usdt)), 5_000e6);
+    }
+
+    /// @notice Like `recordFee`, it is not paused: it only runs inside `payListingFee`, which is.
+    function test_RecordListingFee_NotBlockedByPause() public {
+        _grantListingRegistryRole();
+        _pauseProtocol();
+        vm.prank(registryCaller);
+        distributor.recordListingFee(address(equityToken), address(usdt), 1e6);
+        assertEq(distributor.listingFeesCollected(address(usdt)), 1e6);
     }
 }

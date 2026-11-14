@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test, Vm} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Test.sol";
+import {ListingFeeHelpers} from "./helpers/ListingFeeHelpers.sol";
 import {NiaraSettlement} from "../src/NiaraSettlement.sol";
 import {CashbackDistributor} from "../src/CashbackDistributor.sol";
 import {AssetToken} from "../src/AssetToken.sol";
@@ -21,7 +22,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
-contract NiaraSettlementTest is Test {
+contract NiaraSettlementTest is ListingFeeHelpers {
     NiaraSettlement public settlement;
     CashbackDistributor public distributor;
     ListingRegistry public registry;
@@ -59,6 +60,7 @@ contract NiaraSettlementTest is Test {
 
         _distributorGrantRole(settlementRoleOnDistributor, address(settlement));
         _settlementGrantRole(settlementOperatorRole, operator);
+        _wireListingFee(registry, distributor, address(settlement), admin);
 
         // Native Equity instrument: issued by the issuer, listed, approved, and a 1,000-unit
         // batch issued to the seller through the registry.
@@ -112,8 +114,9 @@ contract NiaraSettlementTest is Test {
 
     // ── Listing helpers ────────────────────────────────────────────────────────────────
 
-    /// @dev Creates a native instrument, submits and approves its listing, and issues
-    /// `amount` to `to` through an approved batch.
+    /// @dev Creates a native instrument, submits its listing, approves it by paying the
+    /// listing fee (spec §3.13; the treasury then withdraws that fee, so the distributor holds
+    /// only this suite's trading fees), and issues `amount` to `to` through an approved batch.
     function _issueListedNative(IListingRegistry.AssetClass assetClass, address to, uint256 amount)
         internal
         returns (NativeAssetToken token)
@@ -125,8 +128,7 @@ contract NiaraSettlementTest is Test {
         token = NativeAssetToken(factory.createAssetToken("Acme Corp", "ACME", assetClass, DOC_HASH));
         vm.prank(issuer);
         registry.submitListing(address(token));
-        vm.prank(listingAuthority);
-        registry.approveListing(address(token));
+        _approveByFeeAndWithdraw(registry, distributor, listingAuthority, admin, makeAddr("listingFeeSink"), address(token));
         vm.prank(issuer);
         uint256 batchNo = registry.requestIssuance(address(token), amount, to, DOC_HASH);
         vm.prank(listingAuthority);
@@ -746,6 +748,22 @@ contract NiaraSettlementTest is Test {
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, pending));
         settlement.settle(_nextMatchId(), pending, address(usdt), buyer, seller, 10 ether, 1_000e6);
+    }
+
+    /// @notice A listing whose fee is quoted but not paid is not tradable (spec §3.13).
+    function test_Settle_RevertsForQuotedAsset() public {
+        AssetTokenFactory factory = registry.factory();
+        vm.prank(issuer);
+        address quoted = factory.createAssetToken("Quoted", "QTD", IListingRegistry.AssetClass.Equity, DOC_HASH);
+        vm.prank(issuer);
+        registry.submitListing(quoted);
+        vm.prank(listingAuthority);
+        registry.quoteListing(quoted, 1_000_000e6, 10, uint64(block.timestamp + 1 days));
+        assertEq(uint8(registry.getListing(quoted).status), uint8(IListingRegistry.ListingStatus.Quoted));
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(NiaraSettlement.AssetListingNotApproved.selector, quoted));
+        settlement.settle(_nextMatchId(), quoted, address(usdt), buyer, seller, 10 ether, 1_000e6);
     }
 
     function test_Settle_RevertsForSuspendedAsset() public {

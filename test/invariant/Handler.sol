@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AssetToken} from "../../src/AssetToken.sol";
 import {BackingGateway} from "../../src/BackingGateway.sol";
 import {NiaraSettlement} from "../../src/NiaraSettlement.sol";
@@ -123,6 +125,28 @@ contract Handler is Test {
     /// Approved. Must stay zero (spec invariant 11, second half).
     uint256 public ghost_illegalIssuances;
 
+    // ── Listing fee (spec §3.13) ────────────────────────────────────────────────────────
+
+    /// @notice Three more issuer listings (Equity, FixedIncome, Credit) that start `Pending`:
+    /// the fuzzer quotes their listing fee, pays it and drives their status and issuance.
+    address[] public feeListings;
+
+    /// @notice `quoteListing` / `payListingFee` calls whose outcome (success, or the exact
+    /// error) differed from the handler's prediction, or whose effects did. Must stay zero.
+    uint256 public ghost_listingFeeMismatches;
+
+    /// @notice Successful `approveListing` calls on a non-Currency listing that had not paid
+    /// its listing fee. Must stay zero.
+    uint256 public ghost_unpaidApprovals;
+
+    /// @notice Successful payments per listing (must never exceed 1) and their sum, in USDT.
+    mapping(address token => uint256) public ghost_listingFeePayments;
+    uint256 public ghost_sumListingFeesPaid;
+
+    /// @notice Successful quotes and payments (sanity: the fuzzer reaches both).
+    uint256 public ghost_quotes;
+    uint256 public ghost_payments;
+
     /// @notice Historical sum of fees recorded in the CashbackDistributor, per settlement
     /// currency (never decreases).
     mapping(address paymentToken => uint256) public ghost_sumFeesRecorded;
@@ -178,6 +202,19 @@ contract Handler is Test {
         custodian = config.custodian;
         settlementOperator = config.settlementOperator;
         admin = config.admin;
+    }
+
+    /// @notice Registers the three `Pending` issuer listings the listing-fee actions work on.
+    /// Called once by the test's setUp; not a fuzz target.
+    function initListingFee(address[] calldata feeListings_) external {
+        require(feeListings.length == 0, "already initialized");
+        for (uint256 i = 0; i < feeListings_.length; i++) {
+            feeListings.push(feeListings_[i]);
+        }
+    }
+
+    function feeListingCount() external view returns (uint256) {
+        return feeListings.length;
     }
 
     // ── Selection helpers ──────────────────────────────────────────────────────────────
@@ -473,14 +510,15 @@ contract Handler is Test {
 
     // ── Listings and native issuance ────────────────────────────────────────────────────
 
-    /// @dev Tokens whose listing status the fuzzer drives (the two native instruments and
-    /// the two listed currencies).
+    /// @dev Tokens whose listing status the fuzzer drives (the two native instruments, the
+    /// two listed currencies and the three listing-fee listings).
     function _pickListedToken(uint256 seed) internal view returns (address) {
-        uint256 pick = seed % 4;
+        uint256 pick = seed % 7;
         if (pick == 0) return address(nativeEquity);
         if (pick == 1) return address(nativeBond);
         if (pick == 2) return address(usdt);
-        return address(wbtc);
+        if (pick == 3) return address(wbtc);
+        return feeListings[pick - 4];
     }
 
     /// @notice Approve / suspend / delist through the listing authority. Delisting is final,
@@ -494,13 +532,155 @@ contract Handler is Test {
             ghost_everDelisted[token] = true;
         } else if (actionSeed % 2 == 0) {
             registry.approveListing(token);
+            // Reached only if approveListing did not revert: it must never approve a
+            // non-Currency listing that has not paid its listing fee.
+            IListingRegistry.Listing memory listing = registry.getListing(token);
+            bool unpaid = registry.getListingFeeQuote(token).listingFeePaid == 0;
+            if (listing.assetClass != IListingRegistry.AssetClass.Currency && unpaid) ghost_unpaidApprovals++;
         } else {
             registry.suspendListing(token);
         }
     }
 
+    /// @dev Mostly the two seeded instruments; one time in four, a listing-fee listing (so
+    /// issuance is requested while `Pending` or `Quoted` and executes only once paid).
     function _pickNative(uint256 seed) internal view returns (NativeAssetToken) {
-        return seed % 2 == 0 ? nativeEquity : nativeBond;
+        uint256 pick = seed % 8;
+        if (pick < 6) return pick % 2 == 0 ? nativeEquity : nativeBond;
+        return NativeAssetToken(feeListings[(seed / 8) % feeListings.length]);
+    }
+
+    // ── Listing fee (spec §3.13): outcome predicted exactly ─────────────────────────────
+
+    /// @dev The listing-fee candidates: the three fee listings, the two instruments that paid
+    /// at setup, and a Currency listing.
+    function _pickFeeCandidate(uint256 seed) internal view returns (address) {
+        uint256 pick = seed % 6;
+        if (pick < 3) return feeListings[pick];
+        if (pick == 3) return address(nativeEquity);
+        if (pick == 4) return address(nativeBond);
+        return address(usdt);
+    }
+
+    /// @notice The listing authority (or, chaotically, a trader) quotes a listing fee with a
+    /// random valuation, rate and expiry, in and out of bounds. The handler predicts the
+    /// exact outcome; a success stores `ceil(valuation * bps / 10_000)`.
+    function quoteListing(uint256 tokenSeed, uint256 valuationSeed, uint256 bpsSeed, uint256 expirySeed) external {
+        address token = _pickFeeCandidate(tokenSeed);
+        address caller = _chaos(tokenSeed / 7) ? _actorAt(tokenSeed / 35) : listingAuthority;
+        uint256 valuation = _chaos(valuationSeed) ? 0 : bound(valuationSeed, 1, 1e30);
+        uint16 bps;
+        if (_chaos(bpsSeed)) bps = (bpsSeed / 5) % 2 == 0 ? 0 : uint16(bound(bpsSeed, 101, 1_000));
+        else bps = uint16(bound(bpsSeed, 1, 100));
+        uint256 offset;
+        if (_chaos(expirySeed)) offset = (expirySeed / 5) % 2 == 0 ? 0 : bound(expirySeed, 30 days + 1, 400 days);
+        else offset = bound(expirySeed, 1, 30 days);
+        uint64 expiresAt = uint64(block.timestamp + offset);
+
+        bytes memory expected = _predictQuote(token, caller, valuation, bps, offset, expiresAt);
+        vm.prank(caller);
+        (bool ok, bytes memory ret) = address(registry).call(
+            abi.encodeCall(ListingRegistry.quoteListing, (token, valuation, bps, expiresAt))
+        );
+        if (!_matches(ok, ret, expected)) {
+            ghost_listingFeeMismatches++;
+            return;
+        }
+        if (!ok) return;
+        ghost_quotes++;
+        ListingRegistry.ListingFeeQuote memory quote = registry.getListingFeeQuote(token);
+        bool stored = quote.valuation == valuation && quote.listingFeeBps == bps
+            && quote.listingFee == (valuation * bps + 9_999) / 10_000 && quote.listingFeeToken == address(usdt)
+            && quote.quoteExpiresAt == expiresAt && quote.listingFeePaid == 0
+            && registry.getListing(token).status == IListingRegistry.ListingStatus.Quoted;
+        if (!stored) ghost_listingFeeMismatches++;
+    }
+
+    /// @dev The error `quoteListing` must raise, in the contract's check order, or "" for
+    /// a success.
+    function _predictQuote(address token, address caller, uint256 valuation, uint16 bps, uint256 offset, uint64 expiresAt)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 role = registry.LISTING_AUTHORITY_ROLE();
+        if (!registry.hasRole(role, caller)) {
+            return abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, caller, role);
+        }
+        IListingRegistry.Listing memory listing = registry.getListing(token);
+        if (listing.assetClass == IListingRegistry.AssetClass.Currency) {
+            return abi.encodeWithSelector(ListingRegistry.CurrencyHasNoListingFee.selector, token);
+        }
+        if (listing.status != IListingRegistry.ListingStatus.Pending && listing.status != IListingRegistry.ListingStatus.Quoted)
+        {
+            return abi.encodeWithSelector(ListingRegistry.InvalidStatusTransition.selector, token, listing.status);
+        }
+        if (valuation == 0) return abi.encodeWithSelector(ListingRegistry.ZeroValuation.selector);
+        if (bps == 0 || bps > 100) return abi.encodeWithSelector(ListingRegistry.InvalidListingFeeBps.selector, bps);
+        if (offset == 0 || offset > 30 days) {
+            return abi.encodeWithSelector(ListingRegistry.InvalidExpiry.selector, expiresAt);
+        }
+        return "";
+    }
+
+    /// @notice The issuer (or, chaotically, a trader) pays a listing fee: on a quoted, an
+    /// unquoted, an already-paid or a Currency listing, sometimes at the quote's expiry
+    /// boundary, sometimes while paused. The handler funds the issuer with the fee and
+    /// predicts the exact outcome; a success approves the listing and records the fee once.
+    function payListingFee(uint256 tokenSeed, uint256 callerSeed) external {
+        address token = _pickFeeCandidate(tokenSeed);
+        address caller = _chaos(callerSeed) ? _actorAt(callerSeed / 5) : nativeIssuer;
+        ListingRegistry.ListingFeeQuote memory quote = registry.getListingFeeQuote(token);
+        IListingRegistry.ListingStatus status = registry.getListing(token).status;
+
+        // One call in four on a quoted listing lands on the expiry boundary: one second
+        // before (payable) or exactly at it (expired). Time only moves forward.
+        if (status == IListingRegistry.ListingStatus.Quoted && (callerSeed / 25) % 4 == 0) {
+            uint256 target = uint256(quote.quoteExpiresAt) - 1 + (callerSeed / 100) % 2;
+            if (target > block.timestamp) vm.warp(target);
+        }
+        if (status == IListingRegistry.ListingStatus.Quoted) usdt.mint(nativeIssuer, quote.listingFee);
+
+        bytes memory expected = _predictPay(token, caller, status, quote.quoteExpiresAt);
+        uint256 collectedBefore = distributor.listingFeesCollected(address(usdt));
+        vm.prank(caller);
+        (bool ok, bytes memory ret) = address(registry).call(abi.encodeCall(ListingRegistry.payListingFee, (token)));
+        if (!_matches(ok, ret, expected)) {
+            ghost_listingFeeMismatches++;
+            return;
+        }
+        if (!ok) return;
+        ghost_payments++;
+        ghost_listingFeePayments[token]++;
+        ghost_sumListingFeesPaid += quote.listingFee;
+        bool effects = registry.getListing(token).status == IListingRegistry.ListingStatus.Approved
+            && registry.getListingFeeQuote(token).listingFeePaid == quote.listingFee
+            && distributor.listingFeesCollected(address(usdt)) == collectedBefore + quote.listingFee;
+        if (!effects) ghost_listingFeeMismatches++;
+    }
+
+    /// @dev The error `payListingFee` must raise, in the contract's check order, or "".
+    function _predictPay(address token, address caller, IListingRegistry.ListingStatus status, uint64 expiresAt)
+        internal
+        view
+        returns (bytes memory)
+    {
+        if (registry.paused()) return abi.encodeWithSelector(Pausable.EnforcedPause.selector);
+        if (caller != registry.getListing(token).issuer) return abi.encodeWithSelector(ListingRegistry.NotIssuer.selector);
+        if (status != IListingRegistry.ListingStatus.Quoted) {
+            return abi.encodeWithSelector(ListingRegistry.ListingNotQuoted.selector, token, status);
+        }
+        if (block.timestamp >= expiresAt) {
+            return abi.encodeWithSelector(ListingRegistry.QuoteExpired.selector, token, expiresAt);
+        }
+        return "";
+    }
+
+    /// @dev True when a call's outcome is the predicted one: success for "", otherwise a
+    /// revert with exactly the predicted data.
+    function _matches(bool ok, bytes memory ret, bytes memory expected) internal pure returns (bool) {
+        if (expected.length == 0) return ok;
+        return !ok && keccak256(ret) == keccak256(expected);
     }
 
     /// @notice The listing authority freezes or unfreezes cashback on a native listing, or

@@ -7,6 +7,7 @@ import {NiaraScriptBase} from "../../script/NiaraScriptBase.sol";
 import {TestnetMockToken} from "../../script/tokens/TestnetMockToken.sol";
 import {P2PEscrow} from "../../src/P2PEscrow.sol";
 import {NiaraSettlement} from "../../src/NiaraSettlement.sol";
+import {ListingRegistry} from "../../src/ListingRegistry.sol";
 import {IListingRegistry} from "../../src/interfaces/IListingRegistry.sol";
 
 /// @notice Runs `script/Deploy.s.sol` in-process, with the chain id set to each supported
@@ -56,6 +57,7 @@ contract DeployScriptTest is Test {
         assertEq(script.DEFAULT_TIMELOCK_DELAY(), 1 hours);
         assertEq(script.SEPOLIA_CHAIN_ID(), 11155111);
         assertEq(script.BASE_SEPOLIA_CHAIN_ID(), 84532);
+        assertEq(script.WIRING_PROPOSALS(), 5);
     }
 
     // ── Phase 1 ────────────────────────────────────────────────────────────────────────
@@ -134,11 +136,14 @@ contract DeployScriptTest is Test {
         (DeployNiara.Config memory cfg, NiaraScriptBase.Deployment memory d) = _phase1();
         bytes32 settlementRole = d.distributor.SETTLEMENT_ROLE();
         bytes32 escrowRole = d.distributor.ESCROW_ROLE();
+        bytes32 listingRegistryRole = d.distributor.LISTING_REGISTRY_ROLE();
         bytes32 operatorRole = d.settlement.SETTLEMENT_OPERATOR_ROLE();
 
         assertFalse(d.distributor.hasRole(settlementRole, address(d.settlement)));
         assertFalse(d.distributor.hasRole(escrowRole, address(d.escrow)));
+        assertFalse(d.distributor.hasRole(listingRegistryRole, address(d.registry)));
         assertFalse(d.settlement.hasRole(operatorRole, operator));
+        assertEq(address(d.registry.settlement()), address(0), "the settlement link is only proposed");
 
         uint256 expected = block.timestamp + cfg.timelockDelay;
         assertEq(
@@ -148,8 +153,32 @@ contract DeployScriptTest is Test {
         assertEq(
             d.distributor.pendingActions(keccak256(abi.encode("GRANT_ROLE", escrowRole, address(d.escrow)))), expected
         );
+        assertEq(
+            d.distributor.pendingActions(
+                keccak256(abi.encode("GRANT_ROLE", listingRegistryRole, address(d.registry)))
+            ),
+            expected
+        );
         assertEq(d.settlement.pendingActions(keccak256(abi.encode("GRANT_ROLE", operatorRole, operator))), expected);
+        assertEq(
+            d.registry.pendingActions(keccak256(abi.encode("SET_SETTLEMENT", address(d.settlement)))), expected
+        );
         assertEq(script.wiringExecutableAt(cfg, d), expected);
+    }
+
+    /// @notice Before phase 2 no listing fee can be quoted, so no issuer listing can be
+    /// approved: the registry is not yet linked to the settlement.
+    function test_Phase1_NoListingFeeBeforePhase2() public {
+        (, NiaraScriptBase.Deployment memory d) = _phase1();
+        address issuer = makeAddr("issuer");
+        vm.prank(issuer);
+        address token = d.factory.createAssetToken("Acme", "ACME", IListingRegistry.AssetClass.Equity, keccak256("doc"));
+        vm.prank(issuer);
+        d.registry.submitListing(token);
+
+        vm.prank(listingAuthority);
+        vm.expectRevert(ListingRegistry.SettlementNotSet.selector);
+        d.registry.quoteListing(token, 1, 1, uint64(block.timestamp + 1));
     }
 
     /// @notice Nothing is tradable after phase 1: no listing exists yet.
@@ -264,7 +293,9 @@ contract DeployScriptTest is Test {
 
         assertTrue(d.distributor.hasRole(d.distributor.SETTLEMENT_ROLE(), address(d.settlement)));
         assertTrue(d.distributor.hasRole(d.distributor.ESCROW_ROLE(), address(d.escrow)));
+        assertTrue(d.distributor.hasRole(d.distributor.LISTING_REGISTRY_ROLE(), address(d.registry)));
         assertTrue(d.settlement.hasRole(d.settlement.SETTLEMENT_OPERATOR_ROLE(), operator));
+        assertEq(address(d.registry.settlement()), address(d.settlement));
         assertEq(script.wiringExecutableAt(cfg, d), 0);
     }
 
@@ -319,6 +350,21 @@ contract DeployScriptTest is Test {
         d.distributor.executeGrantRole(escrowRole, address(d.escrow));
         vm.prank(listingAuthority);
         d.registry.listCurrency(address(d.mockBrl));
+
+        script.executeWiringOn(cfg, d);
+        script.verifyWiring(cfg, d);
+    }
+
+    /// @notice Same with the two listing-fee steps already done by hand.
+    function test_Phase2_ResumesWhenTheListingFeeWiringIsAlreadyDone() public {
+        (DeployNiara.Config memory cfg, NiaraScriptBase.Deployment memory d) = _phase1();
+        vm.warp(block.timestamp + cfg.timelockDelay);
+
+        bytes32 listingRegistryRole = d.distributor.LISTING_REGISTRY_ROLE();
+        vm.startPrank(deployer);
+        d.distributor.executeGrantRole(listingRegistryRole, address(d.registry));
+        d.registry.executeSetSettlement(address(d.settlement));
+        vm.stopPrank();
 
         script.executeWiringOn(cfg, d);
         script.verifyWiring(cfg, d);
@@ -437,6 +483,43 @@ contract DeployScriptTest is Test {
             abi.encodeWithSelector(DeployNiara.WiringIncomplete.selector, "mock BRL not an Approved Currency")
         );
         script.verifyWiring(cfg, d);
+    }
+
+    function test_VerifyWiring_RevertsWithoutTheListingRegistryRole() public {
+        (DeployNiara.Config memory cfg, NiaraScriptBase.Deployment memory d) = _bothPhases();
+        bytes32 role = d.distributor.LISTING_REGISTRY_ROLE();
+        vm.prank(deployer);
+        d.distributor.proposeRevokeRole(role, address(d.registry));
+        vm.warp(block.timestamp + cfg.timelockDelay);
+        vm.prank(deployer);
+        d.distributor.executeRevokeRole(role, address(d.registry));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(DeployNiara.WiringIncomplete.selector, "LISTING_REGISTRY_ROLE -> ListingRegistry")
+        );
+        script.verifyWiring(cfg, d);
+    }
+
+    function test_VerifyWiring_RevertsWhenTheRegistryIsLinkedToAnotherSettlement() public {
+        (DeployNiara.Config memory cfg, NiaraScriptBase.Deployment memory d) = _bothPhases();
+        NiaraSettlement other = new NiaraSettlement(
+            deployer, address(d.distributor), address(d.registry), address(d.mockUsdt), cfg.timelockDelay
+        );
+        vm.prank(deployer);
+        d.registry.proposeSetSettlement(address(other));
+        vm.warp(block.timestamp + cfg.timelockDelay);
+        vm.prank(deployer);
+        d.registry.executeSetSettlement(address(other));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DeployNiara.WiringIncomplete.selector, "ListingRegistry.settlement -> NiaraSettlement"
+            )
+        );
+        script.verifyWiring(cfg, d);
+        // And the deployment can no longer be read back from that settlement's address.
+        vm.expectRevert(abi.encodeWithSelector(NiaraScriptBase.DeploymentMismatch.selector, "registry.settlement"));
+        script.resolveDeployment(address(d.settlement), address(d.escrow), address(d.mockBrl));
     }
 
     function test_VerifyWiring_RevertsForTheWrongOperator() public {

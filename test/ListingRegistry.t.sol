@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {ListingRegistry} from "../src/ListingRegistry.sol";
+import {CashbackDistributor} from "../src/CashbackDistributor.sol";
+import {NiaraSettlement} from "../src/NiaraSettlement.sol";
 import {AssetTokenFactory} from "../src/AssetTokenFactory.sol";
 import {NativeAssetToken} from "../src/NativeAssetToken.sol";
 import {IListingRegistry} from "../src/interfaces/IListingRegistry.sol";
@@ -10,9 +12,12 @@ import {TimelockedAccessControl} from "../src/governance/TimelockedAccessControl
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {ListingFeeHelpers} from "./helpers/ListingFeeHelpers.sol";
 
-contract ListingRegistryTest is Test {
+contract ListingRegistryTest is ListingFeeHelpers {
     ListingRegistry public registry;
+    CashbackDistributor public distributor;
+    NiaraSettlement public settlement;
     AssetTokenFactory public factory;
     NativeAssetToken public equity;
     MockUSDT public usdt;
@@ -35,6 +40,11 @@ contract ListingRegistryTest is Test {
         listingAuthorityRole = registry.LISTING_AUTHORITY_ROLE();
         equity = _create(issuer, IListingRegistry.AssetClass.Equity);
         usdt = new MockUSDT();
+        // The listing fee (spec §3.13) is quoted in the settlement's fee token and paid into
+        // its distributor, so first approvals need both, linked through the timelock.
+        distributor = new CashbackDistributor(admin, address(registry), TIMELOCK_DELAY, 2_000);
+        settlement = new NiaraSettlement(admin, address(distributor), address(registry), address(usdt), TIMELOCK_DELAY);
+        _wireListingFee(registry, distributor, address(settlement), admin);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────────────
@@ -49,9 +59,21 @@ contract ListingRegistryTest is Test {
         registry.submitListing(address(token));
     }
 
+    /// @dev `approveListing`: since the listing fee, only a reinstatement (Suspended -> Approved).
     function _approve(address token) internal {
         vm.prank(authority);
         registry.approveListing(token);
+    }
+
+    /// @dev First approval of an issuer listing: quote the listing fee, the issuer pays it.
+    function _pay(address token) internal {
+        _approveByFee(registry, authority, token);
+    }
+
+    /// @dev Pending (or Quoted) -> Quoted, with the helper's valuation and rate.
+    function _quote(address token) internal {
+        vm.prank(authority);
+        registry.quoteListing(token, HELPER_VALUATION, HELPER_LISTING_FEE_BPS, uint64(block.timestamp + 1 days));
     }
 
     function _suspend(address token) internal {
@@ -81,7 +103,11 @@ contract ListingRegistryTest is Test {
             _delist(address(equity));
             return;
         }
-        _approve(address(equity));
+        if (target == IListingRegistry.ListingStatus.Quoted) {
+            _quote(address(equity));
+            return;
+        }
+        _pay(address(equity));
         if (target == IListingRegistry.ListingStatus.Suspended) _suspend(address(equity));
     }
 
@@ -137,8 +163,8 @@ contract ListingRegistryTest is Test {
         // The new authority can act immediately after the grant.
         _submit(equity);
         vm.prank(stranger);
-        registry.approveListing(address(equity));
-        assertTrue(registry.isApproved(address(equity)));
+        registry.quoteListing(address(equity), 1_000e6, 10, uint64(block.timestamp + 1 days));
+        assertEq(uint8(_status(address(equity))), uint8(IListingRegistry.ListingStatus.Quoted));
     }
 
     function test_ListingAuthorityRole_RevokeRequiresTimelock() public {
@@ -313,16 +339,47 @@ contract ListingRegistryTest is Test {
 
     // ── Status table: every legal transition ───────────────────────────────────────────
 
-    function test_Approve_FromPending() public {
-        _submit(equity);
-        vm.warp(5_000);
+    /// @notice Paying the listing fee is the only first approval (spec §3.13): it emits
+    /// ListingApproved with the payment's timestamp.
+    function test_PayListingFee_FromQuoted_Approves() public {
+        _toStatus(IListingRegistry.ListingStatus.Quoted);
+        vm.warp(block.timestamp + 5_000);
+        usdt.mint(issuer, registry.getListingFeeQuote(address(equity)).listingFee);
+        vm.prank(issuer);
+        usdt.approve(address(registry), type(uint256).max);
         vm.expectEmit(true, true, false, true, address(registry));
         emit ListingRegistry.ListingApproved(
-            address(equity), issuer, IListingRegistry.AssetClass.Equity, true, DOC_HASH, 5_000
+            address(equity), issuer, IListingRegistry.AssetClass.Equity, true, DOC_HASH, uint64(block.timestamp)
         );
-        _approve(address(equity));
+        vm.prank(issuer);
+        registry.payListingFee(address(equity));
         assertTrue(registry.isApproved(address(equity)));
-        assertEq(registry.getListing(address(equity)).approvedAt, 5_000);
+        assertEq(registry.getListing(address(equity)).approvedAt, uint64(block.timestamp));
+    }
+
+    function test_Quote_FromPending() public {
+        _toStatus(IListingRegistry.ListingStatus.Pending);
+        _quote(address(equity));
+        assertEq(uint8(_status(address(equity))), uint8(IListingRegistry.ListingStatus.Quoted));
+        assertFalse(registry.isApproved(address(equity)));
+    }
+
+    /// @notice `approveListing` never approves a listing for the first time: a Pending or
+    /// Quoted listing has not paid its listing fee.
+    function test_Approve_RevertsFromPending_ListingFeeNotPaid() public {
+        _toStatus(IListingRegistry.ListingStatus.Pending);
+        vm.prank(authority);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingFeeNotPaid.selector, address(equity)));
+        registry.approveListing(address(equity));
+        assertEq(uint8(_status(address(equity))), uint8(IListingRegistry.ListingStatus.Pending));
+    }
+
+    function test_Approve_RevertsFromQuoted_ListingFeeNotPaid() public {
+        _toStatus(IListingRegistry.ListingStatus.Quoted);
+        vm.prank(authority);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingFeeNotPaid.selector, address(equity)));
+        registry.approveListing(address(equity));
+        assertEq(uint8(_status(address(equity))), uint8(IListingRegistry.ListingStatus.Quoted));
     }
 
     function test_Approve_FromSuspended_UpdatesApprovedAt() public {
@@ -346,6 +403,14 @@ contract ListingRegistryTest is Test {
         _toStatus(IListingRegistry.ListingStatus.Pending);
         vm.expectEmit(true, false, false, true, address(registry));
         emit ListingRegistry.ListingDelisted(address(equity), IListingRegistry.ListingStatus.Pending);
+        _delist(address(equity));
+        assertEq(uint8(_status(address(equity))), uint8(IListingRegistry.ListingStatus.Delisted));
+    }
+
+    function test_Delist_FromQuoted_IsRejection() public {
+        _toStatus(IListingRegistry.ListingStatus.Quoted);
+        vm.expectEmit(true, false, false, true, address(registry));
+        emit ListingRegistry.ListingDelisted(address(equity), IListingRegistry.ListingStatus.Quoted);
         _delist(address(equity));
         assertEq(uint8(_status(address(equity))), uint8(IListingRegistry.ListingStatus.Delisted));
     }
@@ -399,6 +464,13 @@ contract ListingRegistryTest is Test {
         registry.suspendListing(address(equity));
     }
 
+    function test_Suspend_RevertsFromQuoted() public {
+        _toStatus(IListingRegistry.ListingStatus.Quoted);
+        vm.prank(authority);
+        _expectTransitionRevert(address(equity), IListingRegistry.ListingStatus.Quoted);
+        registry.suspendListing(address(equity));
+    }
+
     function test_Suspend_RevertsFromSuspended() public {
         _toStatus(IListingRegistry.ListingStatus.Suspended);
         vm.prank(authority);
@@ -426,25 +498,45 @@ contract ListingRegistryTest is Test {
         registry.delist(address(equity));
     }
 
-    /// @notice Fuzzes random sequences of status actions and checks every step against the
-    /// reference table; also proves Delisted is absorbing.
+    /// @notice Fuzzes random sequences of status actions (approve, suspend, delist, quote,
+    /// pay) and checks every step, and its exact error when illegal, against the reference
+    /// table. Also proves Delisted is absorbing, that `approveListing` never approves an
+    /// unpaid listing, and that the fee is paid once: every Approved or Suspended listing has
+    /// paid exactly its quoted fee (spec invariant 13).
     function testFuzz_StatusTable_MatchesReference(uint8[16] calldata actions) public {
         _submit(equity);
+        usdt.mint(issuer, 100 * HELPER_VALUATION);
+        vm.prank(issuer);
+        usdt.approve(address(registry), type(uint256).max);
         IListingRegistry.ListingStatus expected = IListingRegistry.ListingStatus.Pending;
+        uint256 paid;
 
         for (uint256 i = 0; i < actions.length; i++) {
-            uint8 action = actions[i] % 3; // 0 approve, 1 suspend, 2 delist
+            uint8 action = actions[i] % 5; // 0 approve, 1 suspend, 2 delist, 3 quote, 4 pay
             IListingRegistry.ListingStatus next = _reference(expected, action);
-            bool legal = next != expected;
-
-            vm.prank(authority);
-            if (!legal) _expectTransitionRevert(address(equity), expected);
-            if (action == 0) registry.approveListing(address(equity));
-            else if (action == 1) registry.suspendListing(address(equity));
-            else registry.delist(address(equity));
+            if (next == expected && !(action == 3 && expected == IListingRegistry.ListingStatus.Quoted)) {
+                _expectStatusRevert(expected, action);
+            }
+            if (action == 4) {
+                vm.prank(issuer);
+                registry.payListingFee(address(equity));
+                if (next != expected) paid++;
+            } else {
+                vm.prank(authority);
+                if (action == 0) registry.approveListing(address(equity));
+                else if (action == 1) registry.suspendListing(address(equity));
+                else if (action == 2) registry.delist(address(equity));
+                else registry.quoteListing(address(equity), HELPER_VALUATION, 10, uint64(block.timestamp + 1 days));
+            }
 
             expected = next;
             assertEq(uint8(_status(address(equity))), uint8(expected));
+            ListingRegistry.ListingFeeQuote memory quote = registry.getListingFeeQuote(address(equity));
+            bool approvedOnce =
+                expected == IListingRegistry.ListingStatus.Approved || expected == IListingRegistry.ListingStatus.Suspended;
+            if (approvedOnce) assertEq(quote.listingFeePaid, quote.listingFee);
+            assertLe(paid, 1);
+            assertEq(distributor.listingFeesCollected(address(usdt)), paid * quote.listingFee);
         }
     }
 
@@ -454,17 +546,33 @@ contract ListingRegistryTest is Test {
         returns (IListingRegistry.ListingStatus)
     {
         if (action == 0) {
-            if (s == IListingRegistry.ListingStatus.Pending || s == IListingRegistry.ListingStatus.Suspended) {
-                return IListingRegistry.ListingStatus.Approved;
-            }
+            if (s == IListingRegistry.ListingStatus.Suspended) return IListingRegistry.ListingStatus.Approved;
         } else if (action == 1) {
             if (s == IListingRegistry.ListingStatus.Approved) return IListingRegistry.ListingStatus.Suspended;
-        } else {
+        } else if (action == 2) {
             if (s != IListingRegistry.ListingStatus.None && s != IListingRegistry.ListingStatus.Delisted) {
                 return IListingRegistry.ListingStatus.Delisted;
             }
+        } else if (action == 3) {
+            if (s == IListingRegistry.ListingStatus.Pending || s == IListingRegistry.ListingStatus.Quoted) {
+                return IListingRegistry.ListingStatus.Quoted;
+            }
+        } else {
+            if (s == IListingRegistry.ListingStatus.Quoted) return IListingRegistry.ListingStatus.Approved;
         }
         return s; // illegal: unchanged
+    }
+
+    /// @dev The exact error of an illegal action from status `s`.
+    function _expectStatusRevert(IListingRegistry.ListingStatus s, uint8 action) internal {
+        bool unpaid = s == IListingRegistry.ListingStatus.Pending || s == IListingRegistry.ListingStatus.Quoted;
+        if (action == 0 && unpaid) {
+            vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingFeeNotPaid.selector, address(equity)));
+        } else if (action == 4) {
+            vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingNotQuoted.selector, address(equity), s));
+        } else {
+            _expectTransitionRevert(address(equity), s);
+        }
     }
 
     // ── Status actions: access control ─────────────────────────────────────────────────
@@ -690,10 +798,29 @@ contract ListingRegistryTest is Test {
         vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingNotApproved.selector, address(equity)));
         registry.approveIssuance(address(equity), batchNo);
 
-        _approve(address(equity));
+        _quote(address(equity));
+        vm.prank(authority);
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingNotApproved.selector, address(equity)));
+        registry.approveIssuance(address(equity), batchNo);
+
+        _pay(address(equity));
         vm.prank(authority);
         registry.approveIssuance(address(equity), batchNo);
         assertEq(equity.balanceOf(investor), 10 ether);
+    }
+
+    /// @notice Issuance can also be requested while the listing fee is quoted; the batch
+    /// executes only once the fee is paid, and charges no fee of its own.
+    function test_RequestIssuance_WhileQuoted() public {
+        _toStatus(IListingRegistry.ListingStatus.Quoted);
+        uint256 batchNo = _requestIssuance(10 ether);
+        assertEq(batchNo, 1);
+        _pay(address(equity));
+        uint256 collected = distributor.listingFeesCollected(address(usdt));
+        vm.prank(authority);
+        registry.approveIssuance(address(equity), batchNo);
+        assertEq(equity.balanceOf(investor), 10 ether);
+        assertEq(distributor.listingFeesCollected(address(usdt)), collected);
     }
 
     function test_ApproveIssuance_RevertsWhileSuspended() public {
@@ -1008,6 +1135,8 @@ contract ListingRegistryTest is Test {
 
         NativeAssetToken bond = _create(issuer, IListingRegistry.AssetClass.FixedIncome);
         _submit(bond);
+        // Quoting the listing fee is a listing action: allowed while paused (spec §3.13).
+        _quote(address(bond));
         _delist(address(bond));
         vm.prank(authority);
         registry.listCurrency(address(usdt));
@@ -1025,7 +1154,7 @@ contract ListingRegistryTest is Test {
     function test_NativeLifecycle_IssueListMintBurn() public {
         _submit(equity);
         uint256 batchNo = _requestIssuance(500 ether);
-        _approve(address(equity));
+        _pay(address(equity));
         vm.prank(authority);
         registry.approveIssuance(address(equity), batchNo);
 
@@ -1108,8 +1237,9 @@ contract ListingRegistryTest is Test {
     /// @notice Freezable in every listing status: cashback stays withdrawable after
     /// delisting, so it must stay freezable too.
     function test_FreezeCashback_WorksInEveryListingStatus() public {
-        IListingRegistry.ListingStatus[4] memory statuses = [
+        IListingRegistry.ListingStatus[5] memory statuses = [
             IListingRegistry.ListingStatus.Pending,
+            IListingRegistry.ListingStatus.Quoted,
             IListingRegistry.ListingStatus.Approved,
             IListingRegistry.ListingStatus.Suspended,
             IListingRegistry.ListingStatus.Delisted

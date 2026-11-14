@@ -104,5 +104,9 @@ abstract contract NiaraScriptBase is Script {
             revert DeploymentMismatch("distributor.registry");
         }
         if (address(d.mockBrl) == address(d.mockUsdt)) revert DeploymentMismatch("mock BRL is the fee token");
+        // The registry's settlement link is zero until deploy phase 2 executes it; after
+        // that it must be this NiaraSettlement.
+        address linked = address(d.registry.settlement());
+        if (linked != address(0) && linked != settlement) revert DeploymentMismatch("registry.settlement");
     }
 }

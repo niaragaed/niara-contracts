@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {ListingFeeHelpers} from "./helpers/ListingFeeHelpers.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {BackingGateway} from "../src/BackingGateway.sol";
 import {NiaraSettlement} from "../src/NiaraSettlement.sol";
@@ -14,13 +14,14 @@ import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /// @notice End-to-end flows with the real contracts wired together.
-/// - Native (v1): issuer deploys its instrument → listing submitted and approved →
-///   issuance batch requested and approved → atomic settlement with fee → cashback
-///   credited and withdrawn by the issuer → holder burns with a reason.
+/// - Native (v1): issuer deploys its instrument → listing submitted → listing fee quoted and
+///   paid (which approves the listing) → issuance batch requested and approved → atomic
+///   settlement with fee → cashback credited and withdrawn by the issuer → holder burns
+///   with a reason.
 /// - Backed (kept for the future, not tradable in v1): attested backing → mint →
 ///   redemption. A backed AssetToken is not a factory token, so it cannot be listed and
 ///   cannot settle.
-contract IntegrationTest is Test {
+contract IntegrationTest is ListingFeeHelpers {
     AssetToken public assetToken;
     BackingGateway public gateway;
     NiaraSettlement public settlement;
@@ -65,6 +66,7 @@ contract IntegrationTest is Test {
         );
 
         // Role wiring: every grant goes through the timelock, as in production.
+        _wireListingFee(registry, distributor, address(settlement), admin);
         _grantRoleOn(address(distributor), distributor.SETTLEMENT_ROLE(), address(settlement));
         _grantRoleOn(address(settlement), settlement.SETTLEMENT_OPERATOR_ROLE(), settlementOperator);
         _grantRoleOn(address(gateway), gateway.OPERATOR_ROLE(), operator);
@@ -104,11 +106,15 @@ contract IntegrationTest is Test {
             factory.createAssetToken("Acme Corp Shares", "ACME", IListingRegistry.AssetClass.Equity, docHash)
         );
 
-        // 2. Curated listing: submit (issuer) → approve (listing authority).
+        // 2. Curated listing: submit (issuer) → quote the listing fee (listing authority) →
+        // the issuer pays it, which approves the listing (spec §3.13).
         vm.prank(issuer);
         registry.submitListing(address(acme));
-        vm.prank(listingAuthority);
-        registry.approveListing(address(acme));
+        uint256 listingFee = _approveByFee(registry, listingAuthority, address(acme));
+        assertTrue(registry.isApproved(address(acme)));
+        assertEq(listingFee, 1_000e6);
+        assertEq(usdt.balanceOf(address(distributor)), listingFee);
+        assertEq(distributor.listingFeesCollected(address(usdt)), listingFee);
 
         // 3. Issuance batch: requested by the issuer, approved by the authority, minted by
         // the registry to the seller.
@@ -132,7 +138,7 @@ contract IntegrationTest is Test {
         assertEq(acme.balanceOf(buyer), 100 ether);
         assertEq(acme.balanceOf(seller), 900 ether);
         assertEq(usdt.balanceOf(seller), 10_000e6 - expectedFee);
-        assertEq(usdt.balanceOf(address(distributor)), expectedFee);
+        assertEq(usdt.balanceOf(address(distributor)), listingFee + expectedFee);
 
         // 5. Cashback: the issuer withdraws the credited share.
         uint256 expectedCashback = (expectedFee * distributor.cashbackBps()) / 10_000;
@@ -170,8 +176,8 @@ contract IntegrationTest is Test {
         );
         vm.prank(issuer);
         registry.submitListing(address(acme));
-        vm.prank(listingAuthority);
-        registry.approveListing(address(acme));
+        // The treasury takes the listing fee out, so the distributor holds only trading fees.
+        _approveByFeeAndWithdraw(registry, distributor, listingAuthority, admin, makeAddr("sink"), address(acme));
         vm.prank(issuer);
         uint256 batch1 = registry.requestIssuance(address(acme), 1_000 ether, seller, keccak256("batch-1"));
         vm.prank(listingAuthority);

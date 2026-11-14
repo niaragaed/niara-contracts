@@ -5,6 +5,7 @@ import {console2} from "forge-std/Script.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {NiaraScriptBase} from "./NiaraScriptBase.sol";
 import {P2PEscrow} from "../src/P2PEscrow.sol";
+import {ListingRegistry} from "../src/ListingRegistry.sol";
 import {NativeAssetToken} from "../src/NativeAssetToken.sol";
 import {IListingRegistry} from "../src/interfaces/IListingRegistry.sol";
 
@@ -13,12 +14,14 @@ import {IListingRegistry} from "../src/interfaces/IListingRegistry.sol";
 /// deployment made by `Deploy.s.sol` (both phases complete). Three flows, one per trading
 /// mode and asset class:
 ///
-///   1. EQUITY, order book: the issuer creates and lists a share, requests an issuance
-///      batch, the listing authority approves it (the registry mints), the operator settles
-///      a matched order between the two investors, and the issuer withdraws its cashback.
-///   2. FIXED INCOME, P2P deal: the issuer creates and lists a bond and issues a batch;
-///      investor A opens a deal selling bonds to investor B (escrowing the bonds), B
-///      accepts paying mock USDT, and the issuer withdraws its cashback.
+///   1. EQUITY, order book: the issuer creates a share and submits its listing, the
+///      listing authority quotes the listing fee and the issuer pays it in mock USDT (which
+///      approves the listing, spec §3.13), the issuer requests an issuance batch, the
+///      listing authority approves it (the registry mints), the operator settles a matched
+///      order between the two investors, and the issuer withdraws its cashback.
+///   2. FIXED INCOME, P2P deal: the issuer creates a bond, pays its quoted listing fee and
+///      issues a batch; investor A opens a deal selling bonds to investor B (escrowing the
+///      bonds), B accepts paying mock USDT, and the issuer withdraws its cashback.
 ///   3. CURRENCY, P2P deal: investor B opens a deal buying mock BRL from investor A with
 ///      mock USDT (escrowing the USDT), A accepts delivering the BRL. A receives the USDT
 ///      and pays the fee; a currency deal never accrues cashback.
@@ -57,6 +60,12 @@ contract DemoNiaraFlows is NiaraScriptBase {
 
     uint64 public constant DEAL_LIFETIME = 1 days;
 
+    // Listing fee (spec §3.13), quoted for flows 1 and 2: a 1,000,000 mock USDT valuation at
+    // 10 bps (the 0.1% pricing floor) is a 1,000 mock USDT fee, paid by the issuer.
+    uint256 public constant LISTING_VALUATION = 1_000_000e6;
+    uint16 public constant LISTING_FEE_BPS = 10;
+    uint64 public constant QUOTE_LIFETIME = 7 days;
+
     struct Roles {
         /// @dev Admin of the deployment. Only funds the other wallets' gas.
         address deployer;
@@ -74,6 +83,8 @@ contract DemoNiaraFlows is NiaraScriptBase {
         address instrument;
         uint256 fee;
         uint256 cashback;
+        /// @dev Listing fee the issuer paid for the instrument; zero for the currency flow.
+        uint256 listingFee;
     }
 
     error RolesNotDistinct(string first, string second);
@@ -160,6 +171,12 @@ contract DemoNiaraFlows is NiaraScriptBase {
         if (!d.distributor.hasRole(d.distributor.ESCROW_ROLE(), address(d.escrow))) {
             revert DemoNotReady("P2PEscrow lacks ESCROW_ROLE (deploy phase 2 not run?)");
         }
+        if (address(d.registry.settlement()) != address(d.settlement)) {
+            revert DemoNotReady("registry not linked to NiaraSettlement (deploy phase 2 not run?)");
+        }
+        if (!d.distributor.hasRole(d.distributor.LISTING_REGISTRY_ROLE(), address(d.registry))) {
+            revert DemoNotReady("ListingRegistry lacks LISTING_REGISTRY_ROLE (deploy phase 2 not run?)");
+        }
         if (!_approvedCurrency(d, address(d.mockUsdt))) revert DemoNotReady("mock USDT is not an Approved Currency");
         if (!_approvedCurrency(d, address(d.mockBrl))) revert DemoNotReady("mock BRL is not an Approved Currency");
     }
@@ -203,8 +220,8 @@ contract DemoNiaraFlows is NiaraScriptBase {
         console2.log("All three flows completed and checked.");
     }
 
-    /// @notice FLOW 1, equity on the order book: issuance batch -> settle -> cashback
-    /// withdrawal. Investor B is the seller (it receives the issued batch), investor A the
+    /// @notice FLOW 1, equity on the order book: listing fee -> issuance batch -> settle ->
+    /// cashback withdrawal. Investor B is the seller (it receives the issued batch), investor A the
     /// buyer.
     /// @param roles The roles.
     /// @param d The deployment.
@@ -212,9 +229,9 @@ contract DemoNiaraFlows is NiaraScriptBase {
     function equityFlow(Roles memory roles, Deployment memory d) public returns (Outcome memory out) {
         requireReady(roles, d);
         console2.log("");
-        console2.log("== Flow 1: EQUITY, order book (issuance batch -> settle -> cashback) ==");
+        console2.log("== Flow 1: EQUITY, order book (listing fee -> issuance batch -> settle -> cashback) ==");
 
-        out.instrument = _issueInstrument(
+        (out.instrument, out.listingFee) = _issueInstrument(
             roles,
             d,
             "Niara Demo Equity (TEST)",
@@ -232,13 +249,13 @@ contract DemoNiaraFlows is NiaraScriptBase {
         vm.startBroadcast(roles.investorB);
         share.approve(address(d.settlement), EQUITY_TRADE);
         vm.stopBroadcast();
-        console2.log("1.5 seller (investor B) approved the shares for NiaraSettlement");
+        console2.log("1.6 seller (investor B) approved the shares for NiaraSettlement");
 
         vm.startBroadcast(roles.investorA);
         d.mockUsdt.mint(roles.investorA, EQUITY_PRICE);
         usdt.approve(address(d.settlement), EQUITY_PRICE);
         vm.stopBroadcast();
-        console2.log("1.6 buyer (investor A) took mock USDT from the faucet and approved it");
+        console2.log("1.7 buyer (investor A) took mock USDT from the faucet and approved it");
 
         // The match id is the off-chain match UUID; here it is derived from the new share,
         // so every run uses a fresh one (a match settles at most once).
@@ -248,12 +265,12 @@ contract DemoNiaraFlows is NiaraScriptBase {
             matchId, out.instrument, address(usdt), roles.investorA, roles.investorB, EQUITY_TRADE, EQUITY_PRICE
         );
         vm.stopBroadcast();
-        console2.log("1.7 operator settled the match -> fee (mock USDT, 6 decimals):", feeCharged);
+        console2.log("1.8 operator settled the match -> fee (mock USDT, 6 decimals):", feeCharged);
 
         vm.startBroadcast(roles.issuer);
         d.distributor.withdraw(out.instrument, address(usdt));
         vm.stopBroadcast();
-        console2.log("1.8 issuer withdrew its cashback (mock USDT, 6 decimals):", out.cashback);
+        console2.log("1.9 issuer withdrew its cashback (mock USDT, 6 decimals):", out.cashback);
 
         if (feeCharged != out.fee) revert DemoCheckFailed("equity: fee");
         if (share.balanceOf(roles.investorA) != EQUITY_TRADE) revert DemoCheckFailed("equity: buyer shares");
@@ -272,8 +289,9 @@ contract DemoNiaraFlows is NiaraScriptBase {
         if (!d.settlement.settledMatches(matchId)) revert DemoCheckFailed("equity: match not marked settled");
     }
 
-    /// @notice FLOW 2, fixed income as a P2P deal: investor A (holder of the issued batch)
-    /// opens a deal selling bonds to investor B and escrows them; B accepts paying mock
+    /// @notice FLOW 2, fixed income as a P2P deal: the issuer pays the bond's listing fee;
+    /// investor A (holder of the issued batch) opens a deal selling bonds to investor B and
+    /// escrows them; B accepts paying mock
     /// USDT; A, who receives the USDT, pays the fee; the issuer withdraws its cashback.
     /// @param roles The roles.
     /// @param d The deployment.
@@ -281,9 +299,9 @@ contract DemoNiaraFlows is NiaraScriptBase {
     function fixedIncomeFlow(Roles memory roles, Deployment memory d) public returns (Outcome memory out) {
         requireReady(roles, d);
         console2.log("");
-        console2.log("== Flow 2: FIXED INCOME, P2P deal (escrow -> accept -> cashback) ==");
+        console2.log("== Flow 2: FIXED INCOME, P2P deal (listing fee -> escrow -> accept -> cashback) ==");
 
-        out.instrument = _issueInstrument(
+        (out.instrument, out.listingFee) = _issueInstrument(
             roles,
             d,
             "Niara Demo Bond 2030 (TEST)",
@@ -313,7 +331,7 @@ contract DemoNiaraFlows is NiaraScriptBase {
         bond.approve(address(d.escrow), BOND_TRADE);
         bytes32 dealKey = d.escrow.openDeal(dealId, terms, expiresAt);
         vm.stopBroadcast();
-        console2.log("2.5 investor A opened the deal and escrowed the bonds; deal key:");
+        console2.log("2.6 investor A opened the deal and escrowed the bonds; deal key:");
         console2.logBytes32(dealKey);
 
         vm.startBroadcast(roles.investorB);
@@ -321,12 +339,12 @@ contract DemoNiaraFlows is NiaraScriptBase {
         usdt.approve(address(d.escrow), BOND_PRICE);
         d.escrow.acceptDeal(dealKey);
         vm.stopBroadcast();
-        console2.log("2.6 investor B accepted, paying mock USDT -> fee (6 decimals):", out.fee);
+        console2.log("2.7 investor B accepted, paying mock USDT -> fee (6 decimals):", out.fee);
 
         vm.startBroadcast(roles.issuer);
         d.distributor.withdraw(out.instrument, address(usdt));
         vm.stopBroadcast();
-        console2.log("2.7 issuer withdrew its cashback (mock USDT, 6 decimals):", out.cashback);
+        console2.log("2.8 issuer withdrew its cashback (mock USDT, 6 decimals):", out.cashback);
 
         if (d.escrow.getDeal(dealKey).status != P2PEscrow.DealStatus.Executed) {
             revert DemoCheckFailed("bond: deal not executed");
@@ -406,10 +424,11 @@ contract DemoNiaraFlows is NiaraScriptBase {
 
     // ── Shared steps ───────────────────────────────────────────────────────────────────
 
-    /// @dev Steps 1 to 4 of flows 1 and 2: the issuer creates the instrument through the
-    /// factory and submits its listing; the listing authority approves the listing; the
-    /// issuer requests an issuance batch; the listing authority approves it and the
-    /// registry mints. Neither the issuer nor Niara can mint alone.
+    /// @dev Steps 1 to 5 of flows 1 and 2: the issuer creates the instrument through the
+    /// factory and submits its listing; the listing authority quotes the listing fee; the
+    /// issuer pays it in mock USDT, which approves the listing (spec §3.13); the issuer
+    /// requests an issuance batch; the listing authority approves it and the registry mints.
+    /// Neither the issuer nor Niara can mint alone.
     function _issueInstrument(
         Roles memory roles,
         Deployment memory d,
@@ -418,7 +437,7 @@ contract DemoNiaraFlows is NiaraScriptBase {
         IListingRegistry.AssetClass assetClass,
         address recipient,
         uint256 amount
-    ) internal returns (address instrument) {
+    ) internal returns (address instrument, uint256 listingFee) {
         // The hashes stand in for the offering document and the corporate act authorizing
         // the batch (registered in Niara-Register in the real flow).
         bytes32 docHash = keccak256(abi.encode("niara-demo-offering-document", name));
@@ -430,24 +449,65 @@ contract DemoNiaraFlows is NiaraScriptBase {
         vm.stopBroadcast();
         console2.log(string.concat(".1 issuer created and submitted: ", name), instrument);
 
-        vm.startBroadcast(roles.listingAuthority);
-        d.registry.approveListing(instrument);
-        vm.stopBroadcast();
-        console2.log(".2 listing authority approved the listing");
+        listingFee = _payListingFee(roles, d, instrument);
 
         vm.startBroadcast(roles.issuer);
         uint256 batchNo = d.registry.requestIssuance(instrument, amount, recipient, batchDocHash);
         vm.stopBroadcast();
-        console2.log(".3 issuer requested issuance batch no.", batchNo);
+        console2.log(".4 issuer requested issuance batch no.", batchNo);
 
         vm.startBroadcast(roles.listingAuthority);
         d.registry.approveIssuance(instrument, batchNo);
         vm.stopBroadcast();
-        console2.log(".4 listing authority approved the batch; the registry minted it to", recipient);
+        console2.log(".5 listing authority approved the batch; the registry minted it to", recipient);
 
         if (IERC20(instrument).balanceOf(recipient) != amount) revert DemoCheckFailed("issuance: recipient balance");
         if (IERC20(instrument).totalSupply() != amount) revert DemoCheckFailed("issuance: total supply");
         if (NativeAssetToken(instrument).issuer() != roles.issuer) revert DemoCheckFailed("issuance: issuer");
+    }
+
+    /// @dev Steps 2 and 3: the listing authority quotes the listing fee; the issuer takes
+    /// exactly that from the mock USDT faucet and pays it, which approves the listing. The
+    /// fee goes to the CashbackDistributor as protocol revenue, with no cashback share.
+    function _payListingFee(Roles memory roles, Deployment memory d, address instrument)
+        internal
+        returns (uint256 listingFee)
+    {
+        IERC20 usdt = IERC20(address(d.mockUsdt));
+        listingFee = (LISTING_VALUATION * LISTING_FEE_BPS + 9_999) / 10_000;
+        uint256 issuerUsdtBefore = usdt.balanceOf(roles.issuer);
+        uint256 distributorUsdtBefore = usdt.balanceOf(address(d.distributor));
+        uint256 protocolBefore = d.distributor.protocolBalance(address(usdt));
+
+        vm.startBroadcast(roles.listingAuthority);
+        d.registry.quoteListing(
+            instrument, LISTING_VALUATION, LISTING_FEE_BPS, uint64(block.timestamp) + QUOTE_LIFETIME
+        );
+        vm.stopBroadcast();
+        console2.log(".2 listing authority quoted the listing fee (mock USDT, 6 decimals):", listingFee);
+
+        vm.startBroadcast(roles.issuer);
+        d.mockUsdt.mint(roles.issuer, listingFee);
+        usdt.approve(address(d.registry), listingFee);
+        d.registry.payListingFee(instrument);
+        vm.stopBroadcast();
+        console2.log(".3 issuer took mock USDT from the faucet and paid it; the listing is approved");
+
+        ListingRegistry.ListingFeeQuote memory quote = d.registry.getListingFeeQuote(instrument);
+        if (quote.listingFee != listingFee || quote.listingFeePaid != listingFee) {
+            revert DemoCheckFailed("listing fee: quote");
+        }
+        if (!d.registry.isApproved(instrument)) revert DemoCheckFailed("listing fee: listing not approved");
+        if (usdt.balanceOf(roles.issuer) != issuerUsdtBefore) revert DemoCheckFailed("listing fee: issuer paid");
+        if (usdt.balanceOf(address(d.distributor)) != distributorUsdtBefore + listingFee) {
+            revert DemoCheckFailed("listing fee: distributor balance");
+        }
+        if (d.distributor.protocolBalance(address(usdt)) != protocolBefore + listingFee) {
+            revert DemoCheckFailed("listing fee: protocol revenue");
+        }
+        if (d.distributor.cashbackBalance(instrument, address(usdt)) != 0) {
+            revert DemoCheckFailed("listing fee: credited cashback");
+        }
     }
 
     /// @dev The fee the protocol must charge on `usdtAmount` at the current rates

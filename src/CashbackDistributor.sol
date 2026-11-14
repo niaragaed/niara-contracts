@@ -14,6 +14,11 @@ import {IAssetToken} from "./interfaces/IAssetToken.sol";
 /// currency) and the issuer withdraws whenever it wants via `withdraw`. The rest of the fee
 /// accumulates as protocol revenue, withdrawable by the treasury.
 ///
+/// Listing fees (spec §3.13) land here too: `ListingRegistry.payListingFee` transfers the fee
+/// from the issuer to this contract and records it with `recordListingFee`. A listing fee is
+/// protocol revenue with no cashback share: it is added to `protocolBalance`, and counted on
+/// its own in `listingFeesCollected`, never in the trading-fee figures.
+///
 /// Pause: both withdrawals are payouts based on the protocol's own accounting, so both stop
 /// while the protocol's shared pause (held by the ListingRegistry, see ProtocolPausable) is
 /// active. `recordFee` is not paused: it only runs inside `settle`, which is.
@@ -25,6 +30,9 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
     /// @notice Held by P2PEscrow: the only caller of `recordDealFee`. Separate from
     /// SETTLEMENT_ROLE so neither contract can use the other's accounting entry point.
     bytes32 public constant ESCROW_ROLE = keccak256("ESCROW_ROLE");
+    /// @notice Held by the ListingRegistry: the only caller of `recordListingFee`. Separate
+    /// from SETTLEMENT_ROLE and ESCROW_ROLE, so no contract can use another's entry point.
+    bytes32 public constant LISTING_REGISTRY_ROLE = keccak256("LISTING_REGISTRY_ROLE");
 
     uint16 private constant BPS_DENOMINATOR = 10_000;
 
@@ -45,11 +53,17 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
     /// @notice Protocol revenue balance (fee minus cashback), per settlement currency.
     mapping(address paymentToken => uint256) public protocolBalance;
 
+    /// @notice Historical sum of listing fees recorded, per fee token (Solana:
+    /// `FeeLedger.listing_fees_collected`). Never decreases: withdrawals reduce
+    /// `protocolBalance`, which already includes these fees.
+    mapping(address feeToken => uint256) public listingFeesCollected;
+
     event FeeRecorded(
         address indexed assetToken, address indexed paymentToken, uint256 feeAmount, uint256 cashbackAmount, bool eligible
     );
     event CashbackCredited(address indexed assetToken, address indexed paymentToken, address indexed issuer, uint256 amount);
     event CashbackWithdrawn(address indexed assetToken, address indexed paymentToken, address indexed issuer, uint256 amount);
+    event ListingFeeRecorded(address indexed assetToken, address indexed feeToken, uint256 amount);
     event ProtocolFeesWithdrawn(address indexed paymentToken, address indexed to, uint256 amount);
     event CashbackBpsChangeProposed(uint16 newCashbackBps, uint256 executeAfter);
     event CashbackBpsChanged(uint16 oldCashbackBps, uint16 newCashbackBps);
@@ -134,6 +148,23 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
         emit FeeRecorded(assetToken, feeToken, feeAmount, cashbackAmount, eligible);
     }
 
+    /// @notice Records a listing fee (spec §3.13): `amount` of `feeToken`, already
+    /// transferred to this contract by the ListingRegistry in `payListingFee`. All of it is
+    /// protocol revenue, with no cashback share, whatever the asset's eligibility.
+    /// @dev Not paused: it only runs inside `payListingFee`, which is.
+    /// @param assetToken The listed token whose listing fee was paid.
+    /// @param feeToken Token the fee was paid in (the fee token recorded on the quote).
+    /// @param amount Fee transferred to this contract (non-zero).
+    function recordListingFee(address assetToken, address feeToken, uint256 amount)
+        external
+        onlyRole(LISTING_REGISTRY_ROLE)
+    {
+        if (amount == 0) revert ZeroFeeAmount();
+        protocolBalance[feeToken] += amount;
+        listingFeesCollected[feeToken] += amount;
+        emit ListingFeeRecorded(assetToken, feeToken, amount);
+    }
+
     /// @notice Withdraws the accumulated cashback of `assetToken` in `paymentToken`. Only the
     /// wallet currently registered as the asset's `issuerWallet` can call it: if the issuer
     /// changes wallets, the new wallet can withdraw the accumulated balance. Blocked while
@@ -157,8 +188,9 @@ contract CashbackDistributor is TimelockedAccessControl, ProtocolPausable, Reent
         IERC20(paymentToken).safeTransfer(msg.sender, amount);
     }
 
-    /// @notice Withdraws accumulated protocol revenue. Restricted to the treasury. Blocked
-    /// while the protocol is paused.
+    /// @notice Withdraws accumulated protocol revenue: the protocol share of trading fees plus
+    /// every listing fee. Restricted to the treasury. Never touches issuers' cashback.
+    /// Blocked while the protocol is paused.
     function withdrawProtocolFees(address paymentToken, address to, uint256 amount)
         external
         nonReentrant

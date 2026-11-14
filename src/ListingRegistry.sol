@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {TimelockedAccessControl} from "./governance/TimelockedAccessControl.sol";
 import {IListingRegistry} from "./interfaces/IListingRegistry.sol";
+import {INiaraSettlement} from "./interfaces/INiaraSettlement.sol";
+import {ICashbackDistributor} from "./interfaces/ICashbackDistributor.sol";
 import {AssetTokenFactory} from "./AssetTokenFactory.sol";
 import {NativeAssetToken} from "./NativeAssetToken.sol";
 
@@ -15,12 +20,22 @@ import {NativeAssetToken} from "./NativeAssetToken.sol";
 ///
 /// Status table (Delisted is final, one listing per token, no resubmission):
 ///
-///   approveListing : Pending   -> Approved
-///                    Suspended -> Approved
+///   submitListing  : None      -> Pending    (issuer)
+///   quoteListing   : Pending   -> Quoted     (listing fee quoted, spec §3.13)
+///                    Quoted    -> Quoted     (re-quote, also after expiry)
+///   payListingFee  : Quoted    -> Approved   (issuer pays; the only first approval)
+///   approveListing : Suspended -> Approved   (reinstatement only, any class, free)
 ///   suspendListing : Approved  -> Suspended
 ///   delist         : Pending   -> Delisted   (rejection)
+///                    Quoted    -> Delisted   (rejection)
 ///                    Approved  -> Delisted
 ///                    Suspended -> Delisted
+///
+/// Listing fee (spec §3.13): the listing authority quotes it (`quoteListing`: valuation, rate
+/// at most `MAX_LISTING_FEE_BPS`, expiry) and the issuer pays it (`payListingFee`), in the
+/// protocol's fee token, into the CashbackDistributor, where it is protocol revenue with no
+/// cashback share. Paying is what approves an issuer listing. `Currency` listings
+/// (`listCurrency`) are created `Approved` and never pay one.
 ///
 /// Issuance: the registry is the only minter of every factory token. The issuer requests a
 /// batch (`requestIssuance`), the listing authority approves it (`approveIssuance`) and the
@@ -28,17 +43,49 @@ import {NativeAssetToken} from "./NativeAssetToken.sol";
 ///
 /// Pause (spec §3.3, "Pause principle"): this is the protocol's single, shared pause, the EVM
 /// mirror of Solana's `Config.paused`. It blocks payouts based on protocol accounting, never
-/// a user reclaiming their own escrowed deposit. While paused: `approveIssuance` here,
-/// `NiaraSettlement.settle`, and `CashbackDistributor.withdraw` / `withdrawProtocolFees`
-/// (both read `paused()` through ProtocolPausable). Listing actions, `requestIssuance` and
-/// `rejectIssuance` (neither mints) stay available.
+/// a user reclaiming their own escrowed deposit. While paused: `approveIssuance` and
+/// `payListingFee` here, `NiaraSettlement.settle`, and `CashbackDistributor.withdraw` /
+/// `withdrawProtocolFees` (both read `paused()` through ProtocolPausable). Listing actions
+/// (including `quoteListing`), `requestIssuance` and `rejectIssuance` (neither mints) stay
+/// available.
 /// @dev Role changes (including LISTING_AUTHORITY_ROLE) go through the inherited
 /// timelock. Status changes and issuance approvals are operational and take effect
 /// immediately, like the Solana `approve_listing` / `suspend_listing` / `delist`. Pause is
-/// not timelocked: a circuit breaker must act immediately.
+/// not timelocked: a circuit breaker must act immediately. The link to NiaraSettlement
+/// (source of the fee token and of the CashbackDistributor) is set through the timelock too.
 contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     bytes32 public constant LISTING_AUTHORITY_ROLE = keccak256("LISTING_AUTHORITY_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+
+    uint16 private constant BPS_DENOMINATOR = 10_000;
+
+    /// @notice Hard, immutable cap on the listing-fee rate: 100 bps (1%) of the valuation
+    /// (spec §3.13). The 0.1% floor is pricing policy, not enforced on-chain; the rate must
+    /// only be at least 1 bps, so a quote is never free.
+    uint16 public constant MAX_LISTING_FEE_BPS = 100;
+
+    /// @notice Longest validity of a listing-fee quote: `expiresAt <= now + 30 days`
+    /// (Solana: `MAX_QUOTE_DURATION_SECS`).
+    uint64 public constant MAX_QUOTE_DURATION = 30 days;
+
+    /// @notice The listing-fee quote of an issuer listing (spec §3.13). All zero until
+    /// `quoteListing`, and always zero for `Currency` listings. Kept apart from `Listing` so
+    /// the listing reads done on every settlement and deal stay the same size.
+    struct ListingFeeQuote {
+        /// @dev Valuation of the offering, in base units of `listingFeeToken`.
+        uint256 valuation;
+        /// @dev `ceil(valuation * listingFeeBps / 10_000)`.
+        uint256 listingFee;
+        /// @dev 0 until `payListingFee`, then equal to `listingFee`. Never reset.
+        uint256 listingFeePaid;
+        /// @dev The protocol's fee token when the quote was made; payable only in it.
+        address listingFeeToken;
+        uint16 listingFeeBps;
+        /// @dev The quote is payable while `block.timestamp < quoteExpiresAt`.
+        uint64 quoteExpiresAt;
+    }
 
     enum IssuanceStatus {
         None,
@@ -66,6 +113,14 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
 
     mapping(address token => Listing) private _listings;
 
+    mapping(address token => ListingFeeQuote) private _listingFeeQuotes;
+
+    /// @notice NiaraSettlement this registry takes the fee token and the CashbackDistributor
+    /// from (Solana: `Config.fee_mint` and the fee vault). Zero until set through the
+    /// timelock (`proposeSetSettlement` / `executeSetSettlement`); while zero, no listing fee
+    /// can be quoted or paid. Its `listingRegistry()` must be this contract.
+    INiaraSettlement public settlement;
+
     /// @notice Issuance batches per token, indexed by batch number.
     mapping(address token => mapping(uint256 batchNo => IssuanceBatch)) public issuanceBatches;
 
@@ -77,9 +132,10 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
     event ListingSubmitted(
         address indexed token, address indexed issuer, AssetClass assetClass, bytes32 docHash
     );
-    /// @notice Emitted by both paths that make a listing tradable, mirroring Solana's
-    /// `ListingApproved`: `approveListing` (issuer listings, Pending/Suspended -> Approved)
-    /// and `listCurrency` (Currency listings, created Approved, with `issuer == address(0)`,
+    /// @notice Emitted by every path that makes a listing tradable, mirroring Solana's
+    /// `ListingApproved`: `payListingFee` (issuer listings, Quoted -> Approved, right after
+    /// `ListingFeePaid`), `approveListing` (reinstatement, Suspended -> Approved) and
+    /// `listCurrency` (Currency listings, created Approved, with `issuer == address(0)`,
     /// `cashbackEligible == false` and `docHash == 0`). The Register indexer watches this one
     /// event on every chain and tells currencies apart by `assetClass`.
     event ListingApproved(
@@ -90,6 +146,28 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
         bytes32 docHash,
         uint64 approvedAt
     );
+    /// @notice The listing authority quoted the listing fee of `token` (spec §3.13). The
+    /// valuation is public. Mirrors Solana's `ListingQuoted`.
+    event ListingQuoted(
+        address indexed token,
+        address indexed feeToken,
+        uint256 valuation,
+        uint16 listingFeeBps,
+        uint256 listingFee,
+        uint64 expiresAt
+    );
+    /// @notice The issuer paid the quoted listing fee; `ListingApproved` follows in the same
+    /// transaction. Mirrors Solana's `ListingFeePaid`.
+    event ListingFeePaid(
+        address indexed token,
+        address indexed issuer,
+        address indexed feeToken,
+        uint256 valuation,
+        uint16 listingFeeBps,
+        uint256 amount
+    );
+    event SettlementChangeProposed(address indexed newSettlement, uint256 executeAfter);
+    event SettlementChanged(address indexed oldSettlement, address indexed newSettlement);
     event ListingSuspended(address indexed token);
     event ListingDelisted(address indexed token, ListingStatus previousStatus);
     event IssuanceRequested(
@@ -117,6 +195,17 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
     error NotCashbackEligible(address token);
     error CashbackAlreadyFrozen(address token);
     error CashbackNotFrozen(address token);
+    error CurrencyHasNoListingFee(address token);
+    error ZeroValuation();
+    error InvalidListingFeeBps(uint16 listingFeeBps);
+    error InvalidExpiry(uint64 expiresAt);
+    error ListingNotQuoted(address token, ListingStatus status);
+    error QuoteExpired(address token, uint64 expiresAt);
+    error NotFeeToken(address quotedFeeToken, address feeToken);
+    error ListingFeeNotPaid(address token);
+    error SettlementNotSet();
+    error SettlementRegistryMismatch(address settlement);
+    error TransferAmountMismatch(address token, uint256 expected, uint256 received);
 
     /// @param admin_ Holder of DEFAULT_ADMIN_ROLE (role changes, timelock) and PAUSER_ROLE.
     /// @param listingAuthority_ Initial holder of LISTING_AUTHORITY_ROLE.
@@ -200,20 +289,164 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
         emit ListingApproved(token, address(0), AssetClass.Currency, false, bytes32(0), approvedAt);
     }
 
-    /// @notice Approves a `Pending` listing, or re-approves a `Suspended` one.
+    /// @notice Reinstates a `Suspended` listing of any class, free of charge (a suspended
+    /// issuer listing has already paid its listing fee). It never approves a listing for the
+    /// first time: a `Pending` or `Quoted` listing is approved only by `payListingFee`.
     /// @param token Listed token.
     function approveListing(address token) external onlyRole(LISTING_AUTHORITY_ROLE) {
         Listing storage listing = _listings[token];
         ListingStatus from = listing.status;
-        if (from != ListingStatus.Pending && from != ListingStatus.Suspended) {
-            revert InvalidStatusTransition(token, from);
-        }
+        if (from == ListingStatus.Pending || from == ListingStatus.Quoted) revert ListingFeeNotPaid(token);
+        if (from != ListingStatus.Suspended) revert InvalidStatusTransition(token, from);
+        _approve(token, listing);
+    }
+
+    /// @dev Sets `Approved` and `approvedAt`, and emits `ListingApproved`.
+    function _approve(address token, Listing storage listing) private {
         uint64 approvedAt = uint64(block.timestamp);
         listing.status = ListingStatus.Approved;
         listing.approvedAt = approvedAt;
         emit ListingApproved(
             token, listing.issuer, listing.assetClass, listing.cashbackEligible, listing.docHash, approvedAt
         );
+    }
+
+    // ── Listing fee (spec §3.13) ────────────────────────────────────────────────────────
+
+    /// @notice Quotes the listing fee of a `Pending` or `Quoted` issuer listing, which becomes
+    /// (or stays) `Quoted`. Re-quoting replaces every field of the quote, also after it
+    /// expired, until the fee is paid. Allowed while paused (a listing action; it moves
+    /// nothing).
+    /// @dev The fee is `ceil(valuation * listingFeeBps / 10_000)`, in base units of the fee
+    /// token in force now (`settlement.feeToken()`), which the quote records. The valuation
+    /// is public: it is stored here and carried by `ListingQuoted`.
+    /// @param token Token with an issuer listing.
+    /// @param valuation Valuation of the offering in base units of the fee token (non-zero).
+    /// @param listingFeeBps Rate, `1 <= listingFeeBps <= MAX_LISTING_FEE_BPS`.
+    /// @param expiresAt End of validity: `now < expiresAt <= now + MAX_QUOTE_DURATION`.
+    function quoteListing(address token, uint256 valuation, uint16 listingFeeBps, uint64 expiresAt)
+        external
+        onlyRole(LISTING_AUTHORITY_ROLE)
+    {
+        Listing storage listing = _listings[token];
+        ListingStatus from = listing.status;
+        // A token with no listing reads as class `Equity` (the zero value), so this only
+        // catches real Currency listings, which are created Approved and never quoted.
+        if (listing.assetClass == AssetClass.Currency) revert CurrencyHasNoListingFee(token);
+        if (from != ListingStatus.Pending && from != ListingStatus.Quoted) revert InvalidStatusTransition(token, from);
+        if (valuation == 0) revert ZeroValuation();
+        if (listingFeeBps == 0 || listingFeeBps > MAX_LISTING_FEE_BPS) revert InvalidListingFeeBps(listingFeeBps);
+        if (expiresAt <= block.timestamp || expiresAt > block.timestamp + MAX_QUOTE_DURATION) {
+            revert InvalidExpiry(expiresAt);
+        }
+        address feeToken = _settlement().feeToken();
+
+        uint256 listingFee = Math.mulDiv(valuation, listingFeeBps, BPS_DENOMINATOR, Math.Rounding.Ceil);
+        _listingFeeQuotes[token] = ListingFeeQuote({
+            valuation: valuation,
+            listingFee: listingFee,
+            listingFeePaid: 0,
+            listingFeeToken: feeToken,
+            listingFeeBps: listingFeeBps,
+            quoteExpiresAt: expiresAt
+        });
+        listing.status = ListingStatus.Quoted;
+        emit ListingQuoted(token, feeToken, valuation, listingFeeBps, listingFee, expiresAt);
+    }
+
+    /// @notice The issuer pays the quoted listing fee and the listing becomes `Approved`: the
+    /// only way an issuer listing is approved for the first time. The fee goes from the
+    /// issuer (which must have approved this contract for it) to the CashbackDistributor,
+    /// as protocol revenue with no cashback share. Emits `ListingFeePaid`, then
+    /// `ListingApproved`. Blocked while the protocol is paused.
+    /// @dev Payable once: afterwards the status never returns to `Quoted`. Only while
+    /// `now < quoteExpiresAt`, and only in the fee token recorded on the quote, which must
+    /// still be `settlement.feeToken()` (after a fee-token switch the listing authority
+    /// re-quotes). The transfer is checked by balance delta, so a fee token that delivers
+    /// less than the fee reverts everything.
+    /// @param token Token with a `Quoted` listing whose issuer is the caller.
+    function payListingFee(address token) external nonReentrant whenNotPaused {
+        Listing storage listing = _listings[token];
+        // Currency listings have issuer == address(0), so they can never pay a listing fee.
+        if (msg.sender != listing.issuer) revert NotIssuer();
+        if (listing.status != ListingStatus.Quoted) revert ListingNotQuoted(token, listing.status);
+        ListingFeeQuote storage quote = _listingFeeQuotes[token];
+        if (block.timestamp >= quote.quoteExpiresAt) revert QuoteExpired(token, quote.quoteExpiresAt);
+        INiaraSettlement settlement_ = _settlement();
+        address feeToken = quote.listingFeeToken;
+        address currentFeeToken = settlement_.feeToken();
+        if (feeToken != currentFeeToken) revert NotFeeToken(feeToken, currentFeeToken);
+        address distributor = address(settlement_.cashbackDistributor());
+        uint256 fee = quote.listingFee;
+
+        // Checks-effects-interactions: the fee is marked paid, the listing approved, and
+        // `ListingFeePaid` then `ListingApproved` are emitted BEFORE the fee token is called.
+        // A fee token with a hook (ERC-777/ERC-1363) that re-enters during the transfer finds
+        // the listing already `Approved`, so it can never pay twice (`nonReentrant` stops a
+        // re-entry into this function first), and an off-chain indexer never sees the
+        // `Transfer` before the events of the payment that caused it. A failed or short
+        // transfer reverts everything, events included.
+        quote.listingFeePaid = fee;
+        emit ListingFeePaid(token, msg.sender, feeToken, quote.valuation, quote.listingFeeBps, fee);
+        _approve(token, listing);
+
+        uint256 balanceBefore = IERC20(feeToken).balanceOf(distributor);
+        IERC20(feeToken).safeTransferFrom(msg.sender, distributor, fee);
+        uint256 balanceAfter = IERC20(feeToken).balanceOf(distributor);
+        uint256 received = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0;
+        if (received != fee) revert TransferAmountMismatch(feeToken, fee, received);
+        // As in `NiaraSettlement.settle` and `P2PEscrow.acceptDeal`, the accounting call comes
+        // after the fee transfer out of necessity: the distributor accounts for a fee that must
+        // already be in its balance. It is an internal protocol call and any failure reverts
+        // the whole transaction, including the events above.
+        ICashbackDistributor(distributor).recordListingFee(token, feeToken, fee);
+    }
+
+    /// @notice The listing-fee quote of `token` (all zero if it was never quoted).
+    /// @param token Listed token.
+    /// @return The stored quote, including `listingFeePaid`.
+    function getListingFeeQuote(address token) external view returns (ListingFeeQuote memory) {
+        return _listingFeeQuotes[token];
+    }
+
+    /// @notice Proposes the NiaraSettlement this registry takes the fee token and the
+    /// CashbackDistributor from. Subject to the timelock.
+    /// @param newSettlement A NiaraSettlement whose `listingRegistry()` is this contract.
+    /// @return executeAfter Earliest timestamp `executeSetSettlement` can run.
+    function proposeSetSettlement(address newSettlement)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        returns (uint256 executeAfter)
+    {
+        _checkSettlement(newSettlement);
+        executeAfter = _scheduleAction(keccak256(abi.encode("SET_SETTLEMENT", newSettlement)));
+        emit SettlementChangeProposed(newSettlement, executeAfter);
+    }
+
+    /// @notice Executes a proposed settlement link after the timelock delay. Open quotes keep
+    /// their recorded fee token, so a link to a settlement with another fee token voids them
+    /// (`NotFeeToken`) until they are re-quoted.
+    /// @param newSettlement The proposed NiaraSettlement.
+    function executeSetSettlement(address newSettlement) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _checkSettlement(newSettlement);
+        _consumeAction(keccak256(abi.encode("SET_SETTLEMENT", newSettlement)));
+        address old = address(settlement);
+        settlement = INiaraSettlement(newSettlement);
+        emit SettlementChanged(old, newSettlement);
+    }
+
+    /// @dev Reverts unless `newSettlement` is a non-zero contract whose registry is this one.
+    function _checkSettlement(address newSettlement) private view {
+        if (newSettlement == address(0)) revert ZeroAddress();
+        if (address(INiaraSettlement(newSettlement).listingRegistry()) != address(this)) {
+            revert SettlementRegistryMismatch(newSettlement);
+        }
+    }
+
+    /// @dev The linked settlement; reverts `SettlementNotSet` while there is none.
+    function _settlement() private view returns (INiaraSettlement settlement_) {
+        settlement_ = settlement;
+        if (address(settlement_) == address(0)) revert SettlementNotSet();
     }
 
     /// @notice Suspends an `Approved` listing (it can be re-approved later).
@@ -225,8 +458,9 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
         emit ListingSuspended(token);
     }
 
-    /// @notice Delists a `Pending`, `Approved` or `Suspended` listing. Final: a delisted
-    /// token can never be approved, resubmitted or issued again.
+    /// @notice Delists a `Pending`, `Quoted`, `Approved` or `Suspended` listing. From
+    /// `Pending` or `Quoted` this is how a listing is rejected. Final: a delisted token can
+    /// never be approved, resubmitted or issued again.
     /// @param token Listed token.
     function delist(address token) external onlyRole(LISTING_AUTHORITY_ROLE) {
         Listing storage listing = _listings[token];
@@ -284,7 +518,9 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
     // ── Issuance batches ────────────────────────────────────────────────────────────────
 
     /// @notice The issuer requests a new issuance batch. Allowed while the listing is
-    /// `Pending` or `Approved`. Nothing is minted until the listing authority approves it.
+    /// `Pending`, `Quoted` or `Approved`. Nothing is minted until the listing authority
+    /// approves it, which needs the listing `Approved` (its listing fee paid). Batches
+    /// charge no listing fee.
     /// @param token Factory token with a listing submitted by the caller.
     /// @param amount Amount to mint.
     /// @param recipient Who receives the batch.
@@ -297,8 +533,9 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
         Listing storage listing = _listings[token];
         // Currency listings have issuer == address(0), so they can never request issuance.
         if (msg.sender != listing.issuer) revert NotIssuer();
-        if (listing.status != ListingStatus.Pending && listing.status != ListingStatus.Approved) {
-            revert IssuanceNotAllowed(token, listing.status);
+        ListingStatus status = listing.status;
+        if (status != ListingStatus.Pending && status != ListingStatus.Quoted && status != ListingStatus.Approved) {
+            revert IssuanceNotAllowed(token, status);
         }
         if (amount == 0) revert ZeroAmount();
         if (recipient == address(0)) revert ZeroAddress();
