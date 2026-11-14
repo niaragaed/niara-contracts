@@ -229,6 +229,10 @@ applies to every Niara repository, including new ones: copy both files when crea
 
 1. Before coding, read the files involved; do not assume.
 2. `forge build` and `forge test -vv` at the end of each change; fix whatever shows up.
+   Coverage: `FOUNDRY_INVARIANT_RUNS=16 forge coverage --report lcov` (writes the git-ignored
+   `lcov.info`). Current `src/` figures (2026-11-14): lines 600/600, branches 140/140,
+   functions 100/100. Do not let them drop. Do not use `--ir-minimum`: it can misreport
+   lines, so its numbers are not comparable. Details in README, "Coverage".
 3. Local commit at the end of each task, message in English, following `feat:` /
    `fix:` / `refactor:` / `chore:` / `test:`.
 4. Never `--force`, never rewrite history, never push unless asked, never create a

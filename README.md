@@ -260,6 +260,26 @@ Prerequisites: [Foundry](https://book.getfoundry.sh/) installed (`forge`, `cast`
 No environment variables are needed for build/test. `.env.example` documents what is
 needed for a testnet deployment (see the section below).
 
+### Coverage
+
+```bash
+FOUNDRY_INVARIANT_RUNS=16 forge coverage --report lcov
+```
+
+`FOUNDRY_INVARIANT_RUNS=16` runs the invariant suites with 16 runs instead of the 256 in
+`foundry.toml`, to keep the coverage run short. It writes `lcov.info` (git-ignored). Figures below are for `src/` only (the report also lists
+`script/`), summed from `lcov.info` on 2026-11-14 with 643 tests passing:
+
+| Metric    | Hit / found | Coverage |
+|-----------|-------------|----------|
+| Lines     | 600 / 600   | 100.00%  |
+| Branches  | 140 / 140   | 100.00%  |
+| Functions | 100 / 100   | 100.00%  |
+
+Do not add `--ir-minimum`: it can misreport lines, so its numbers would not be comparable
+with the ones above. Coverage is not a substitute for the
+per-function tests and the log-order tests required by `CLAUDE.md`.
+
 ---
 
 ## Testnet deployment (Sepolia and Base Sepolia)
