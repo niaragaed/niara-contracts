@@ -223,8 +223,17 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
 
     // ── Pause ───────────────────────────────────────────────────────────────────────────
 
-    /// @notice Pauses the whole protocol in an emergency: `approveIssuance`, `settle` and
-    /// the CashbackDistributor withdrawals.
+    /// @notice Pauses the whole protocol in an emergency. This is the single shared pause:
+    /// the other contracts read it through `paused()` (ProtocolPausable).
+    /// @dev While paused, these revert `EnforcedPause`:
+    /// - `ListingRegistry.approveIssuance` and `ListingRegistry.payListingFee`;
+    /// - `NiaraSettlement.settle`;
+    /// - `CashbackDistributor.withdraw` and `CashbackDistributor.withdrawProtocolFees`;
+    /// - `P2PEscrow.openDeal`, `P2PEscrow.acceptDeal` and `P2PEscrow.sweepExcess`.
+    /// Not stopped: `P2PEscrow.cancelDeal` and `P2PEscrow.expireDeal` (a user always gets their
+    /// own deposit back), listing actions including `quoteListing`, `requestIssuance`,
+    /// `rejectIssuance`, and cashback accrual. Pausing is immediate (not timelocked) and
+    /// restricted to PAUSER_ROLE.
     function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }
