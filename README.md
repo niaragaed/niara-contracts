@@ -149,8 +149,11 @@ issuer listing is approved for the first time:
 - `approveListing` only reinstates a `Suspended` listing (any class, free); on a `Pending`
   or `Quoted` listing it reverts `ListingFeeNotPaid`. A listing is rejected with `delist`,
   from `Pending` or `Quoted`.
-- Issuance batches can be requested while `Pending` or `Quoted` and execute only once the
-  listing is `Approved`; they charge no listing fee. `Currency` listings (`listCurrency`)
+- Issuance batches can be requested only while the listing is `Approved` (listing fee paid):
+  `requestIssuance` on a `Pending`, `Quoted`, `Suspended` or `Delisted` listing reverts
+  `IssuanceNotAllowed` and creates no batch. `approveIssuance` also needs `Approved`. A batch
+  still open when the listing is suspended or delisted stays `Requested` until reinstatement
+  or `rejectIssuance`. Batches charge no listing fee. `Currency` listings (`listCurrency`)
   are created `Approved` and never pay one.
 
 The registry reads the fee token and the distributor from `NiaraSettlement`, through a link

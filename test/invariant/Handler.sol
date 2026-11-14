@@ -125,6 +125,14 @@ contract Handler is Test {
     /// Approved. Must stay zero (spec invariant 11, second half).
     uint256 public ghost_illegalIssuances;
 
+    /// @notice `requestIssuance` calls accepted on a listing that was not `Approved`. Must
+    /// stay zero (issuance rule, spec §3.12 and invariant 11).
+    uint256 public ghost_illegalRequests;
+
+    /// @notice `requestIssuance` calls whose outcome (success, or the exact error) or effects
+    /// (batch counter, stored batch) differed from the prediction. Must stay zero.
+    uint256 public ghost_issuanceRequestMismatches;
+
     // ── Listing fee (spec §3.13) ────────────────────────────────────────────────────────
 
     /// @notice Three more issuer listings (Equity, FixedIncome, Credit) that start `Pending`:
@@ -543,7 +551,7 @@ contract Handler is Test {
     }
 
     /// @dev Mostly the two seeded instruments; one time in four, a listing-fee listing (so
-    /// issuance is requested while `Pending` or `Quoted` and executes only once paid).
+    /// issuance is refused while `Pending` or `Quoted` and succeeds only once paid).
     function _pickNative(uint256 seed) internal view returns (NativeAssetToken) {
         uint256 pick = seed % 8;
         if (pick < 6) return pick % 2 == 0 ? nativeEquity : nativeBond;
@@ -697,17 +705,53 @@ contract Handler is Test {
     }
 
     /// @notice The native issuer requests a batch to a random actor. A fraction of calls
-    /// comes from a non-issuer, or with a zero amount, on purpose.
+    /// comes from a non-issuer, or with a zero amount, on purpose. The outcome is predicted
+    /// exactly (issuance rule, spec §3.12: only an `Approved` listing accepts a request), in
+    /// the contract's check order, and a refused request must leave `nextBatchNo` untouched.
     function requestIssuance(uint256 tokenSeed, uint256 amountSeed, uint256 actorSeed) external {
-        NativeAssetToken token = _pickNative(tokenSeed);
+        address token = address(_pickNative(tokenSeed));
         address caller = _chaos(actorSeed) ? _actorAt(actorSeed) : nativeIssuer;
         uint256 amount = _chaos(amountSeed) ? 0 : bound(amountSeed, 1, 1_000_000 ether);
+        address recipient = _actorAt(actorSeed);
 
         // Chaotic path: a zero doc hash (EmptyDocHash).
         bytes32 docHash = _chaos(tokenSeed / 2) ? bytes32(0) : keccak256(abi.encode(amountSeed));
 
+        bytes memory expected = _predictRequest(token, caller, amount, recipient, docHash);
+        uint256 nextBefore = registry.nextBatchNo(token);
+
         vm.prank(caller);
-        registry.requestIssuance(address(token), amount, _actorAt(actorSeed), docHash);
+        (bool ok, bytes memory ret) =
+            address(registry).call(abi.encodeCall(ListingRegistry.requestIssuance, (token, amount, recipient, docHash)));
+        if (!_matches(ok, ret, expected)) {
+            ghost_issuanceRequestMismatches++;
+            return;
+        }
+
+        // A refused request creates no batch; an accepted one creates exactly the next one.
+        if (registry.nextBatchNo(token) != (ok ? nextBefore + 1 : nextBefore)) ghost_issuanceRequestMismatches++;
+        if (!ok) return;
+        (uint256 stored,,, ListingRegistry.IssuanceStatus status,,) = registry.issuanceBatches(token, nextBefore);
+        if (stored != amount || status != ListingRegistry.IssuanceStatus.Requested) ghost_issuanceRequestMismatches++;
+        // Reached only on success: a request accepted off an `Approved` listing is illegal.
+        if (registry.getListing(token).status != IListingRegistry.ListingStatus.Approved) ghost_illegalRequests++;
+    }
+
+    /// @dev The error `requestIssuance` must raise, in the contract's check order, or "".
+    function _predictRequest(address token, address caller, uint256 amount, address recipient, bytes32 docHash)
+        internal
+        view
+        returns (bytes memory)
+    {
+        IListingRegistry.Listing memory listing = registry.getListing(token);
+        if (caller != listing.issuer) return abi.encodeWithSelector(ListingRegistry.NotIssuer.selector);
+        if (listing.status != IListingRegistry.ListingStatus.Approved) {
+            return abi.encodeWithSelector(ListingRegistry.IssuanceNotAllowed.selector, token, listing.status);
+        }
+        if (amount == 0) return abi.encodeWithSelector(ListingRegistry.ZeroAmount.selector);
+        if (recipient == address(0)) return abi.encodeWithSelector(ListingRegistry.ZeroAddress.selector);
+        if (docHash == bytes32(0)) return abi.encodeWithSelector(ListingRegistry.EmptyDocHash.selector);
+        return "";
     }
 
     /// @dev Batches are numbered 1..next-1. The bounded path picks one of them; the chaotic

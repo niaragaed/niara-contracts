@@ -27,7 +27,7 @@ import {Handler} from "./invariant/Handler.sol";
 /// payment at setup, and three more issuer listings (Equity, FixedIncome, Credit) start
 /// `Pending`. Random `quoteListing` and `payListingFee` calls have their outcome predicted
 /// exactly, `approveListing` never approves an unpaid listing, and issuance on the new
-/// listings is requested while `Pending` or `Quoted` and executes only once paid.
+/// listings is refused while `Pending` or `Quoted` and succeeds only once paid.
 contract InvariantTest is ListingFeeHelpers {
     AssetToken public assetEquity;
     AssetToken public assetCommodity;
@@ -430,6 +430,8 @@ contract InvariantTest is ListingFeeHelpers {
     /// paused (spec invariant 11, second half).
     function invariant_NoIssuanceWhilePausedOrNotApproved() public view {
         assertEq(handler.ghost_illegalIssuances(), 0);
+        assertEq(handler.ghost_illegalRequests(), 0, "a batch was requested on a non-Approved listing");
+        assertEq(handler.ghost_issuanceRequestMismatches(), 0, "requestIssuance outcome != prediction");
     }
 
     /// @notice One shared pause: while the registry is paused, no settlement, cashback

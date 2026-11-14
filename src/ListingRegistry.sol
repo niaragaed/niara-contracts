@@ -39,7 +39,8 @@ import {NativeAssetToken} from "./NativeAssetToken.sol";
 ///
 /// Issuance: the registry is the only minter of every factory token. The issuer requests a
 /// batch (`requestIssuance`), the listing authority approves it (`approveIssuance`) and the
-/// registry mints it, so neither the issuer nor Niara can mint alone.
+/// registry mints it, so neither the issuer nor Niara can mint alone. Both steps need the
+/// listing `Approved` (its listing fee paid); there is no queuing before approval.
 ///
 /// Pause (spec §3.3, "Pause principle"): this is the protocol's single, shared pause, the EVM
 /// mirror of Solana's `Config.paused`. It blocks payouts based on protocol accounting, never
@@ -517,10 +518,15 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
 
     // ── Issuance batches ────────────────────────────────────────────────────────────────
 
-    /// @notice The issuer requests a new issuance batch. Allowed while the listing is
-    /// `Pending`, `Quoted` or `Approved`. Nothing is minted until the listing authority
-    /// approves it, which needs the listing `Approved` (its listing fee paid). Batches
-    /// charge no listing fee.
+    /// @notice The issuer requests a new issuance batch. Allowed only while the listing is
+    /// `Approved`, i.e. once its listing fee is paid (spec §3.12, issuance rule): a `Pending`,
+    /// `Quoted`, `Suspended` or `Delisted` listing reverts `IssuanceNotAllowed`, creates no
+    /// batch and does not advance `nextBatchNo`. Nothing is minted until the listing authority
+    /// approves the batch, which also needs the listing `Approved`. Batches charge no listing
+    /// fee.
+    /// @dev A batch requested while `Approved` that is still open when the listing is
+    /// suspended or delisted stays `Requested`: it executes after reinstatement, or the listing
+    /// authority rejects it (`rejectIssuance` works in any status).
     /// @param token Factory token with a listing submitted by the caller.
     /// @param amount Amount to mint.
     /// @param recipient Who receives the batch.
@@ -534,9 +540,7 @@ contract ListingRegistry is IListingRegistry, TimelockedAccessControl, Pausable,
         // Currency listings have issuer == address(0), so they can never request issuance.
         if (msg.sender != listing.issuer) revert NotIssuer();
         ListingStatus status = listing.status;
-        if (status != ListingStatus.Pending && status != ListingStatus.Quoted && status != ListingStatus.Approved) {
-            revert IssuanceNotAllowed(token, status);
-        }
+        if (status != ListingStatus.Approved) revert IssuanceNotAllowed(token, status);
         if (amount == 0) revert ZeroAmount();
         if (recipient == address(0)) revert ZeroAddress();
         if (docHash == bytes32(0)) revert EmptyDocHash();

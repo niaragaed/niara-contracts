@@ -616,8 +616,8 @@ contract ListingRegistryTest is ListingFeeHelpers {
 
     // ── requestIssuance ────────────────────────────────────────────────────────────────
 
-    function test_RequestIssuance_WhilePending() public {
-        _toStatus(IListingRegistry.ListingStatus.Pending);
+    function test_RequestIssuance_WhileApproved_StoresBatchAndEmits() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
         vm.warp(1_700_000_000);
 
         vm.expectEmit(true, true, false, true, address(registry));
@@ -657,6 +657,7 @@ contract ListingRegistryTest is ListingFeeHelpers {
         // Another token has its own counter.
         NativeAssetToken bond = _create(issuer, IListingRegistry.AssetClass.FixedIncome);
         _submit(bond);
+        _pay(address(bond));
         vm.prank(issuer);
         assertEq(registry.requestIssuance(address(bond), 1 ether, investor, BATCH_DOC), 1);
         assertEq(registry.nextBatchNo(address(equity)), 4);
@@ -720,26 +721,64 @@ contract ListingRegistryTest is ListingFeeHelpers {
         registry.requestIssuance(address(usdt), 1 ether, investor, BATCH_DOC);
     }
 
-    function test_RequestIssuance_RevertsWhileSuspended() public {
-        _toStatus(IListingRegistry.ListingStatus.Suspended);
+    /// @dev A refused request creates no batch: the counter does not advance, the slot stays
+    /// empty and no event is emitted.
+    function _assertRequestRefused(IListingRegistry.ListingStatus status) internal {
+        _toStatus(status);
+        uint256 nextBefore = registry.nextBatchNo(address(equity));
+
+        vm.recordLogs();
         vm.prank(issuer);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ListingRegistry.IssuanceNotAllowed.selector, address(equity), IListingRegistry.ListingStatus.Suspended
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.IssuanceNotAllowed.selector, address(equity), status));
         registry.requestIssuance(address(equity), 1 ether, investor, BATCH_DOC);
+
+        assertEq(vm.getRecordedLogs().length, 0);
+        assertEq(registry.nextBatchNo(address(equity)), nextBefore);
+        (uint256 amount,,, ListingRegistry.IssuanceStatus batchStatus,,) =
+            registry.issuanceBatches(address(equity), nextBefore);
+        assertEq(amount, 0);
+        assertEq(uint8(batchStatus), uint8(ListingRegistry.IssuanceStatus.None));
+    }
+
+    /// @notice Issuance rule (spec §3.12): the offering cannot be queued before the listing
+    /// fee is paid.
+    function test_RequestIssuance_RevertsWhilePending() public {
+        _assertRequestRefused(IListingRegistry.ListingStatus.Pending);
+    }
+
+    function test_RequestIssuance_RevertsWhileQuoted() public {
+        _assertRequestRefused(IListingRegistry.ListingStatus.Quoted);
+    }
+
+    function test_RequestIssuance_RevertsWhileSuspended() public {
+        _assertRequestRefused(IListingRegistry.ListingStatus.Suspended);
     }
 
     function test_RequestIssuance_RevertsWhenDelisted() public {
-        _toStatus(IListingRegistry.ListingStatus.Delisted);
+        _assertRequestRefused(IListingRegistry.ListingStatus.Delisted);
+    }
+
+    /// @notice A refused request while Quoted does not become possible by paying later for
+    /// the refused batch: after payment a fresh request is batch 1.
+    function test_RequestIssuance_RefusedWhileQuotedThenSucceedsAfterPayment() public {
+        _toStatus(IListingRegistry.ListingStatus.Quoted);
         vm.prank(issuer);
         vm.expectRevert(
             abi.encodeWithSelector(
-                ListingRegistry.IssuanceNotAllowed.selector, address(equity), IListingRegistry.ListingStatus.Delisted
+                ListingRegistry.IssuanceNotAllowed.selector, address(equity), IListingRegistry.ListingStatus.Quoted
             )
         );
-        registry.requestIssuance(address(equity), 1 ether, investor, BATCH_DOC);
+        registry.requestIssuance(address(equity), 10 ether, investor, BATCH_DOC);
+
+        _pay(address(equity));
+        uint256 collected = distributor.listingFeesCollected(address(usdt));
+        uint256 batchNo = _requestIssuance(10 ether);
+        assertEq(batchNo, 1);
+        vm.prank(authority);
+        registry.approveIssuance(address(equity), batchNo);
+        assertEq(equity.balanceOf(investor), 10 ether);
+        // The batch charges no listing fee.
+        assertEq(distributor.listingFeesCollected(address(usdt)), collected);
     }
 
     function test_RequestIssuance_RevertsOnZeroDocHash() public {
@@ -788,39 +827,35 @@ contract ListingRegistryTest is ListingFeeHelpers {
         assertEq(uint8(status), uint8(ListingRegistry.IssuanceStatus.Executed));
     }
 
-    /// @notice A batch requested while Pending can only be executed after the listing is
-    /// approved.
-    function test_ApproveIssuance_RequestedWhilePendingExecutesAfterApproval() public {
-        _toStatus(IListingRegistry.ListingStatus.Pending);
+    /// @notice A batch requested while Approved that is still open when the listing is
+    /// suspended stays Requested: it cannot execute meanwhile and executes after
+    /// reinstatement.
+    function test_ApproveIssuance_RequestedWhileApprovedExecutesAfterReinstatement() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
         uint256 batchNo = _requestIssuance(10 ether);
+        _suspend(address(equity));
 
         vm.prank(authority);
         vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingNotApproved.selector, address(equity)));
         registry.approveIssuance(address(equity), batchNo);
+        assertEq(uint8(_batchStatus(batchNo)), uint8(ListingRegistry.IssuanceStatus.Requested));
 
-        _quote(address(equity));
         vm.prank(authority);
-        vm.expectRevert(abi.encodeWithSelector(ListingRegistry.ListingNotApproved.selector, address(equity)));
-        registry.approveIssuance(address(equity), batchNo);
-
-        _pay(address(equity));
+        registry.approveListing(address(equity));
         vm.prank(authority);
         registry.approveIssuance(address(equity), batchNo);
         assertEq(equity.balanceOf(investor), 10 ether);
     }
 
-    /// @notice Issuance can also be requested while the listing fee is quoted; the batch
-    /// executes only once the fee is paid, and charges no fee of its own.
-    function test_RequestIssuance_WhileQuoted() public {
-        _toStatus(IListingRegistry.ListingStatus.Quoted);
+    /// @notice A batch left open on a suspended listing can be rejected (any status).
+    function test_RejectIssuance_OpenBatchOnSuspendedListing() public {
+        _toStatus(IListingRegistry.ListingStatus.Approved);
         uint256 batchNo = _requestIssuance(10 ether);
-        assertEq(batchNo, 1);
-        _pay(address(equity));
-        uint256 collected = distributor.listingFeesCollected(address(usdt));
-        vm.prank(authority);
-        registry.approveIssuance(address(equity), batchNo);
-        assertEq(equity.balanceOf(investor), 10 ether);
-        assertEq(distributor.listingFeesCollected(address(usdt)), collected);
+        _suspend(address(equity));
+
+        _reject(batchNo);
+        assertEq(uint8(_batchStatus(batchNo)), uint8(ListingRegistry.IssuanceStatus.Rejected));
+        assertEq(equity.totalSupply(), 0);
     }
 
     function test_ApproveIssuance_RevertsWhileSuspended() public {
@@ -995,14 +1030,8 @@ contract ListingRegistryTest is ListingFeeHelpers {
     }
 
     /// @notice Rejection works in every listing status, including the ones where approval
-    /// is impossible (Pending, Suspended, Delisted), so no request is ever stuck open.
-    function test_RejectIssuance_WhilePending() public {
-        _toStatus(IListingRegistry.ListingStatus.Pending);
-        uint256 batchNo = _requestIssuance(10 ether);
-        _reject(batchNo);
-        assertEq(uint8(_batchStatus(batchNo)), uint8(ListingRegistry.IssuanceStatus.Rejected));
-    }
-
+    /// is impossible (Suspended, Delisted), so no request is ever stuck open. A batch can
+    /// only be open on a non-Approved listing if it was requested while Approved.
     function test_RejectIssuance_WhileSuspended() public {
         _toStatus(IListingRegistry.ListingStatus.Approved);
         uint256 batchNo = _requestIssuance(10 ether);
@@ -1149,12 +1178,11 @@ contract ListingRegistryTest is ListingFeeHelpers {
         assertTrue(registry.isApproved(address(usdt)));
     }
 
-    /// @notice Full native lifecycle at registry level: issue, list, request, approve,
-    /// mint, and the holder burns with a reason.
+    /// @notice Full native lifecycle at registry level: issue, list (quote and pay), request,
+    /// approve, mint, and the holder burns with a reason.
     function test_NativeLifecycle_IssueListMintBurn() public {
-        _submit(equity);
+        _toStatus(IListingRegistry.ListingStatus.Approved);
         uint256 batchNo = _requestIssuance(500 ether);
-        _pay(address(equity));
         vm.prank(authority);
         registry.approveIssuance(address(equity), batchNo);
 
