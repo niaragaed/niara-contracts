@@ -304,6 +304,68 @@ Public RPCs of the last three (in `.env.example`): `https://rpc.testnet.chain.ro
 `https://rpc.hyperliquid-testnet.xyz/evm`, `https://rpc.moderato.tempo.xyz`. Network quirks
 that change how a deployment is run are in "Network quirks" below.
 
+### Network quirks (measured 2026-11-15)
+
+Anvil, forge's dry run and `test/script/` all charge Ethereum gas. Three of these chains do
+not, so a dry run that passes locally can still fail on-chain. Phase 1 as each node prices it
+(its 11 transactions replayed with `eth_simulateV1`, or `eth_estimateGas` per transaction with
+state overrides where the node lacks that method), against ~12.06M gas on Ethereum rules:
+
+| Network | Phase 1 gas on the node | Largest transaction | Per-transaction limit | What it takes |
+|---|---|---|---|---|
+| Base Sepolia | 12.06M | ListingRegistry 4.05M | (none hit) | the default `--gas-estimate-multiplier` (130) |
+| Robinhood Chain testnet | ~13.0M: Ethereum gas plus an L1 data component (+8% on the large creations, ~+6k per small transaction) | ListingRegistry 4.37M | (none hit) | `--gas-estimate-multiplier 200`: the L1 component follows the L1 price, and only gas used is charged |
+| HyperEVM testnet | 12.06M | ListingRegistry 4.05M | **3,000,000 in small blocks** | big blocks for the deployer during phase 1 (below) |
+| Tempo testnet | **63.2M** (5.0 to 6.4x Ethereum gas; ~250k more on an account's first transaction) | ListingRegistry 20.5M | (none hit) | `--gas-estimate-multiplier 700` for phase 1 (the Register's value; covers the 6.4x mock tokens by 10%) |
+| Ethereum Sepolia | **82.0M** (6.5 to 7x on contract creation, 2.5x on the proposals) | ListingRegistry **28.4M**, P2PEscrow **19.6M** | **16,777,216** (EIP-7825) | **cannot be deployed as the contracts stand** (below) |
+
+**Sepolia.** The node reprices contract creation (the Register measured ~7x in October 2026;
+`eth_call` of the ListingRegistry creation fails at 16,777,216 gas and succeeds at 30M). Two
+phase 1 transactions need more gas than any Sepolia transaction may carry, so no multiplier
+helps: deploying there needs smaller contracts (on these prices, roughly 10 KB of runtime code
+per creating transaction at most; ListingRegistry is 13.0 KB and also creates the 4.8 KB
+AssetTokenFactory, P2PEscrow is 12.2 KB). That is a design decision, not yet taken.
+
+**HyperEVM big blocks.** Small blocks (one a second) cap a transaction at 3M gas; big blocks
+(30M, about one a minute) are a per-address HyperCore setting. ListingRegistry needs 4.05M and
+forge's limit for P2PEscrow is 3.64M, so the deployer must be on big blocks for phase 1. Phase
+2 and the demo fit small blocks (largest 0.66M), and the five other wallets never need them.
+The switch is the HyperCore action `{"type":"evmUserModify","usingBigBlocks":true}`, signed by
+the deployer itself. To sign it without the key leaving its keystore: build the EIP-712
+"phantom agent" payload of that action (domain `Exchange`, version `1`, chain id 1337,
+verifying contract zero; type `Agent(string source,bytes32 connectionId)` with source `b` for
+testnet and `connectionId = keccak256(msgpack(action) ‖ nonce as 8 bytes big-endian ‖ 0x00)`),
+sign it with `cast wallet sign --data --from-file agent.json --account niara-evm-deployer`, and
+POST `{"action", "nonce", "signature": {"r", "s", "v"}}` to
+`https://api.hyperliquid-testnet.xyz/exchange`. HyperCore only accepts actions from an address
+it knows, so the deployer may first need a HyperCore balance (HYPE moved from HyperEVM to
+HyperCore through the HYPE system address `0x2222222222222222222222222222222222222222`). Check
+with `cast rpc eth_usingBigBlocks <deployer> --rpc-url hyperevm_testnet`, and switch back with
+`usingBigBlocks: false` after phase 1. Not yet exercised from this repository: check the
+details against Hyperliquid's API documentation before relying on them.
+
+**Tempo fees.** No native gas token: fees are paid in pathUSD
+(`0x20c0000000000000000000000000000000000000`, 6 decimals), the default fee token
+(`--tempo.fee-token` pins it). `eth_getBalance` returns a fixed `0x4242…` placeholder, which
+is not a balance; read `balanceOf` on pathUSD instead. Gas prices are in attodollars (forge
+prints the estimate in USD): phase 1 costs about 0.04 to 0.08 pathUSD. On Tempo every new
+storage slot costs ~230k gas more than on Ethereum, so small transactions that create state
+(a first mint, an approval, `listCurrency`) are repriced far more than 7x; measure phase 2 and
+the demo with `eth_estimateGas` on the deployed contracts before broadcasting them, and expect
+a larger multiplier there.
+
+**Demo gas top-up per chain** (`DEMO_GAS_FUNDING_WEI_<chainid>`), sized from the measured gas
+(the issuer, the largest spender, uses 2.25M gas in the demo; the other wallets 0.15M to
+0.60M) at the gas prices of 2026-11-15, with at least 5x headroom:
+
+| Network | Gas price used by forge | Issuer's demo gas cost | Top-up per wallet |
+|---|---|---|---|
+| Ethereum Sepolia | 0.05 gwei | ~0.0006 ETH (repriced) | 0.003 ETH |
+| Base Sepolia | 0.0102 gwei | ~0.00003 ETH | 0.0002 ETH |
+| Robinhood Chain testnet | 0.02 gwei | ~0.00006 ETH | 0.0003 ETH |
+| HyperEVM testnet | 0.2 gwei | ~0.0006 HYPE | 0.003 HYPE |
+| Tempo testnet | n/a | (pathUSD, from Tempo's faucet) | nothing is sent |
+
 `script/Deploy.s.sol` deploys the v1 exchange: `ListingRegistry` (which creates the
 `AssetTokenFactory`), `CashbackDistributor`, `NiaraSettlement`, `P2PEscrow`, and two test
 tokens. Parameters: **fee 50 bps** (the contract's default and hard cap; the script only
