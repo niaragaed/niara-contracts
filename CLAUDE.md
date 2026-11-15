@@ -170,9 +170,12 @@ that is expected. Do not reintroduce a hardcoded default in the contract.
   `executeWiring()` after the timelock has really elapsed) and `Demo.s.sol` (full flow
   as real transactions). Only used on an explicit deploy request: never trigger
   `--broadcast` on your own; see the README section "Testnet deployment".
-  - **Chain guard:** the scripts run only on Ethereum Sepolia (11155111) and Base Sepolia
-    (84532) and revert `UnsupportedChain` anywhere else (`script/NiaraScriptBase.sol`). Do
-    not add a chain, and never a mainnet, without an explicit request.
+  - **Chain guard:** the scripts run only on five testnets, Ethereum Sepolia (11155111),
+    Base Sepolia (84532), Robinhood Chain testnet (46630), HyperEVM testnet (998) and Tempo
+    testnet (42431), and revert `UnsupportedChain` anywhere else
+    (`script/NiaraScriptBase.sol`). Do not add a chain, and never a mainnet, without an
+    explicit request. Sepolia, HyperEVM and Tempo price gas differently from Anvil: read the
+    README's "Network quirks" before any deployment there.
   - Deploy parameters: fee 50 bps (the contract default and cap, only checked by the
     script) and cashback `CASHBACK_BPS` (default 2000), passed to the `CashbackDistributor`
     constructor in phase 1. The deployment proposes and executes only the four role
@@ -180,7 +183,7 @@ that is expected. Do not reintroduce a hardcoded default in the contract.
     timelock for the cashback rate, and phase 2 only checks it.
     The script's logic is tested in-process by
     `test/script/DeployScript.t.sol`; a local simulation uses Anvil started with one of the
-    two chain ids, without `--broadcast`.
+    five chain ids, without `--broadcast`.
   - `script/tokens/TestnetMockToken.sol` is a test token with no value (open mint). It is
     deployment tooling, never to be used or described as a real currency.
   - `Demo.s.sol` runs three flows (equity on the order book, fixed-income P2P deal,
