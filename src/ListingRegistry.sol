@@ -45,10 +45,12 @@ import {NativeAssetToken} from "./NativeAssetToken.sol";
 /// Pause (spec §3.3, "Pause principle"): this is the protocol's single, shared pause, the EVM
 /// mirror of Solana's `Config.paused`. It blocks payouts based on protocol accounting, never
 /// a user reclaiming their own escrowed deposit. While paused: `approveIssuance` and
-/// `payListingFee` here, `NiaraSettlement.settle`, and `CashbackDistributor.withdraw` /
-/// `withdrawProtocolFees` (both read `paused()` through ProtocolPausable). Listing actions
-/// (including `quoteListing`), `requestIssuance` and `rejectIssuance` (neither mints) stay
-/// available.
+/// `payListingFee` here, `NiaraSettlement.settle`, `CashbackDistributor.withdraw` /
+/// `withdrawProtocolFees`, and `P2PEscrow.openDeal` / `acceptDeal` / `sweepExcess` (the other
+/// contracts read `paused()` through ProtocolPausable). `P2PEscrow.cancelDeal` and
+/// `expireDeal` are never stopped (a user always gets their own deposit back). Listing
+/// actions (including `quoteListing`), `requestIssuance` and `rejectIssuance` (neither mints)
+/// stay available.
 /// @dev Role changes (including LISTING_AUTHORITY_ROLE) go through the inherited
 /// timelock. Status changes and issuance approvals are operational and take effect
 /// immediately, like the Solana `approve_listing` / `suspend_listing` / `delist`. Pause is
