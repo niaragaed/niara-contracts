@@ -12,8 +12,9 @@ import {TestnetMockToken} from "./tokens/TestnetMockToken.sol";
 
 /// @title DeployNiara
 /// @notice TWO-PHASE deployment of the v1 exchange (native issuance, order book and P2P
-/// escrow) to Ethereum Sepolia (11155111) or Base Sepolia (84532), and to nothing else: any
-/// other chain id reverts `UnsupportedChain`.
+/// escrow) to one of the five supported testnets (Ethereum Sepolia, Base Sepolia, Robinhood
+/// Chain testnet, HyperEVM testnet, Tempo testnet; see NiaraScriptBase) and to nothing else:
+/// any other chain id reverts `UnsupportedChain`.
 ///
 /// The two phases exist because of the protocol's real timelock
 /// (`TimelockedAccessControl.MIN_TIMELOCK_DELAY` = 1 hour). Roles change only through

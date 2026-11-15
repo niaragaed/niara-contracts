@@ -18,14 +18,21 @@ runs = 256
 depth = 300
 fail_on_revert = false
 
-# Endpoints referenced by NAME in commands (--rpc-url sepolia, --rpc-url base_sepolia).
-# The real values come from the local .env (SEPOLIA_RPC_URL, BASE_SEPOLIA_RPC_URL,
-# ETHERSCAN_API_KEY), never from here. No private key is ever configured: signers are
-# Foundry keystores passed with --account.
+# Endpoints referenced by NAME in commands (--rpc-url sepolia, base_sepolia,
+# robinhood_testnet, hyperevm_testnet, tempo_testnet): the five testnets the scripts' chain
+# guard accepts (script/NiaraScriptBase.sol). The real values come from the local .env
+# (*_RPC_URL, ETHERSCAN_API_KEY), never from here. No key of any kind is configured here: signers
+# are Foundry keystores passed with --account.
 [rpc_endpoints]
 sepolia = "${SEPOLIA_RPC_URL}"
 base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+robinhood_testnet = "${ROBINHOOD_TESTNET_RPC_URL}"
+hyperevm_testnet = "${HYPEREVM_TESTNET_RPC_URL}"
+tempo_testnet = "${TEMPO_TESTNET_RPC_URL}"
 
+# Etherscan-family verification (--verify) on the two chains Etherscan API v2 covers. The
+# three other testnets have no entry: Robinhood Chain and Tempo have their own explorers, and
+# HyperEVM testnet has no working public explorer (see the README).
 [etherscan]
 sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 11155111 }
 base_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 84532 }

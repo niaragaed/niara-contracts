@@ -10,7 +10,7 @@ import {NiaraScriptBase} from "./NiaraScriptBase.sol";
 /// @notice A rehearsal, never a deployment: chains deploy phase 1, the timelock wait, deploy
 /// phase 2 and the three demo flows in ONE dry run against a local Anvil node.
 ///
-///   anvil --chain-id 11155111        (or --chain-id 84532 for the Base Sepolia path)
+///   anvil --chain-id 11155111        (or 84532, 46630, 998 or 42431 for the other testnets)
 ///   forge script script/LocalSimulation.s.sol --rpc-url http://127.0.0.1:8545 --skip-simulation
 ///
 /// It exists because a dry run keeps no state: phase 2 and the demo need the contracts of
@@ -21,9 +21,10 @@ import {NiaraScriptBase} from "./NiaraScriptBase.sol";
 /// (forge's second pass replays each transaction on the node, whose clock did not move).
 ///
 /// @dev Refuses to run unless the node answers `anvil_nodeInfo`, i.e. is an Anvil: pointing
-/// it at Sepolia or Base Sepolia reverts `NotALocalAnvil` before anything is simulated. The
-/// chain guard of the real scripts still applies, so Anvil must be started with one of the
-/// two supported chain ids. The six role wallets are Anvil's well-known development
+/// it at a public testnet reverts `NotALocalAnvil` before anything is simulated. The chain
+/// guard of the real scripts still applies, so Anvil must be started with one of the five
+/// supported chain ids. Anvil does not reproduce a chain's own gas rules (Sepolia's and
+/// Tempo's repriced contract creation, HyperEVM's small blocks): it checks logic, not gas. The six role wallets are Anvil's well-known development
 /// accounts (public keys, worthless everywhere), named here by address only.
 contract LocalSimulation is Script {
     error NotALocalAnvil();

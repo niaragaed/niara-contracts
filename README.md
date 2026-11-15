@@ -282,12 +282,27 @@ per-function tests and the log-order tests required by `CLAUDE.md`.
 
 ---
 
-## Testnet deployment (Sepolia and Base Sepolia)
+## Testnet deployment (five EVM testnets)
 
-⚠️ Testnets only: Ethereum Sepolia (chain id 11155111) and Base Sepolia (84532). The
+⚠️ Testnets only: the five EVM testnets Niara Register already runs on, listed below. The
 scripts revert `UnsupportedChain` on any other chain id, mainnets included. Never mainnet
 without an explicit request (see CLAUDE.md). Everything deployed is test code moving test
 tokens with no value; the code has not been audited.
+
+| Network | Chain ID | `--rpc-url` alias (`.env` variable) | Gas token | Explorer |
+|---|---|---|---|---|
+| Ethereum Sepolia | 11155111 | `sepolia` (`SEPOLIA_RPC_URL`) | test ETH | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
+| Base Sepolia | 84532 | `base_sepolia` (`BASE_SEPOLIA_RPC_URL`) | test ETH | [sepolia.basescan.org](https://sepolia.basescan.org) |
+| Robinhood Chain testnet | 46630 | `robinhood_testnet` (`ROBINHOOD_TESTNET_RPC_URL`) | test ETH | [explorer.testnet.chain.robinhood.com](https://explorer.testnet.chain.robinhood.com) |
+| HyperEVM testnet | 998 | `hyperevm_testnet` (`HYPEREVM_TESTNET_RPC_URL`) | test HYPE | none working (Oct 2026)¹ |
+| Tempo testnet (Moderato) | 42431 | `tempo_testnet` (`TEMPO_TESTNET_RPC_URL`) | none: fees in pathUSD | [explore.testnet.tempo.xyz](https://explore.testnet.tempo.xyz) |
+
+¹ Niara Register links HyperEVM testnet transactions to a page of its site that reads them
+live from the official RPC (`https://rpc.hyperliquid-testnet.xyz/evm`).
+
+Public RPCs of the last three (in `.env.example`): `https://rpc.testnet.chain.robinhood.com`,
+`https://rpc.hyperliquid-testnet.xyz/evm`, `https://rpc.moderato.tempo.xyz`. Network quirks
+that change how a deployment is run are in "Network quirks" below.
 
 `script/Deploy.s.sol` deploys the v1 exchange: `ListingRegistry` (which creates the
 `AssetTokenFactory`), `CashbackDistributor`, `NiaraSettlement`, `P2PEscrow`, and two test
@@ -325,15 +340,15 @@ cast wallet list                                   # the keystore is there
 cast wallet address --account niara-evm-deployer   # its address -> DEPLOYER_ADDRESS
 ```
 
-Fund that address with test ETH on each chain (a Sepolia faucet; a Base Sepolia faucet or
-the Base bridge from Sepolia). Copy `.env.example` to `.env` and fill in
-`SEPOLIA_RPC_URL`, `BASE_SEPOLIA_RPC_URL`, `ETHERSCAN_API_KEY` (verification only) and
-`DEPLOYER_ADDRESS`. `LISTING_AUTHORITY_ADDRESS` and `OPERATOR_ADDRESS` are optional and
+Fund that address with each chain's gas token (test ETH on Sepolia, Base Sepolia and
+Robinhood Chain, test HYPE on HyperEVM; on Tempo, pathUSD from Tempo's faucet). Copy
+`.env.example` to `.env` and fill in `SEPOLIA_RPC_URL`, `BASE_SEPOLIA_RPC_URL`,
+`ETHERSCAN_API_KEY` (verification only) and `DEPLOYER_ADDRESS`. `LISTING_AUTHORITY_ADDRESS` and `OPERATOR_ADDRESS` are optional and
 default to the deployer; set them (each with its own keystore) to keep the roles in
 distinct wallets, which `script/Demo.s.sol` requires.
 
-**The deployer is the admin of every contract on testnet only.** On Sepolia and Base
-Sepolia that one key holds `DEFAULT_ADMIN_ROLE` on the `ListingRegistry`, the
+**The deployer is the admin of every contract on testnet only.** On every testnet that one
+key holds `DEFAULT_ADMIN_ROLE` on the `ListingRegistry`, the
 `CashbackDistributor`, `NiaraSettlement` and `P2PEscrow`, plus `PAUSER_ROLE` (the shared
 pause) and `TREASURY_ROLE` (protocol fees and escrow sweeps). A single key is acceptable
 there because everything is a test token with no value, and it must always be stated as
@@ -352,9 +367,10 @@ and is not what a mainnet deployment would use.
 
 `TimelockedAccessControl.MIN_TIMELOCK_DELAY` is 1 hour; that wait cannot be skipped, not
 even on testnet (see CLAUDE.md). That is why deployment has two phases. The commands below
-use `sepolia`; for Base Sepolia use `--rpc-url base_sepolia`. The two deployments are
+use `sepolia`; for another chain use its alias from the table above. The deployments are
 independent and their addresses are kept apart by the chain-id suffix of the `DEPLOYED_*`
-variables.
+variables. Read "Network quirks" first: Sepolia and Tempo need more than these commands,
+and HyperEVM needs big blocks.
 
 **Phase 1: deploy the contracts** (the `CashbackDistributor` is constructed with
 `CASHBACK_BPS`) **and propose the wiring** (`SETTLEMENT_ROLE` to `NiaraSettlement`,
@@ -431,7 +447,9 @@ traceable transactions. Every step is signed by the wallet of its role:
 The six roles must be **six different wallets** (the script refuses to run otherwise):
 deployer/admin, listing authority, settlement operator, issuing company, investor A and
 investor B. The deployer takes no part in the flows; it only tops up the other wallets'
-gas (`DEMO_GAS_FUNDING_WEI`, default 0.02 test ETH each; 0 to fund them yourself). The
+gas (`DEMO_GAS_FUNDING_WEI`, default 0.02 of the native test token each, overridden per
+chain by `DEMO_GAS_FUNDING_WEI_<chainid>`; 0 to fund them yourself). On Tempo nothing is
+sent: there is no native gas token, and every wallet gets pathUSD from Tempo's faucet. The
 investors take their mock USDT / mock BRL from the tokens' own faucet.
 
 Because the listing authority and the operator are fixed at deployment, set
@@ -440,11 +458,11 @@ Create the five extra keystores the same way as the deployer's, and put their ad
 (never their keys) in `.env`:
 
 ```bash
-cast wallet new ~/.foundry/keystores niara-demo-listing-authority   # -> LISTING_AUTHORITY_ADDRESS
-cast wallet new ~/.foundry/keystores niara-demo-operator            # -> OPERATOR_ADDRESS
-cast wallet new ~/.foundry/keystores niara-demo-issuer              # -> DEMO_ISSUER_ADDRESS
-cast wallet new ~/.foundry/keystores niara-demo-investor-a          # -> DEMO_INVESTOR_A_ADDRESS
-cast wallet new ~/.foundry/keystores niara-demo-investor-b          # -> DEMO_INVESTOR_B_ADDRESS
+cast wallet new ~/.foundry/keystores niara-evm-listing      # -> LISTING_AUTHORITY_ADDRESS
+cast wallet new ~/.foundry/keystores niara-evm-operator     # -> OPERATOR_ADDRESS
+cast wallet new ~/.foundry/keystores niara-evm-issuer       # -> DEMO_ISSUER_ADDRESS
+cast wallet new ~/.foundry/keystores niara-evm-investor-a   # -> DEMO_INVESTOR_A_ADDRESS
+cast wallet new ~/.foundry/keystores niara-evm-investor-b   # -> DEMO_INVESTOR_B_ADDRESS
 ```
 
 Dry run first (nothing is sent, no keystore needed), then broadcast with one `--account`
@@ -454,9 +472,9 @@ per wallet; forge asks for each password:
 forge script script/Demo.s.sol --rpc-url sepolia
 
 forge script script/Demo.s.sol --rpc-url sepolia --broadcast \
-  --account niara-evm-deployer --account niara-demo-listing-authority \
-  --account niara-demo-operator --account niara-demo-issuer \
-  --account niara-demo-investor-a --account niara-demo-investor-b
+  --account niara-evm-deployer --account niara-evm-listing \
+  --account niara-evm-operator --account niara-evm-issuer \
+  --account niara-evm-investor-a --account niara-evm-investor-b
 ```
 
 Single flows: `--sig "runEquityFlow()"`, `--sig "runFixedIncomeFlow()"`,
@@ -471,13 +489,14 @@ jump), phase 2 and the three demo flows in a single dry run against a local Anvi
 refuses to run against anything that is not Anvil, and it is never broadcast:
 
 ```bash
-anvil --chain-id 11155111            # or --chain-id 84532 for the Base Sepolia path
+anvil --chain-id 11155111            # or 84532, 46630, 998, 42431 for the other testnets
 forge script script/LocalSimulation.s.sol --rpc-url http://127.0.0.1:8545 --skip-simulation
 ```
 
 It uses Anvil's well-known development accounts as the six role wallets. A dry run proves
 the scripts' logic, order and figures on each chain id; it does not exercise keystore
-signing or the real one-hour wait.
+signing, the real one-hour wait, or a chain's own gas rules (Anvil charges Ethereum gas
+everywhere: see "Network quirks").
 
 ## Historical: the July 2026 Sepolia deployment (backed model)
 
@@ -658,7 +677,7 @@ src/
   CashbackDistributor.sol
   P2PEscrow.sol
 script/
-  NiaraScriptBase.sol    (chain guard: Sepolia / Base Sepolia only; deployed addresses per chain)
+  NiaraScriptBase.sol    (chain guard: the five testnets only; deployed addresses per chain)
   tokens/
     TestnetMockToken.sol (test tokens with no value: mock USDT and mock BRL)
   Deploy.s.sol           (phase 1: deploy + propose the wiring; phase 2 via --sig "executeWiring()")

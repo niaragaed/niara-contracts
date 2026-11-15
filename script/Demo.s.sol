@@ -98,7 +98,7 @@ contract DemoNiaraFlows is NiaraScriptBase {
     function run() external {
         Roles memory roles = readRoles();
         Deployment memory d = readDeployment();
-        fundGas(roles, vm.envOr("DEMO_GAS_FUNDING_WEI", DEFAULT_GAS_FUNDING));
+        fundGas(roles, gasFundingTarget());
         runAll(roles, d);
     }
 
@@ -119,7 +119,20 @@ contract DemoNiaraFlows is NiaraScriptBase {
 
     /// @notice Only the gas top-up of the five role wallets by the deployer.
     function runFundGas() external {
-        fundGas(readRoles(), vm.envOr("DEMO_GAS_FUNDING_WEI", DEFAULT_GAS_FUNDING));
+        fundGas(readRoles(), gasFundingTarget());
+    }
+
+    /// @notice Native balance each role wallet is topped up to on the CURRENT chain:
+    /// `DEMO_GAS_FUNDING_WEI_<chainid>` if set, else `DEMO_GAS_FUNDING_WEI`, else
+    /// `DEFAULT_GAS_FUNDING`. Always 0 on Tempo, which has no native gas token (fees are paid
+    /// in pathUSD and every wallet is funded from Tempo's own faucet).
+    /// @dev Gas prices differ by orders of magnitude between the testnets (and the native
+    /// token is HYPE on HyperEVM), so one amount for every chain is either wasteful or too
+    /// little: set the per-chain variable.
+    /// @return target The top-up target in wei of the chain's native token.
+    function gasFundingTarget() public view returns (uint256 target) {
+        if (!hasNativeGasToken(block.chainid)) return 0;
+        target = vm.envOr(deployedVar("DEMO_GAS_FUNDING_WEI"), vm.envOr("DEMO_GAS_FUNDING_WEI", DEFAULT_GAS_FUNDING));
     }
 
     // ── Roles ──────────────────────────────────────────────────────────────────────────
@@ -183,15 +196,16 @@ contract DemoNiaraFlows is NiaraScriptBase {
 
     // ── Gas top-up ─────────────────────────────────────────────────────────────────────
 
-    /// @notice The deployer tops up each of the five role wallets to `target` wei of test
-    /// ETH, so they can pay their own gas. Wallets already at or above `target` get
-    /// nothing; `target == 0` disables it (fund the wallets yourself).
+    /// @notice The deployer tops up each of the five role wallets to `target` wei of the
+    /// chain's native test token, so they can pay their own gas. Wallets already at or above
+    /// `target` get nothing; `target == 0` disables it (fund the wallets yourself). On Tempo it
+    /// never sends anything: there is no native gas token to send.
     /// @param roles The roles.
     /// @param target Balance each role wallet should have at least.
     function fundGas(Roles memory roles, uint256 target) public {
         _requireSupportedChain();
         requireDistinctRoles(roles);
-        if (target == 0) return;
+        if (target == 0 || !hasNativeGasToken(block.chainid)) return;
         address[5] memory wallets =
             [roles.listingAuthority, roles.operator, roles.issuer, roles.investorA, roles.investorB];
 

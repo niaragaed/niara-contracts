@@ -24,6 +24,31 @@ contract DeployScriptTest is Test {
 
     uint256 internal constant SEPOLIA = 11155111;
     uint256 internal constant BASE_SEPOLIA = 84532;
+    uint256 internal constant ROBINHOOD_TESTNET = 46630;
+    uint256 internal constant HYPEREVM_TESTNET = 998;
+    uint256 internal constant TEMPO_TESTNET = 42431;
+
+    function _supportedChains() internal pure returns (uint256[5] memory) {
+        return [SEPOLIA, BASE_SEPOLIA, ROBINHOOD_TESTNET, HYPEREVM_TESTNET, TEMPO_TESTNET];
+    }
+
+    /// @dev Mainnets of the five testnets' families, their neighbours and other testnets.
+    function _unsupportedChains() internal pure returns (uint256[12] memory) {
+        return [
+            uint256(1), // Ethereum mainnet
+            8453, // Base mainnet
+            999, // HyperEVM mainnet
+            42161, // Arbitrum One (Robinhood Chain is an Arbitrum chain)
+            10, // OP mainnet
+            31337, // default Anvil
+            17000, // Holesky
+            421614, // Arbitrum Sepolia
+            997, // neighbours of the supported ids: the guard is an exact match
+            46631,
+            42430,
+            84531
+        ];
+    }
 
     function setUp() public {
         script = new DeployNiara();
@@ -57,6 +82,9 @@ contract DeployScriptTest is Test {
         assertEq(script.DEFAULT_TIMELOCK_DELAY(), 1 hours);
         assertEq(script.SEPOLIA_CHAIN_ID(), 11155111);
         assertEq(script.BASE_SEPOLIA_CHAIN_ID(), 84532);
+        assertEq(script.ROBINHOOD_TESTNET_CHAIN_ID(), 46630);
+        assertEq(script.HYPEREVM_TESTNET_CHAIN_ID(), 998);
+        assertEq(script.TEMPO_TESTNET_CHAIN_ID(), 42431);
         assertEq(script.WIRING_PROPOSALS(), 5);
     }
 
@@ -230,8 +258,8 @@ contract DeployScriptTest is Test {
 
     // ── Chain guard ────────────────────────────────────────────────────────────────────
 
-    function test_ChainGuard_Phase1RevertsOutsideTheTwoTestnets() public {
-        uint256[5] memory others = [uint256(1), 8453, 31337, 17000, 421614];
+    function test_ChainGuard_Phase1RevertsOutsideTheFiveTestnets() public {
+        uint256[12] memory others = _unsupportedChains();
         for (uint256 i = 0; i < others.length; i++) {
             vm.chainId(others[i]);
             vm.expectRevert(abi.encodeWithSelector(NiaraScriptBase.UnsupportedChain.selector, others[i]));
@@ -239,17 +267,16 @@ contract DeployScriptTest is Test {
         }
     }
 
-    function test_ChainGuard_Phase2RevertsOutsideTheTwoTestnets() public {
+    function test_ChainGuard_Phase2RevertsOutsideTheFiveTestnets() public {
         (DeployNiara.Config memory cfg, NiaraScriptBase.Deployment memory d) = _phase1();
         vm.warp(block.timestamp + cfg.timelockDelay);
 
-        vm.chainId(1);
-        vm.expectRevert(abi.encodeWithSelector(NiaraScriptBase.UnsupportedChain.selector, uint256(1)));
-        script.executeWiringOn(cfg, d);
-
-        vm.chainId(31337);
-        vm.expectRevert(abi.encodeWithSelector(NiaraScriptBase.UnsupportedChain.selector, uint256(31337)));
-        script.executeWiringOn(cfg, d);
+        uint256[12] memory others = _unsupportedChains();
+        for (uint256 i = 0; i < others.length; i++) {
+            vm.chainId(others[i]);
+            vm.expectRevert(abi.encodeWithSelector(NiaraScriptBase.UnsupportedChain.selector, others[i]));
+            script.executeWiringOn(cfg, d);
+        }
     }
 
     function test_ChainGuard_BothPhasesRunOnBaseSepolia() public {
@@ -259,8 +286,60 @@ contract DeployScriptTest is Test {
         assertEq(script.chainName(), "Base Sepolia");
     }
 
+    /// @notice Phase 1, the timelock wait, phase 2 and the read-only check all run on each of
+    /// the five testnets, every one a separate deployment.
+    function test_ChainGuard_BothPhasesRunOnEverySupportedTestnet() public {
+        uint256[5] memory chains = _supportedChains();
+        for (uint256 i = 0; i < chains.length; i++) {
+            vm.chainId(chains[i]);
+            (DeployNiara.Config memory cfg, NiaraScriptBase.Deployment memory d) = _bothPhases();
+            script.verifyWiring(cfg, d);
+        }
+    }
+
+    /// @notice The guard is an exact list: the five testnets pass, everything else fails.
+    function test_IsSupportedChain_ExactlyTheFiveTestnets() public view {
+        uint256[5] memory chains = _supportedChains();
+        for (uint256 i = 0; i < chains.length; i++) {
+            assertTrue(script.isSupportedChain(chains[i]));
+        }
+        uint256[12] memory others = _unsupportedChains();
+        for (uint256 i = 0; i < others.length; i++) {
+            assertFalse(script.isSupportedChain(others[i]));
+        }
+        assertFalse(script.isSupportedChain(0));
+        assertFalse(script.isSupportedChain(type(uint256).max));
+    }
+
+    /// @notice Only Tempo lacks a native gas token.
+    function test_HasNativeGasToken_FalseOnlyOnTempo() public view {
+        assertTrue(script.hasNativeGasToken(SEPOLIA));
+        assertTrue(script.hasNativeGasToken(BASE_SEPOLIA));
+        assertTrue(script.hasNativeGasToken(ROBINHOOD_TESTNET));
+        assertTrue(script.hasNativeGasToken(HYPEREVM_TESTNET));
+        assertFalse(script.hasNativeGasToken(TEMPO_TESTNET));
+    }
+
     function test_ChainName_Sepolia() public view {
         assertEq(script.chainName(), "Ethereum Sepolia");
+    }
+
+    function test_ChainName_EachSupportedTestnet() public {
+        vm.chainId(BASE_SEPOLIA);
+        assertEq(script.chainName(), "Base Sepolia");
+        vm.chainId(ROBINHOOD_TESTNET);
+        assertEq(script.chainName(), "Robinhood Chain testnet");
+        vm.chainId(HYPEREVM_TESTNET);
+        assertEq(script.chainName(), "HyperEVM testnet");
+        vm.chainId(TEMPO_TESTNET);
+        assertEq(script.chainName(), "Tempo testnet");
+    }
+
+    /// @notice No chain is ever named by default: an unsupported one reverts.
+    function test_ChainName_RevertsOnAnUnsupportedChain() public {
+        vm.chainId(1);
+        vm.expectRevert(abi.encodeWithSelector(NiaraScriptBase.UnsupportedChain.selector, uint256(1)));
+        script.chainName();
     }
 
     /// @notice Deployed-address variables carry the chain id, so one chain's addresses can
@@ -269,6 +348,12 @@ contract DeployScriptTest is Test {
         assertEq(script.deployedVar("DEPLOYED_ESCROW_ADDRESS"), "DEPLOYED_ESCROW_ADDRESS_11155111");
         vm.chainId(BASE_SEPOLIA);
         assertEq(script.deployedVar("DEPLOYED_ESCROW_ADDRESS"), "DEPLOYED_ESCROW_ADDRESS_84532");
+        vm.chainId(ROBINHOOD_TESTNET);
+        assertEq(script.deployedVar("DEPLOYED_ESCROW_ADDRESS"), "DEPLOYED_ESCROW_ADDRESS_46630");
+        vm.chainId(HYPEREVM_TESTNET);
+        assertEq(script.deployedVar("DEPLOYED_ESCROW_ADDRESS"), "DEPLOYED_ESCROW_ADDRESS_998");
+        vm.chainId(TEMPO_TESTNET);
+        assertEq(script.deployedVar("DEPLOYED_ESCROW_ADDRESS"), "DEPLOYED_ESCROW_ADDRESS_42431");
     }
 
     // ── Phase 2 ────────────────────────────────────────────────────────────────────────

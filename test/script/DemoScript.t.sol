@@ -217,6 +217,17 @@ contract DemoScriptTest is Test {
         assertEq(usdt.balanceOf(roles.issuer), 15e6);
     }
 
+    /// @notice The three flows pass the chain guard on each of the five testnets (one run per
+    /// chain id on the same in-process deployment: the cashback adds up, 15 mock USDT a run).
+    function test_RunAll_OnEverySupportedTestnet() public {
+        uint256[5] memory chains = [uint256(11155111), 84532, 46630, 998, 42431];
+        for (uint256 i = 0; i < chains.length; i++) {
+            vm.chainId(chains[i]);
+            demo.runAll(roles, d);
+            assertEq(usdt.balanceOf(roles.issuer), 15e6 * (i + 1));
+        }
+    }
+
     /// @notice The flows charge whatever rates the deployment has: after a timelocked change
     /// of the cashback share to 1000 bps, the issuer gets 10% of each fee instead of 20%.
     function test_Flows_FollowTheDeployedCashbackRate() public {
@@ -360,8 +371,8 @@ contract DemoScriptTest is Test {
         demo.requireReady(roles, d);
     }
 
-    function test_ChainGuard_FlowsRevertOutsideTheTwoTestnets() public {
-        uint256[3] memory others = [uint256(1), 8453, 31337];
+    function test_ChainGuard_FlowsRevertOutsideTheFiveTestnets() public {
+        uint256[6] memory others = [uint256(1), 8453, 999, 42161, 4217, 31337];
         for (uint256 i = 0; i < others.length; i++) {
             vm.chainId(others[i]);
             bytes memory err = abi.encodeWithSelector(NiaraScriptBase.UnsupportedChain.selector, others[i]);
@@ -373,6 +384,8 @@ contract DemoScriptTest is Test {
             demo.currencyFlow(roles, d);
             vm.expectRevert(err);
             demo.fundGas(roles, 1 ether);
+            vm.expectRevert(err);
+            demo.runAll(roles, d);
         }
     }
 
@@ -405,6 +418,57 @@ contract DemoScriptTest is Test {
 
         assertEq(roles.deployer.balance, 10 ether);
         assertEq(roles.operator.balance, 1 ether);
+    }
+
+    /// @notice Tempo has no native gas token (fees are paid in pathUSD): the top-up sends
+    /// nothing there, whatever the target.
+    function test_FundGas_SendsNothingOnTempo() public {
+        vm.chainId(42431);
+        vm.deal(roles.deployer, 10 ether);
+        demo.fundGas(roles, 0.02 ether);
+        assertEq(roles.deployer.balance, 10 ether);
+        assertEq(roles.issuer.balance, 0);
+        assertEq(roles.investorB.balance, 0);
+    }
+
+    /// @notice Tops up with the chain's own native token on HyperEVM and Robinhood too.
+    function test_FundGas_TopsUpOnTheOtherNewTestnets() public {
+        uint256[2] memory chains = [uint256(998), 46630];
+        for (uint256 i = 0; i < chains.length; i++) {
+            vm.chainId(chains[i]);
+            vm.deal(roles.deployer, 1 ether);
+            vm.deal(roles.operator, 0);
+            demo.fundGas(roles, 0.001 ether);
+            assertEq(roles.operator.balance, 0.001 ether);
+        }
+    }
+
+    /// @notice The top-up amount is read per chain: `DEMO_GAS_FUNDING_WEI_<chainid>`, then
+    /// `DEMO_GAS_FUNDING_WEI`, then the default; always 0 on Tempo. ONE test, because
+    /// `vm.setEnv` changes the whole process (and `forge test` loads the local `.env`, so every
+    /// variable read here is set here first). No other test reads these variables.
+    function test_GasFundingTarget_PerChainThenGlobalThenDefault_ZeroOnTempo() public {
+        vm.setEnv("DEMO_GAS_FUNDING_WEI", "300000000000000");
+        vm.setEnv("DEMO_GAS_FUNDING_WEI_84532", "40000000000000");
+        vm.setEnv("DEMO_GAS_FUNDING_WEI_998", "2000000000000000");
+        // An empty per-chain variable counts as unset: the global value applies.
+        vm.setEnv("DEMO_GAS_FUNDING_WEI_11155111", "");
+        vm.setEnv("DEMO_GAS_FUNDING_WEI_42431", "5000000000000000");
+
+        vm.chainId(84532);
+        assertEq(demo.gasFundingTarget(), 40_000_000_000_000);
+        vm.chainId(998);
+        assertEq(demo.gasFundingTarget(), 2_000_000_000_000_000);
+        vm.chainId(11155111);
+        assertEq(demo.gasFundingTarget(), 300_000_000_000_000);
+        // Tempo: zero even with a per-chain value set.
+        vm.chainId(42431);
+        assertEq(demo.gasFundingTarget(), 0);
+
+        // Neither variable usable: the default.
+        vm.setEnv("DEMO_GAS_FUNDING_WEI", "");
+        vm.chainId(11155111);
+        assertEq(demo.gasFundingTarget(), demo.DEFAULT_GAS_FUNDING());
     }
 
     function test_FundGas_ZeroTargetDoesNothing() public {
