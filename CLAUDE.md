@@ -271,7 +271,8 @@ no overriding).
 ## Known open items
 
 - **v1 exchange deployment status:** Base Sepolia is complete (phase 1, phase 2 and the
-  demo, broadcast by the user on 2026-11-16 and verified). No other chain has a v1
+  demo, broadcast by the user on 2026-11-16 and verified). Robinhood Chain testnet has
+  phase 1 (2026-11-16); its phase 2 and demo are pending. No other chain has a v1
   deployment. Addresses, transactions and checks are in the README, "v1 deployments".
   Chains go one at a time (Base Sepolia, Robinhood, HyperEVM, Tempo), each only after the
   previous one's phase 1, phase 2 and demo are verified. Ethereum Sepolia is deferred from

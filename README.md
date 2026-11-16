@@ -761,6 +761,63 @@ tokens, no value):
   fees 80 (50 + 25 + 5) − cashback 15. No cashback left unwithdrawn.
 - P2PEscrow `totalEscrowed` is 0 for mock USDT, mock BRL and the bond: both deals closed.
 
+### Robinhood Chain testnet (46630)
+
+**Status:** phase 1 done (2026-11-16 02:31:28 to 02:31:53 UTC, blocks 153889845 to
+153890014). Phase 2 and the demo are not done yet.
+
+Signed by the deployer `0x7667C862d1586D3D15298d38a7a8FBD7afC214c3` with
+`--gas-estimate-multiplier 200`; the gas preflight passed (needs 0.00052 ETH, had 0.007). 11
+transactions, 12,057,706 gas, 0.000121 ETH at 0.01 gwei. The addresses are the same as on
+Base Sepolia, because the deployer's nonces were the same (0 to 10) on both chains.
+
+Robinhood charged exactly the Ethereum gas, the same 12,057,706 as Base Sepolia: the L1 data
+component measured with `eth_estimateGas` on 2026-11-15 (~+8%, see "Network quirks") did not
+show up in these receipts. The 200 multiplier was still what forge used for the gas limits.
+Forge also warned that the RPC may not support EIP-3855 (`PUSH0`); every contract deployed and
+answers calls, so the warning did not apply.
+
+| Contract | Address |
+|---|---|
+| ListingRegistry | [`0x883081A2f4D1860aa92f03Cb3FE0f0aDcEc0C58f`](https://explorer.testnet.chain.robinhood.com/address/0x883081A2f4D1860aa92f03Cb3FE0f0aDcEc0C58f) |
+| AssetTokenFactory (created by the registry) | [`0x826CAb7424a6D81184BfD83e2Be828cC8834E5d4`](https://explorer.testnet.chain.robinhood.com/address/0x826CAb7424a6D81184BfD83e2Be828cC8834E5d4) |
+| CashbackDistributor | [`0x4b10fF1a44Aca4118F75b1f326cC2EE46b73ADD4`](https://explorer.testnet.chain.robinhood.com/address/0x4b10fF1a44Aca4118F75b1f326cC2EE46b73ADD4) |
+| NiaraSettlement | [`0x14C6F9DeD6C97F67149B4305c57331F9d3820B6F`](https://explorer.testnet.chain.robinhood.com/address/0x14C6F9DeD6C97F67149B4305c57331F9d3820B6F) |
+| P2PEscrow | [`0xd4b7c1b5DE8AccAf78efFF467e5a33e82B6cE361`](https://explorer.testnet.chain.robinhood.com/address/0xd4b7c1b5DE8AccAf78efFF467e5a33e82B6cE361) |
+| Mock USDT (test token, no value; fee token) | [`0x4ED579b02B53d050624c0F04Fb1F4D9b1d347457`](https://explorer.testnet.chain.robinhood.com/address/0x4ED579b02B53d050624c0F04Fb1F4D9b1d347457) |
+| Mock BRL (test token, no value) | [`0x262422490d3829556aFFAC970B9B2B7D093d500B`](https://explorer.testnet.chain.robinhood.com/address/0x262422490d3829556aFFAC970B9B2B7D093d500B) |
+
+Phase 1 transactions:
+
+| # | Action | Gas | Transaction |
+|---|---|---|---|
+| 1 | Create mock USDT | 662,844 | [`0x23e54c…ef4ee0`](https://explorer.testnet.chain.robinhood.com/tx/0x23e54c3fbaf91ad9f0e9bbd27c416951e23b3ec27147a6bb8b2089e10aef4ee0) |
+| 2 | Create mock BRL | 662,820 | [`0xc3ff13…c6a6a8`](https://explorer.testnet.chain.robinhood.com/tx/0xc3ff1373d28c6a8f4e0f7feed8826013f72d8c6bc0c6e3ab6da7acc9adc6a6a8) |
+| 3 | Create ListingRegistry (and its AssetTokenFactory) | 4,051,011 | [`0xb52b6a…98b6b9`](https://explorer.testnet.chain.robinhood.com/tx/0xb52b6a5edf9d4339961ab4da356d035b33160cd030a22ec29096b0da5c98b6b9) |
+| 4 | Create CashbackDistributor | 1,805,264 | [`0x0a8914…bfc455`](https://explorer.testnet.chain.robinhood.com/tx/0x0a89145c309199dbbc3e94f3cb0d5af55d5e89a69403e4999156453cb5bfc455) |
+| 5 | Create NiaraSettlement | 1,805,066 | [`0x38c417…534a23`](https://explorer.testnet.chain.robinhood.com/tx/0x38c417247e4dceee75506da2c59278cb21d3f7a606219d31903eb6169f534a23) |
+| 6 | Create P2PEscrow | 2,802,608 | [`0x447b22…4f1402`](https://explorer.testnet.chain.robinhood.com/tx/0x447b221ae31c6311c5dd531fe306ffc550c2c965676fd583690691eb334f1402) |
+| 7 | Propose `SETTLEMENT_ROLE` → NiaraSettlement (distributor) | 53,210 | [`0x51772b…d7d87f`](https://explorer.testnet.chain.robinhood.com/tx/0x51772bd57a293343d2379a417b0312a442740bd970e082028d7332683ed7d87f) |
+| 8 | Propose `ESCROW_ROLE` → P2PEscrow (distributor) | 53,210 | [`0xb48967…653101`](https://explorer.testnet.chain.robinhood.com/tx/0xb48967b93a805bb12bed4d8fc36e51cb2a5369cff9391d404051729388653101) |
+| 9 | Propose `LISTING_REGISTRY_ROLE` → ListingRegistry (distributor) | 53,198 | [`0x40040c…d47006`](https://explorer.testnet.chain.robinhood.com/tx/0x40040cf9d60756e8497d417674cd4f422a98fbe26fa36c77038048ce19d47006) |
+| 10 | Propose `SETTLEMENT_OPERATOR_ROLE` → operator (settlement) | 53,254 | [`0xe06a5f…46adb9`](https://explorer.testnet.chain.robinhood.com/tx/0xe06a5f27a4ac254ad3c63e8e0b9bbd0ea511c38a2d6038e497938a804546adb9) |
+| 11 | Propose `setSettlement` → NiaraSettlement (registry) | 55,221 | [`0xc1cf97…746bbd`](https://explorer.testnet.chain.robinhood.com/tx/0xc1cf976a321d4df1b710a3610a9d269672279488eb51f28221348d5988746bbd) |
+| 12 | Deployer sends 0.0002 ETH to the listing authority for phase 2 (manual `cast send`) | 21,000 | [`0xf2e4b4…8dda06`](https://explorer.testnet.chain.robinhood.com/tx/0xf2e4b42e4370fd8893f2ae503d96212d3a462c216ecc96e3626c275f648dda06) |
+
+**Checked after phase 1 with read-only calls (2026-11-16):** the same checks as on Base
+Sepolia, with the same results.
+- All 11 receipts succeeded and were sent from the deployer. Its nonce is now 12 (11 plus
+  the top-up to the listing authority).
+- All seven addresses hold code, and the contracts point to each other as expected.
+- Parameters: fee 50 bps (cap 50), cashback 2000 bps, timelock 3600 s, not paused.
+- Roles: the deployer is admin of all four contracts, pauser and treasury; the listing
+  authority holds `LISTING_AUTHORITY_ROLE`; no other admin.
+- The four grants and the registry's settlement link are still unset, as expected.
+- The five proposals are pending; the latest becomes executable at **1794799913
+  (2026-11-16 03:31:53 UTC)**. The script printed 1794799880, its simulation's timestamp.
+- The listing authority holds 0.0002 ETH, and a dry run of phase 2 passes the gas
+  preflight for both wallets (deployer needs 0.000015 ETH, listing authority 0.0000088 ETH).
+
 ## Historical: the July 2026 Sepolia deployment (backed model)
 
 The transactions below are the record of the first Sepolia deployment (2026-07-22),
