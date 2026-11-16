@@ -764,7 +764,8 @@ tokens, no value):
 ### Robinhood Chain testnet (46630)
 
 **Status:** phase 1 done (2026-11-16 02:31:28 to 02:31:53 UTC, blocks 153889845 to
-153890014) and phase 2 done (blocks 154000423 to 154000482). The demo is not done yet.
+153890014), phase 2 done (blocks 154000423 to 154000482) and the demo done (blocks 154009887
+to 154010366). All three verified; Robinhood Chain testnet is complete.
 
 Signed by the deployer `0x7667C862d1586D3D15298d38a7a8FBD7afC214c3` with
 `--gas-estimate-multiplier 200`; the gas preflight passed (needs 0.00052 ETH, had 0.007). 11
@@ -842,6 +843,79 @@ One run, `--gas-estimate-multiplier 200`. The gas preflight passed for both wall
 - Admin is still only the deployer on all four contracts.
 - A dry run of the demo completes all three flows and passes the gas preflight for all six
   wallets.
+
+#### Demo (2026-11-16 08:50:27 to 08:51:58 UTC)
+
+`script/Demo.s.sol` with `--gas-estimate-multiplier 200`, all three flows: 38 transactions,
+4,611,083 gas, 0.0000461 ETH at 0.01 gwei. The gas preflight passed for all six wallets.
+The instruments have the same addresses as on Base Sepolia (the factory's nonce was the same):
+
+| Instrument | Address |
+|---|---|
+| Niara Demo Equity (TEST) | [`0x0f1c771c8943cD7EC2b4c654CEea49B41336bDD7`](https://explorer.testnet.chain.robinhood.com/address/0x0f1c771c8943cD7EC2b4c654CEea49B41336bDD7) |
+| Niara Demo Bond 2030 (TEST) | [`0x4b6999CF049b05e23202e85bdF936edeBe77B5b2`](https://explorer.testnet.chain.robinhood.com/address/0x4b6999CF049b05e23202e85bdF936edeBe77B5b2) |
+
+A first attempt unlocked only two of the six keystores (three password prompts instead of
+six) and forge refused to broadcast ("No associated wallet"): nothing was sent, every nonce
+was unchanged. The second run passed the six `--account` flags from a PowerShell array
+(`$accts = 'niara-evm-deployer', ... | ForEach-Object { '--account'; $_ }`, then
+`forge script ... @accts`) and asked for all six passwords.
+
+| # | Step | Signed by | Gas | Transaction |
+|---|---|---|---|---|
+| | **Gas top-up (deployer)** | | | |
+| 1 | Top-up to listing authority | deployer | 21,000 | [`0x40030c…116921`](https://explorer.testnet.chain.robinhood.com/tx/0x40030c8b0334b9cb5e24cd62165257910a35da5292361c0ea76cb99c9e116921) |
+| 2 | Top-up to operator | deployer | 21,000 | [`0x8be9fc…b3dbb3`](https://explorer.testnet.chain.robinhood.com/tx/0x8be9fc5b2352822d1eb802094a448b00c4b15fd9985d081459805d57f3b3dbb3) |
+| 3 | Top-up to issuer | deployer | 21,000 | [`0x48eb8e…e6b820`](https://explorer.testnet.chain.robinhood.com/tx/0x48eb8e4e149fb2fdd0e7538955baa8154ff7bb7eeae2968d2ff1773be6e6b820) |
+| 4 | Top-up to investor A | deployer | 21,000 | [`0x913529…0de3ab`](https://explorer.testnet.chain.robinhood.com/tx/0x9135297c8c7326dadc7b45241ed8756bbe4abf7b826a044c7d06bdf4cb0de3ab) |
+| 5 | Top-up to investor B | deployer | 21,000 | [`0x2f2f92…43814d`](https://explorer.testnet.chain.robinhood.com/tx/0x2f2f92629c1077e23a247b61a159045f900eedce8001643d5f23b204c943814d) |
+| | **Flow 1: equity, order book** | | | |
+| 6 | `createAssetToken` (equity) | issuer | 662,876 | [`0x6f0d46…87342a`](https://explorer.testnet.chain.robinhood.com/tx/0x6f0d4649b832dc9cc18ec0f3d4b09b3e2ff775a6aec01810bcb204990787342a) |
+| 7 | `submitListing` | issuer | 104,182 | [`0x457898…822d7c`](https://explorer.testnet.chain.robinhood.com/tx/0x457898c1fe31d70dcfc023f18c7595cdc36a64593322419fbf0ad493be822d7c) |
+| 8 | `quoteListing` (1,000 mock USDT) | listing authority | 111,135 | [`0xb01cc7…bbe444`](https://explorer.testnet.chain.robinhood.com/tx/0xb01cc7e838031870b4601dfa1d385b888a3b0e9355997bd038d0cb6a70bbe444) |
+| 9 | mock USDT faucet `mint` | issuer | 68,890 | [`0x15e8c2…9151fa`](https://explorer.testnet.chain.robinhood.com/tx/0x15e8c2832b74d00c85f5fd9b229104b8ffe31b6e5500fba46ba0dae30e9151fa) |
+| 10 | mock USDT `approve` | issuer | 46,331 | [`0xf741ff…712179`](https://explorer.testnet.chain.robinhood.com/tx/0xf741ff54983a6dc214f78a010cf14e8fbdb605adead0b4f007b62f3acb712179) |
+| 11 | `payListingFee` (listing approved) | issuer | 184,565 | [`0xbbbbb3…d789a2`](https://explorer.testnet.chain.robinhood.com/tx/0xbbbbb3bd766724742196bd1b5672c7e6c2dc3779cd519cc1850536ed53d789a2) |
+| 12 | `requestIssuance` (batch 1) | issuer | 122,504 | [`0xc1d79e…a571d0`](https://explorer.testnet.chain.robinhood.com/tx/0xc1d79e8f0cd3d89f5384350f6c61cebc2a875bc1aa73e95429e8dec9e5a571d0) |
+| 13 | `approveIssuance` (1,000 shares minted to investor B) | listing authority | 95,064 | [`0xd0cf49…4f122d`](https://explorer.testnet.chain.robinhood.com/tx/0xd0cf49db8c26156843004f5b0e1f9b43478280476ba20956ba494782064f122d) |
+| 14 | equity `approve` for NiaraSettlement | investor B | 46,424 | [`0x038061…bd4daf`](https://explorer.testnet.chain.robinhood.com/tx/0x038061632e58282dee95c3767a6a73ae1f504468cc057dac86cc863726bd4daf) |
+| 15 | mock USDT faucet `mint` | investor A | 51,802 | [`0x2faced…8198ca`](https://explorer.testnet.chain.robinhood.com/tx/0x2faced70e6e072793f8781c7e51f4799aa586fb6da7a52117d9b2d64828198ca) |
+| 16 | mock USDT `approve` | investor A | 46,343 | [`0xcccb92…83023d`](https://explorer.testnet.chain.robinhood.com/tx/0xcccb92155b163bde710530bdc5929976864d70f70d9dc3a139abee64c583023d) |
+| 17 | **`settle`** (100 shares for 10,000 mock USDT, fee 50) | operator | 204,416 | [`0xf162bb…507372`](https://explorer.testnet.chain.robinhood.com/tx/0xf162bbc4f90e79c4944b9c4679cf7a1685acf8148d13376d2a794ff7ac507372) |
+| 18 | cashback `withdraw` (10 mock USDT) | issuer | 78,071 | [`0xc5cd3b…df8764`](https://explorer.testnet.chain.robinhood.com/tx/0xc5cd3bd85ac8989fddd36a292eb581431348f5f4df481d06fee72bc82edf8764) |
+| | **Flow 2: fixed income, P2P deal** | | | |
+| 19 | `createAssetToken` (bond) | issuer | 662,924 | [`0x9864fe…37058f`](https://explorer.testnet.chain.robinhood.com/tx/0x9864fea27fec284d8f1f73f007035a9ad452ed70a0a7afab894080e55b37058f) |
+| 20 | `submitListing` | issuer | 104,182 | [`0x188510…5f9286`](https://explorer.testnet.chain.robinhood.com/tx/0x188510e679fe3e67e942128a02a8dd2dace9842f614683f133d338ae545f9286) |
+| 21 | `quoteListing` (1,000 mock USDT) | listing authority | 111,135 | [`0x60bf92…c6aead`](https://explorer.testnet.chain.robinhood.com/tx/0x60bf927047b7dea77de53dee40e87daea4e0091529b118712f5815b81fc6aead) |
+| 22 | mock USDT faucet `mint` | issuer | 34,690 | [`0xbea59a…a1fd57`](https://explorer.testnet.chain.robinhood.com/tx/0xbea59a4e6c74233f9751c96ec145924fa0916ffadab0516b02a5b9ee3fa1fd57) |
+| 23 | mock USDT `approve` | issuer | 46,331 | [`0x9192fd…c71054`](https://explorer.testnet.chain.robinhood.com/tx/0x9192fdd8e09b14118e5dfb525af262319e9d797e9577a4cef9b9e5900ac71054) |
+| 24 | `payListingFee` (listing approved) | issuer | 138,065 | [`0xb1d5bc…22ae75`](https://explorer.testnet.chain.robinhood.com/tx/0xb1d5bc1b3f12df8096e1ff582c2ed841ac8a868c50542d116f97b6d38722ae75) |
+| 25 | `requestIssuance` (batch 1) | issuer | 122,504 | [`0x662b1a…8e251c`](https://explorer.testnet.chain.robinhood.com/tx/0x662b1a1680925b007d9fdebbe76be3a9d710cb22c2c650868f6dc0fbe78e251c) |
+| 26 | `approveIssuance` (500 bonds minted to investor A) | listing authority | 95,064 | [`0xf2bfd5…d0cf7e`](https://explorer.testnet.chain.robinhood.com/tx/0xf2bfd57d78ac76a3f4aca1193387725dad298b31007f405a484a1dceaed0cf7e) |
+| 27 | bond `approve` for P2PEscrow | investor A | 46,424 | [`0x9bbafc…543aff`](https://explorer.testnet.chain.robinhood.com/tx/0x9bbafc85607631ae330cd3866377cabc30139289b81589eb3f8f56f38a543aff) |
+| 28 | **`openDeal`** (escrows 50 bonds) | investor A | 310,348 | [`0xadafb0…3ca556`](https://explorer.testnet.chain.robinhood.com/tx/0xadafb09f1617641ebb1508ec1eff12d26159bd1ceff32c8096640269ff3ca556) |
+| 29 | mock USDT faucet `mint` | investor B | 34,702 | [`0x28836f…c48473`](https://explorer.testnet.chain.robinhood.com/tx/0x28836f652cf9b232ac07f4c7c96b6b62fc38a850b7a7439449d4c8fb97c48473) |
+| 30 | mock USDT `approve` | investor B | 46,343 | [`0x76bf62…589d08`](https://explorer.testnet.chain.robinhood.com/tx/0x76bf623c9a4719968348f9586f29ecc55e910cc166c629b9fc1ecde2c4589d08) |
+| 31 | **`acceptDeal`** (pays 5,000 mock USDT, fee 25) | investor B | 205,858 | [`0x568214…730c35`](https://explorer.testnet.chain.robinhood.com/tx/0x568214808c7e8f151b7518caa837ece093b1f2cfdf67eb9c96ef868b1e730c35) |
+| 32 | cashback `withdraw` (5 mock USDT) | issuer | 60,971 | [`0xb8e41f…ab4974`](https://explorer.testnet.chain.robinhood.com/tx/0xb8e41f954b006e17f8a63396884551a14821b353052c3c6fd57d35c37fab4974) |
+| | **Flow 3: currency, P2P deal** | | | |
+| 33 | mock USDT faucet `mint` | investor B | 34,690 | [`0xad7e61…b26ee3`](https://explorer.testnet.chain.robinhood.com/tx/0xad7e61b60f26669242c3356fa3546d0a127e82625500b30fdcb0337405b26ee3) |
+| 34 | mock USDT `approve` | investor B | 46,331 | [`0xaaf898…e811af`](https://explorer.testnet.chain.robinhood.com/tx/0xaaf8988ec0876d80a7f793faa61d8cc288e000fab31d16c56e3906f602e811af) |
+| 35 | **`openDeal`** (escrows 1,000 mock USDT) | investor B | 310,353 | [`0x7d0242…dfae0a`](https://explorer.testnet.chain.robinhood.com/tx/0x7d0242446c29a05d70711f793ec5e3beb64d933b44ea92e800361e201cdfae0a) |
+| 36 | mock BRL faucet `mint` | investor A | 68,902 | [`0xcebefb…8bf8b3`](https://explorer.testnet.chain.robinhood.com/tx/0xcebefbc29be5da2406aa6b5eb03e5fcccb0d8d976d69871c8357bacc298bf8b3) |
+| 37 | mock BRL `approve` | investor A | 46,343 | [`0x6667e4…5d746a`](https://explorer.testnet.chain.robinhood.com/tx/0x6667e423988b4b1581450997775327a34775ba3ec85d9af6d7af2d6c585d746a) |
+| 38 | **`acceptDeal`** (delivers 5,500 mock BRL, fee 5) | investor A | 157,320 | [`0x96d08c…1d54c8`](https://explorer.testnet.chain.robinhood.com/tx/0x96d08cd2c56ee11c95a9949efb7b21c420c9b90577f4b138f388fbbbfc1d54c8) |
+
+**Checked after the demo with read-only calls (2026-11-16):** the same end state as on Base
+Sepolia.
+- All 38 receipts succeeded.
+- Equity: supply 1,000; investor A 100, investor B 900. Bond: supply 500; investor A 450,
+  investor B 50; none left in the escrow.
+- Mock USDT: investor A 5,970, investor B 9,950, issuer 15 (cashback). Mock BRL: investor B
+  5,500.
+- CashbackDistributor holds 2,065 mock USDT, all protocol balance (listing fees 2,000 + fees
+  80 − cashback 15); no cashback left unwithdrawn.
+- P2PEscrow `totalEscrowed` is 0 for mock USDT, mock BRL and the bond.
 
 ## Historical: the July 2026 Sepolia deployment (backed model)
 
