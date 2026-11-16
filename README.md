@@ -366,6 +366,42 @@ a larger multiplier there.
 | HyperEVM testnet | 0.2 gwei | ~0.0006 HYPE | 0.003 HYPE |
 | Tempo testnet | n/a | (pathUSD, from Tempo's faucet) | nothing is sent |
 
+### Gas preflight: no broadcast starts with an underfunded wallet
+
+Every entry point that broadcasts runs a preflight before its first transaction: deploy phase
+1 (`run()`), deploy phase 2 (`executeWiring()`) and the demo (`run()`, `runEquityFlow()`,
+`runFixedIncomeFlow()`, `runCurrencyFlow()`, `runFundGas()`). It lists every wallet that signs
+in that phase and checks it can pay for its transactions:
+
+- **What a wallet needs** = its gas budget × the chain's gas multiplier / 100 × the max fee
+  per gas, plus any value it sends. That is what a node checks before accepting a transaction
+  (gas limit × max fee + value), and forge sets each gas limit to its own estimate × the
+  `--gas-estimate-multiplier`.
+- **Gas budgets** are constants in forge's estimate units, measured on the Base Sepolia
+  deployment and rounded up (`PHASE1_DEPLOYER_GAS`, `WIRING_EXECUTE_GAS`, `LIST_CURRENCY_GAS`
+  in `Deploy.s.sol`; one constant per flow and wallet in `Demo.s.sol`). Phase 2 counts only the
+  steps it would still send, so a re-run after a partial phase 2 asks only for what is left.
+- **Max fee per gas** = `block.basefee + tx.gasprice` inside the script, i.e. 2 × base fee +
+  priority fee, which is what forge signs with.
+- **Multiplier**: `GAS_ESTIMATE_MULTIPLIER_<chainid>` if set, else the per-chain default: 200
+  on Robinhood, 700 on Tempo, 800 on Sepolia, 130 (forge's default) elsewhere. **It must
+  match the `--gas-estimate-multiplier` on the command line**; the script cannot read the
+  flag. Tempo's phase 2 and demo need a larger multiplier than phase 1 (see "Tempo fees"):
+  set `GAS_ESTIMATE_MULTIPLIER_42431` and pass the same value.
+- **The demo's top-up counts**: before the flows, `run()` has the deployer top up each wallet
+  below `DEMO_GAS_FUNDING_WEI_<chainid>`, so the deployer must also hold that value, and each
+  topped-up wallet counts it as received. Single flows send no top-up.
+- **On Tempo** it reads each wallet's fee-token balance (pathUSD, or `TEMPO_FEE_TOKEN` if
+  set) instead of the native balance, and converts the cost from attodollars to pathUSD base
+  units (6 decimals).
+
+With `--broadcast` (or `--resume`), if any wallet is short the script reverts
+`InsufficientGasFunds(phase, shortfalls)` before sending anything, naming every short wallet
+with what it needs, has and misses. A dry run prints the same per-wallet lines and only
+warns, so the figures can still be inspected on an unfunded wallet. The preflight checks
+funds only; it does not replace the per-chain limits above (HyperEVM's small blocks,
+Sepolia's transaction cap).
+
 `script/Deploy.s.sol` deploys the v1 exchange: `ListingRegistry` (which creates the
 `AssetTokenFactory`), `CashbackDistributor`, `NiaraSettlement`, `P2PEscrow`, and two test
 tokens. Parameters: **fee 50 bps** (the contract's default and hard cap; the script only

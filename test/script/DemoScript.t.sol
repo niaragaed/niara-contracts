@@ -478,6 +478,90 @@ contract DemoScriptTest is Test {
         assertEq(roles.issuer.balance, 0);
     }
 
+    // ── Gas preflight ──────────────────────────────────────────────────────────────────
+
+    /// @notice All three flows: each wallet's budget is the sum of its part in each flow; the
+    /// deployer signs nothing without a top-up.
+    function test_DemoGasNeeds_SumsTheSelectedFlows() public view {
+        NiaraScriptBase.GasNeed[] memory needs = demo.demoGasNeeds(roles, true, true, true, 0);
+        assertEq(needs.length, 6);
+        assertEq(needs[0].wallet, roles.deployer);
+        assertEq(needs[0].gas, 0);
+        assertEq(needs[1].wallet, roles.listingAuthority);
+        assertEq(needs[1].gas, demo.EQUITY_LISTING_GAS() + demo.BOND_LISTING_GAS());
+        assertEq(needs[2].wallet, roles.operator);
+        assertEq(needs[2].gas, demo.EQUITY_OPERATOR_GAS());
+        assertEq(needs[3].wallet, roles.issuer);
+        assertEq(needs[3].gas, demo.EQUITY_ISSUER_GAS() + demo.BOND_ISSUER_GAS());
+        assertEq(needs[4].wallet, roles.investorA);
+        assertEq(needs[4].gas, demo.EQUITY_INVESTOR_A_GAS() + demo.BOND_INVESTOR_A_GAS() + demo.FX_INVESTOR_A_GAS());
+        assertEq(needs[5].wallet, roles.investorB);
+        assertEq(needs[5].gas, demo.EQUITY_INVESTOR_B_GAS() + demo.BOND_INVESTOR_B_GAS() + demo.FX_INVESTOR_B_GAS());
+    }
+
+    /// @notice A single flow counts only the wallets that sign in it.
+    function test_DemoGasNeeds_CurrencyFlowOnlyNeedsTheInvestors() public view {
+        NiaraScriptBase.GasNeed[] memory needs = demo.demoGasNeeds(roles, false, false, true, 0);
+        for (uint256 i = 0; i < 4; i++) {
+            assertEq(needs[i].gas, 0);
+        }
+        assertEq(needs[4].gas, demo.FX_INVESTOR_A_GAS());
+        assertEq(needs[5].gas, demo.FX_INVESTOR_B_GAS());
+    }
+
+    /// @notice The top-up mirrors `fundGas`: the deployer pays one transfer and the value for
+    /// each wallet below the target, and that wallet counts the value as received.
+    function test_DemoGasNeeds_TopUpMovesValueFromTheDeployer() public {
+        vm.deal(roles.issuer, 0.004 ether);
+        vm.deal(roles.operator, 1 ether);
+
+        NiaraScriptBase.GasNeed[] memory needs = demo.demoGasNeeds(roles, false, false, false, 0.02 ether);
+        // Four wallets below the target (the operator is above it).
+        assertEq(needs[0].gas, 4 * demo.FUND_TRANSFER_GAS());
+        assertEq(needs[0].value, 3 * 0.02 ether + 0.016 ether);
+        assertEq(needs[1].incoming, 0.02 ether);
+        assertEq(needs[2].incoming, 0);
+        assertEq(needs[3].incoming, 0.016 ether);
+        assertEq(needs[4].incoming, 0.02 ether);
+        assertEq(needs[5].incoming, 0.02 ether);
+    }
+
+    /// @notice No top-up on Tempo, whatever the target: every wallet pays from its own
+    /// fee-token balance.
+    function test_DemoGasNeeds_NoTopUpOnTempo() public {
+        vm.chainId(42431);
+        NiaraScriptBase.GasNeed[] memory needs = demo.demoGasNeeds(roles, true, true, true, 0.02 ether);
+        assertEq(needs[0].gas, 0);
+        assertEq(needs[0].value, 0);
+        for (uint256 i = 1; i < needs.length; i++) {
+            assertEq(needs[i].incoming, 0);
+        }
+    }
+
+    /// @notice With the top-up the role wallets are covered (the deployer funds them), and
+    /// the deployer alone is reported short when it cannot pay for it.
+    function test_DemoGasNeeds_PreflightFlagsOnlyTheUnderfundedDeployer() public {
+        // Base Sepolia's figures: multiplier 130, ~0.01 gwei max fee, 0.0002 ETH top-up.
+        vm.chainId(84532);
+        uint256 fee = 0.01 gwei;
+        NiaraScriptBase.GasNeed[] memory needs = demo.demoGasNeeds(roles, true, true, true, 0.0002 ether);
+        assertEq(demo.checkGasFunds("demo", needs, fee, false), 1);
+
+        vm.deal(roles.deployer, 1 ether);
+        assertEq(demo.checkGasFunds("demo", needs, fee, true), 0);
+    }
+
+    /// @notice The budgets cover forge's own estimates in the Base Sepolia demo (2026-11-16),
+    /// i.e. each wallet's gas limits divided by the 1.3 multiplier, flows 1 + 2 + 3.
+    function test_DemoBudgets_CoverTheMeasuredBaseSepoliaEstimates() public view {
+        NiaraScriptBase.GasNeed[] memory needs = demo.demoGasNeeds(roles, true, true, true, 0);
+        assertGe(needs[1].gas * 130, 569_620 * 100); // listing authority
+        assertGe(needs[2].gas * 130, 282_365 * 100); // operator
+        assertGe(needs[3].gas * 130, 3_398_327 * 100); // issuer
+        assertGe(needs[4].gas * 130, 1_009_036 * 100); // investor A
+        assertGe(needs[5].gas * 130, 1_049_512 * 100); // investor B
+    }
+
     function test_Constants_DemoAmounts() public view {
         assertEq(demo.DEFAULT_GAS_FUNDING(), 0.02 ether);
         assertEq(demo.EQUITY_BATCH(), 1_000 ether);

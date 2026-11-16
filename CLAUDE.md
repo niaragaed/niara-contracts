@@ -184,6 +184,11 @@ that is expected. Do not reintroduce a hardcoded default in the contract.
     The script's logic is tested in-process by
     `test/script/DeployScript.t.sol`; a local simulation uses Anvil started with one of the
     five chain ids, without `--broadcast`.
+  - **Gas preflight:** every broadcasting entry point (deploy phase 1 and 2, every demo entry
+    point) checks each signing wallet's balance against its gas budget x the chain's gas
+    multiplier x the max fee, and reverts `InsufficientGasFunds` listing every short wallet
+    before sending anything (a dry run only warns). On Tempo it reads the fee token. If a
+    script's transactions change, update its gas budgets (README, "Gas preflight").
   - `script/tokens/TestnetMockToken.sol` is a test token with no value (open mint). It is
     deployment tooling, never to be used or described as a real currency.
   - `Demo.s.sol` runs three flows (equity on the order book, fixed-income P2P deal,

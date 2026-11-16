@@ -92,6 +92,16 @@ contract DeployNiara is NiaraScriptBase {
     /// registry's settlement link).
     uint256 public constant WIRING_PROPOSALS = 5;
 
+    // Gas budgets for the preflight, in forge's own estimate (before the multiplier). Measured
+    // on the Base Sepolia deployment (2026-11-16) and rounded up: phase 1 used 12.06M gas (forge
+    // estimated 12.08M), each execute ~53.4k, each currency listing ~80.5k.
+    /// @notice Gas budget of the deployer's phase 1 (six creations and five proposals).
+    uint256 public constant PHASE1_DEPLOYER_GAS = 13_000_000;
+    /// @notice Gas budget of one phase 2 execute (a role grant or the settlement link).
+    uint256 public constant WIRING_EXECUTE_GAS = 75_000;
+    /// @notice Gas budget of one phase 2 currency listing.
+    uint256 public constant LIST_CURRENCY_GAS = 110_000;
+
     // ── Entry points ───────────────────────────────────────────────────────────────────
 
     /// @notice PHASE 1: deploy everything and propose the wiring.
@@ -99,6 +109,8 @@ contract DeployNiara is NiaraScriptBase {
     function run() external returns (Deployment memory d) {
         Config memory cfg = readConfig();
         _logConfig(cfg);
+        _requireSupportedChain();
+        _preflight("deploy phase 1", phase1GasNeeds(cfg));
         d = deployAndPropose(cfg);
         _logDeployment(d);
         _logNextStep(cfg, d);
@@ -109,6 +121,7 @@ contract DeployNiara is NiaraScriptBase {
     function executeWiring() external {
         Config memory cfg = readConfig();
         Deployment memory d = readDeployment();
+        _preflight("deploy phase 2", phase2GasNeeds(cfg, d));
         executeWiringOn(cfg, d);
         console2.log("Wiring complete and verified on", chainName());
     }
@@ -183,6 +196,14 @@ contract DeployNiara is NiaraScriptBase {
         vm.stopBroadcast();
     }
 
+    /// @notice What phase 1 needs from each signing wallet: only the deployer signs.
+    /// @param cfg The configuration.
+    /// @return needs One entry, the deployer's.
+    function phase1GasNeeds(Config memory cfg) public pure returns (GasNeed[] memory needs) {
+        needs = new GasNeed[](1);
+        needs[0] = GasNeed("deployer", cfg.deployer, PHASE1_DEPLOYER_GAS, 0, 0);
+    }
+
     // ── Phase 2 ────────────────────────────────────────────────────────────────────────
 
     /// @notice Executes the proposed wiring (signed by `cfg.deployer`), lists the two mock
@@ -233,6 +254,36 @@ contract DeployNiara is NiaraScriptBase {
         vm.stopBroadcast();
 
         verifyWiring(cfg, d);
+    }
+
+    /// @notice What phase 2 still needs from each signing wallet, counting only the steps
+    /// `executeWiringOn` would still send (it skips what is already done): the deployer's
+    /// executes and the listing authority's currency listings. One entry when both roles are
+    /// the same wallet.
+    /// @param cfg The phase 1 configuration.
+    /// @param d The phase 1 deployment.
+    /// @return needs The deployer's need, then the listing authority's (if a different wallet).
+    function phase2GasNeeds(Config memory cfg, Deployment memory d) public view returns (GasNeed[] memory needs) {
+        uint256 executes;
+        if (!d.distributor.hasRole(d.distributor.SETTLEMENT_ROLE(), address(d.settlement))) executes++;
+        if (!d.distributor.hasRole(d.distributor.ESCROW_ROLE(), address(d.escrow))) executes++;
+        if (!d.distributor.hasRole(d.distributor.LISTING_REGISTRY_ROLE(), address(d.registry))) executes++;
+        if (!d.settlement.hasRole(d.settlement.SETTLEMENT_OPERATOR_ROLE(), cfg.operator)) executes++;
+        if (address(d.registry.settlement()) != address(d.settlement)) executes++;
+        uint256 listings;
+        if (_notListed(d, address(d.mockUsdt))) listings++;
+        if (_notListed(d, address(d.mockBrl))) listings++;
+
+        uint256 deployerGas = executes * WIRING_EXECUTE_GAS;
+        uint256 listingGas = listings * LIST_CURRENCY_GAS;
+        if (cfg.listingAuthority == cfg.deployer) {
+            needs = new GasNeed[](1);
+            needs[0] = GasNeed("deployer and listing authority", cfg.deployer, deployerGas + listingGas, 0, 0);
+        } else {
+            needs = new GasNeed[](2);
+            needs[0] = GasNeed("deployer", cfg.deployer, deployerGas, 0, 0);
+            needs[1] = GasNeed("listing authority", cfg.listingAuthority, listingGas, 0, 0);
+        }
     }
 
     /// @notice Earliest timestamp at which every pending proposal of phase 1 can execute

@@ -66,6 +66,27 @@ contract DemoNiaraFlows is NiaraScriptBase {
     uint16 public constant LISTING_FEE_BPS = 10;
     uint64 public constant QUOTE_LIFETIME = 7 days;
 
+    // Gas budgets for the preflight, per flow and per signing wallet, in forge's own estimate
+    // (before the multiplier). Measured on the Base Sepolia demo (2026-11-16, forge's
+    // estimates for the three flows run in order) and rounded up by about a quarter, since a
+    // flow run on its own can touch colder storage than in that run.
+    /// @notice Gas budget of one gas top-up transfer by the deployer.
+    uint256 public constant FUND_TRANSFER_GAS = 30_000;
+    /// @notice Flow 1 (equity): issuer, listing authority, operator, investor A, investor B.
+    uint256 public constant EQUITY_ISSUER_GAS = 1_700_000;
+    uint256 public constant EQUITY_LISTING_GAS = 300_000;
+    uint256 public constant EQUITY_OPERATOR_GAS = 300_000;
+    uint256 public constant EQUITY_INVESTOR_A_GAS = 180_000;
+    uint256 public constant EQUITY_INVESTOR_B_GAS = 80_000;
+    /// @notice Flow 2 (fixed income): issuer, listing authority, investor A, investor B.
+    uint256 public constant BOND_ISSUER_GAS = 1_700_000;
+    uint256 public constant BOND_LISTING_GAS = 300_000;
+    uint256 public constant BOND_INVESTOR_A_GAS = 520_000;
+    uint256 public constant BOND_INVESTOR_B_GAS = 460_000;
+    /// @notice Flow 3 (currency): investor A, investor B.
+    uint256 public constant FX_INVESTOR_A_GAS = 400_000;
+    uint256 public constant FX_INVESTOR_B_GAS = 600_000;
+
     struct Roles {
         /// @dev Admin of the deployment. Only funds the other wallets' gas.
         address deployer;
@@ -98,28 +119,105 @@ contract DemoNiaraFlows is NiaraScriptBase {
     function run() external {
         Roles memory roles = readRoles();
         Deployment memory d = readDeployment();
-        fundGas(roles, gasFundingTarget());
+        uint256 target = gasFundingTarget();
+        _demoPreflight("demo (top-up and three flows)", roles, true, true, true, target);
+        fundGas(roles, target);
         runAll(roles, d);
     }
 
     /// @notice Flow 1 only (equity, order book).
     function runEquityFlow() external {
-        equityFlow(readRoles(), readDeployment());
+        Roles memory roles = readRoles();
+        Deployment memory d = readDeployment();
+        _demoPreflight("demo flow 1 (equity)", roles, true, false, false, 0);
+        equityFlow(roles, d);
     }
 
     /// @notice Flow 2 only (fixed income, P2P deal).
     function runFixedIncomeFlow() external {
-        fixedIncomeFlow(readRoles(), readDeployment());
+        Roles memory roles = readRoles();
+        Deployment memory d = readDeployment();
+        _demoPreflight("demo flow 2 (fixed income)", roles, false, true, false, 0);
+        fixedIncomeFlow(roles, d);
     }
 
     /// @notice Flow 3 only (currency, P2P deal).
     function runCurrencyFlow() external {
-        currencyFlow(readRoles(), readDeployment());
+        Roles memory roles = readRoles();
+        Deployment memory d = readDeployment();
+        _demoPreflight("demo flow 3 (currency)", roles, false, false, true, 0);
+        currencyFlow(roles, d);
     }
 
     /// @notice Only the gas top-up of the five role wallets by the deployer.
     function runFundGas() external {
-        fundGas(readRoles(), gasFundingTarget());
+        Roles memory roles = readRoles();
+        uint256 target = gasFundingTarget();
+        _demoPreflight("demo gas top-up", roles, false, false, false, target);
+        fundGas(roles, target);
+    }
+
+    /// @notice What each of the six wallets needs for the selected flows, after the gas
+    /// top-up to `fundingTarget` (0 for none): the deployer pays one transfer per wallet below
+    /// the target plus the value sent, and each topped-up wallet counts that value as
+    /// received. Mirrors `fundGas`, so on Tempo there is no top-up.
+    /// @param roles The roles.
+    /// @param equity Whether flow 1 runs.
+    /// @param fixedIncome Whether flow 2 runs.
+    /// @param currency Whether flow 3 runs.
+    /// @param fundingTarget The top-up target in wei, 0 for no top-up.
+    /// @return needs Deployer, listing authority, operator, issuer, investor A, investor B.
+    function demoGasNeeds(Roles memory roles, bool equity, bool fixedIncome, bool currency, uint256 fundingTarget)
+        public
+        view
+        returns (GasNeed[] memory needs)
+    {
+        needs = new GasNeed[](6);
+        needs[0] = GasNeed("deployer", roles.deployer, 0, 0, 0);
+        needs[1] = GasNeed("listing authority", roles.listingAuthority, 0, 0, 0);
+        needs[2] = GasNeed("operator", roles.operator, 0, 0, 0);
+        needs[3] = GasNeed("issuer", roles.issuer, 0, 0, 0);
+        needs[4] = GasNeed("investor A", roles.investorA, 0, 0, 0);
+        needs[5] = GasNeed("investor B", roles.investorB, 0, 0, 0);
+        if (equity) {
+            needs[1].gas += EQUITY_LISTING_GAS;
+            needs[2].gas += EQUITY_OPERATOR_GAS;
+            needs[3].gas += EQUITY_ISSUER_GAS;
+            needs[4].gas += EQUITY_INVESTOR_A_GAS;
+            needs[5].gas += EQUITY_INVESTOR_B_GAS;
+        }
+        if (fixedIncome) {
+            needs[1].gas += BOND_LISTING_GAS;
+            needs[3].gas += BOND_ISSUER_GAS;
+            needs[4].gas += BOND_INVESTOR_A_GAS;
+            needs[5].gas += BOND_INVESTOR_B_GAS;
+        }
+        if (currency) {
+            needs[4].gas += FX_INVESTOR_A_GAS;
+            needs[5].gas += FX_INVESTOR_B_GAS;
+        }
+        if (fundingTarget == 0 || !hasNativeGasToken(block.chainid)) return needs;
+        for (uint256 i = 1; i < needs.length; i++) {
+            uint256 balance = needs[i].wallet.balance;
+            if (balance >= fundingTarget) continue;
+            uint256 topUp = fundingTarget - balance;
+            needs[i].incoming = topUp;
+            needs[0].gas += FUND_TRANSFER_GAS;
+            needs[0].value += topUp;
+        }
+    }
+
+    function _demoPreflight(
+        string memory phase,
+        Roles memory roles,
+        bool equity,
+        bool fixedIncome,
+        bool currency,
+        uint256 fundingTarget
+    ) internal view {
+        _requireSupportedChain();
+        requireDistinctRoles(roles);
+        _preflight(phase, demoGasNeeds(roles, equity, fixedIncome, currency, fundingTarget));
     }
 
     /// @notice Native balance each role wallet is topped up to on the CURRENT chain:
