@@ -354,6 +354,22 @@ storage slot costs ~230k gas more than on Ethereum, so small transactions that c
 the demo with `eth_estimateGas` on the deployed contracts before broadcasting them, and expect
 a larger multiplier there.
 
+Measured on Tempo's node on 2026-11-16 (`eth_simulateV1`, nothing sent):
+- **Phase 1 at 700:** mock tokens 4.18M and 3.93M gas (6.3x and 5.9x forge's estimate),
+  ListingRegistry 20.3M (5.0x), CashbackDistributor and NiaraSettlement 9.45M each (5.2x),
+  P2PEscrow 14.1M (5.0x). Every gas limit at 700 has at least 11% margin.
+- **30M per block:** Tempo's simulated blocks report a general gas limit of 30,000,000
+  (`mainBlockGeneralGasLimit`). At 700 the largest phase 1 limit is ListingRegistry's 28.36M;
+  above ~740 it would exceed that, so phase 1 stays at 700 whatever phase 2 and the demo need.
+- **First transaction of an account:** a plain transfer from an account with nonce 0
+  estimates at 274,318 gas against 21,000 from an account that has sent before (~253k more).
+  Every demo wallet pays this once on Tempo.
+- **The public RPC caps one simulation at 50M gas in total**, across all its blocks (the sixth
+  phase 1 creation ran out of gas at exactly 50.0M cumulative). Phase 1 alone uses ~63M on
+  Tempo, so phase 2 and the demo cannot be replayed on top of a simulated phase 1: they are
+  measured after phase 1 is deployed, against the real contracts, and
+  `GAS_ESTIMATE_MULTIPLIER_42431` is set from that measurement.
+
 **Demo gas top-up per chain** (`DEMO_GAS_FUNDING_WEI_<chainid>`), sized from the measured gas
 (the issuer, the largest spender, uses 2.25M gas in the demo; the other wallets 0.15M to
 0.60M) at the gas prices of 2026-11-15, with at least 5x headroom:
