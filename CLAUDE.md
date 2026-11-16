@@ -265,14 +265,15 @@ no overriding).
 
 ## Known open items
 
-- **v1 exchange deployment status:** only Base Sepolia phases 1 and 2 are deployed (the user
-  broadcast them on 2026-11-16). The demo there is still pending, and no other
-  chain has a v1 deployment. Addresses, transactions and checks are in the README, "v1
-  deployments". Chains go one at a time (Base Sepolia, Sepolia, Robinhood, HyperEVM,
-  Tempo), each only after the previous one's phase 1, phase 2 and demo are verified.
-  Every step on every chain needs an explicit request and the user's confirmation: the
-  user runs `--broadcast` themselves; never trigger it on your own, not even against a
-  local node unless asked.
+- **v1 exchange deployment status:** Base Sepolia is complete (phase 1, phase 2 and the
+  demo, broadcast by the user on 2026-11-16 and verified). No other chain has a v1
+  deployment. Addresses, transactions and checks are in the README, "v1 deployments".
+  Chains go one at a time (Base Sepolia, Robinhood, HyperEVM, Tempo), each only after the
+  previous one's phase 1, phase 2 and demo are verified. Ethereum Sepolia is deferred from
+  v1 (its per-transaction gas cap is below ListingRegistry's and P2PEscrow's deployment
+  gas; a contract split is a pre-mainnet design item). Every step on every chain needs an
+  explicit request and the user's confirmation: the user runs `--broadcast` themselves;
+  never trigger it on your own, not even against a local node unless asked.
 - The July 2026 Sepolia deployment (2026-07-22) documented in the README ("Historical")
   is the earlier backed model (`AssetToken` + `BackingGateway`), made with the previous
   versions of the scripts. It is not the v1 exchange and predates the `ListingRegistry`.

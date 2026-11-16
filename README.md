@@ -563,14 +563,17 @@ everywhere: see "Network quirks").
 ## v1 deployments
 
 Record of the real v1 deployments, one chain at a time, in the order Base Sepolia,
-Sepolia, Robinhood Chain testnet, HyperEVM testnet, Tempo testnet. Each chain starts
-only after the previous one's phase 1, phase 2 and demo are verified. None of this code
+Robinhood Chain testnet, HyperEVM testnet, Tempo testnet. Each chain starts only after the
+previous one's phase 1, phase 2 and demo are verified. Ethereum Sepolia is deferred from v1:
+its per-transaction gas cap is below what ListingRegistry and P2PEscrow need to deploy (see
+"Network quirks"), so it waits for a contract split before mainnet. None of this code
 has been audited, and the two mock tokens have no value.
 
 ### Base Sepolia (84532)
 
 **Status:** phase 1 done (2026-11-16 00:51:59 to 00:52:07 UTC, blocks 59342255 to
-59342292) and phase 2 done (blocks 59360951 to 59362038). The demo is not done yet.
+59342292) phase 2 done (blocks 59360951 to 59362038) and the demo done (blocks 59364460 to
+59364592). All three verified; Base Sepolia is complete.
 
 Signed by the deployer `0x7667C862d1586D3D15298d38a7a8FBD7afC214c3`, which is the admin
 of every contract. Phase 1 made 11 transactions and used 12,057,706 gas, for
@@ -653,6 +656,74 @@ only sent the two listings. Nothing was left half-applied.
 - `forge script script/Deploy.s.sol --sig "verify()"` (read-only) passes: "Deployment
   verified on Base Sepolia".
 - Balances afterwards: deployer 0.00374 ETH, listing authority 0.000199 ETH, operator 0.
+
+#### Demo (2026-11-16 02:06:00 to 02:06:27 UTC)
+
+`script/Demo.s.sol`, all three flows in one run: 38 transactions, 4,611,095 gas,
+0.0000231 ETH. Each step is signed by the wallet of its role. Instruments created (test
+tokens, no value):
+
+| Instrument | Address |
+|---|---|
+| Niara Demo Equity (TEST) | [`0x0f1c771c8943cD7EC2b4c654CEea49B41336bDD7`](https://sepolia.basescan.org/address/0x0f1c771c8943cD7EC2b4c654CEea49B41336bDD7) |
+| Niara Demo Bond 2030 (TEST) | [`0x4b6999CF049b05e23202e85bdF936edeBe77B5b2`](https://sepolia.basescan.org/address/0x4b6999CF049b05e23202e85bdF936edeBe77B5b2) |
+
+| # | Step | Signed by | Gas | Transaction |
+|---|---|---|---|---|
+| | **Gas top-up (deployer)** | | | |
+| 1 | Top-up to listing authority | deployer | 21,000 | [`0x3b61be…242d85`](https://sepolia.basescan.org/tx/0x3b61be50b3225b79c5124497bda58ff1c0ee444c08046633e6c6bf74bd242d85) |
+| 2 | Top-up to operator | deployer | 21,000 | [`0x9f2545…a763f7`](https://sepolia.basescan.org/tx/0x9f2545974519697b53072973d81bb78e06469014ff378a08e5a37a3035a763f7) |
+| 3 | Top-up to issuer | deployer | 21,000 | [`0x2e4ae1…385ab9`](https://sepolia.basescan.org/tx/0x2e4ae1d6c2652a56b0dca6ce3616c3dd7e475f120eff6f2c6ab6d312df385ab9) |
+| 4 | Top-up to investor A | deployer | 21,000 | [`0xd21aa6…f7ecd4`](https://sepolia.basescan.org/tx/0xd21aa664c7a0845dbc1e2b9ae34dd8f11c63b00aa3d5f020b5a7aac524f7ecd4) |
+| 5 | Top-up to investor B | deployer | 21,000 | [`0xb3d7f2…aa0022`](https://sepolia.basescan.org/tx/0xb3d7f22eb265e49441e7fdd574b44cb487ac6548ee214cf013dfe64170aa0022) |
+| | **Flow 1: equity, order book** | | | |
+| 6 | `createAssetToken` (equity) | issuer | 662,876 | [`0xe03015…cbfe9c`](https://sepolia.basescan.org/tx/0xe03015cb84d4985e57a892f66a3a367fe39c5166f62a1cba1dd793de4fcbfe9c) |
+| 7 | `submitListing` | issuer | 104,182 | [`0x7f1b6e…739a3b`](https://sepolia.basescan.org/tx/0x7f1b6eb61a32baf5a6669c471909ddfa9123b0c712f68b7da5f0a4d0c4739a3b) |
+| 8 | `quoteListing` (1,000 mock USDT) | listing authority | 111,135 | [`0x8d6a40…858e74`](https://sepolia.basescan.org/tx/0x8d6a40acce43c0ceb76733de9c5c70afdb78d3eef8cff3977c62c6aa64858e74) |
+| 9 | mock USDT faucet `mint` | issuer | 68,890 | [`0x72d37f…aef55b`](https://sepolia.basescan.org/tx/0x72d37f714db4b07fde1c5497cd55f80493f797854ec509ac0718c341beaef55b) |
+| 10 | mock USDT `approve` | issuer | 46,331 | [`0xe0d7e3…ca129b`](https://sepolia.basescan.org/tx/0xe0d7e394f8fc8a50f0288d3cae9e5ff3eaf61644d23bb067b3f1748692ca129b) |
+| 11 | `payListingFee` (listing approved) | issuer | 184,565 | [`0x1e5a38…351f3f`](https://sepolia.basescan.org/tx/0x1e5a384c9f3d4776aa4eac21f3d2f0978dac28399839d22f0aeb5fbea5351f3f) |
+| 12 | `requestIssuance` (batch 1) | issuer | 122,504 | [`0xeb2b93…12c7bc`](https://sepolia.basescan.org/tx/0xeb2b93d24b85e9c82533c34e5ff70af82a3d3d3463212a763daf5f198812c7bc) |
+| 13 | `approveIssuance` (1,000 shares minted to investor B) | listing authority | 95,064 | [`0xcf20f7…cc3842`](https://sepolia.basescan.org/tx/0xcf20f7a8672d89d8b3a4075d8bfaa2242588495b2331ecb26e18293c9ccc3842) |
+| 14 | equity `approve` for NiaraSettlement | investor B | 46,424 | [`0x110995…0e7ff1`](https://sepolia.basescan.org/tx/0x1109951377ee7b46b1dbb1813b7ece5dda89603c6bd6f2519cfd4da34a0e7ff1) |
+| 15 | mock USDT faucet `mint` | investor A | 51,802 | [`0xd376a4…f037cb`](https://sepolia.basescan.org/tx/0xd376a4f322517c61337069a9f441dbd7fc9a4e9e0beeea89f692c315cdf037cb) |
+| 16 | mock USDT `approve` | investor A | 46,343 | [`0x4bb29f…88ef3c`](https://sepolia.basescan.org/tx/0x4bb29f91c5d908ce8f33a2c374163cb0b28071346f54d2eda6933ed0fb88ef3c) |
+| 17 | **`settle`** (100 shares for 10,000 mock USDT, fee 50) | operator | 204,428 | [`0x3437cf…572cab`](https://sepolia.basescan.org/tx/0x3437cf57a77b2f16bacf1bb0e9fa1f90fb4c9b5196c20275c4281c79ee572cab) |
+| 18 | cashback `withdraw` (10 mock USDT) | issuer | 78,071 | [`0x9dcfe3…1a3686`](https://sepolia.basescan.org/tx/0x9dcfe31745179c8ab4a53c4fb2c85fd1859aeeca01708f646ef4198a101a3686) |
+| | **Flow 2: fixed income, P2P deal** | | | |
+| 19 | `createAssetToken` (bond) | issuer | 662,924 | [`0x04a6ff…32ccf8`](https://sepolia.basescan.org/tx/0x04a6ff5e627ac48c0502d87a57d1b304fc74edfa7e87d40b0afe0aee5f32ccf8) |
+| 20 | `submitListing` | issuer | 104,182 | [`0xee40e1…08847a`](https://sepolia.basescan.org/tx/0xee40e1b7e03edffabc94992c8caec27f47ff95e961b2d09ad8a11c10ac08847a) |
+| 21 | `quoteListing` (1,000 mock USDT) | listing authority | 111,135 | [`0x5b9464…d997e6`](https://sepolia.basescan.org/tx/0x5b9464bf6ae7f8106ec209bf8ee8377cdc22f908bc21cfb1a937460a8fd997e6) |
+| 22 | mock USDT faucet `mint` | issuer | 34,690 | [`0x265e0f…84852c`](https://sepolia.basescan.org/tx/0x265e0fd6820397a105a17bb710ee1903271daacf2a8d44d1e73e59defb84852c) |
+| 23 | mock USDT `approve` | issuer | 46,331 | [`0x55eea1…a47d77`](https://sepolia.basescan.org/tx/0x55eea14d8aa9f6365c77c58d8d48d1ff7c480f34550dbd2a1c692dd9cea47d77) |
+| 24 | `payListingFee` (listing approved) | issuer | 138,065 | [`0x5fed93…33a1f0`](https://sepolia.basescan.org/tx/0x5fed93e727b8f6d0727f32efe1e2f2b9f6fc01f1dafaad9eb337b5fd6c33a1f0) |
+| 25 | `requestIssuance` (batch 1) | issuer | 122,504 | [`0x87903c…d9a72c`](https://sepolia.basescan.org/tx/0x87903cc736f0d4396696222577ffce81b4ab260055e8ac752a2895d7bdd9a72c) |
+| 26 | `approveIssuance` (500 bonds minted to investor A) | listing authority | 95,064 | [`0xe786ee…9911d0`](https://sepolia.basescan.org/tx/0xe786eed7a218116741fbd7f553b10ab5c79eb5d5c025bfbc587ef456709911d0) |
+| 27 | bond `approve` for P2PEscrow | investor A | 46,424 | [`0x7dc009…29c62f`](https://sepolia.basescan.org/tx/0x7dc009b87dac1b28bd863472d43a32f831489d549375afc27276a9b24629c62f) |
+| 28 | **`openDeal`** (escrows 50 bonds) | investor A | 310,348 | [`0x5711af…514069`](https://sepolia.basescan.org/tx/0x5711af01a7fc09c14c6158f2953309f602c1b6e19066092420bfad6e3f514069) |
+| 29 | mock USDT faucet `mint` | investor B | 34,702 | [`0xab753c…f44675`](https://sepolia.basescan.org/tx/0xab753c324f64db21c4b9b2e85101ebf0388c56eeba516f732c98b3911ff44675) |
+| 30 | mock USDT `approve` | investor B | 46,343 | [`0xdaf13e…2ef600`](https://sepolia.basescan.org/tx/0xdaf13e4958c35a51d62be433e241b3c17232a3beb188c245783e842fd02ef600) |
+| 31 | **`acceptDeal`** (pays 5,000 mock USDT, fee 25) | investor B | 205,858 | [`0xbc8c2e…7381d4`](https://sepolia.basescan.org/tx/0xbc8c2e66203ad8523c1a49730d5d02cafbaa98bc5e540f63f5b0895b337381d4) |
+| 32 | cashback `withdraw` (5 mock USDT) | issuer | 60,971 | [`0x271676…1d4203`](https://sepolia.basescan.org/tx/0x2716769e1910a504cac5eb6fcec0cb1cc59b4689770ac0b3418af2dd211d4203) |
+| | **Flow 3: currency, P2P deal** | | | |
+| 33 | mock USDT faucet `mint` | investor B | 34,690 | [`0xd36e9b…8ac664`](https://sepolia.basescan.org/tx/0xd36e9bab355a393f8f9a9169ba2ff132926171c3f7610240d61ee6dfd38ac664) |
+| 34 | mock USDT `approve` | investor B | 46,331 | [`0xce4075…bc6ad8`](https://sepolia.basescan.org/tx/0xce40755d4e5a4408c04b824a938fb0fe168db73e19af30d8a6c04a376cbc6ad8) |
+| 35 | **`openDeal`** (escrows 1,000 mock USDT) | investor B | 310,353 | [`0x4ac84d…6b7d37`](https://sepolia.basescan.org/tx/0x4ac84d2d6220c2fb7a632173bf571f734e339a1cd037f14a280c194b436b7d37) |
+| 36 | mock BRL faucet `mint` | investor A | 68,902 | [`0xbff517…c65266`](https://sepolia.basescan.org/tx/0xbff517683f428184e523a9babba17f6817dc56dc5f48356dcd80eb8dc2c65266) |
+| 37 | mock BRL `approve` | investor A | 46,343 | [`0x92c10c…335688`](https://sepolia.basescan.org/tx/0x92c10c5fca04ad5f2dfbc246032100f97d1ec2ae97a885f5ccb96ff1f9335688) |
+| 38 | **`acceptDeal`** (delivers 5,500 mock BRL, fee 5) | investor A | 157,320 | [`0x437b86…a8f550`](https://sepolia.basescan.org/tx/0x437b86a78062fdc979f69202041b83f6af47853a8212305184d4c168a4a8f550) |
+
+**Checked after the demo with read-only calls (2026-11-16):**
+- All 38 receipts succeeded.
+- Equity: supply 1,000; investor A holds 100 (bought), investor B 900.
+- Bond: supply 500; investor A holds 450, investor B 50 (bought through the deal); nothing
+  left in the escrow.
+- Mock USDT: investor A 5,970 (4,975 from the bond deal + 995 from the currency deal),
+  investor B 9,950 (from the equity sale), issuer 15 (cashback 10 + 5).
+- Mock BRL: investor B 5,500 (bought), investor A 0.
+- CashbackDistributor holds 2,065 mock USDT, all protocol balance: listing fees 2,000 +
+  fees 80 (50 + 25 + 5) − cashback 15. No cashback left unwithdrawn.
+- P2PEscrow `totalEscrowed` is 0 for mock USDT, mock BRL and the bond: both deals closed.
 
 ## Historical: the July 2026 Sepolia deployment (backed model)
 
