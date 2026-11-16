@@ -379,8 +379,26 @@ Measured on Tempo's node on 2026-11-16 (`eth_simulateV1`, nothing sent):
 | Ethereum Sepolia | 0.05 gwei | ~0.0006 ETH (repriced) | 0.003 ETH |
 | Base Sepolia | 0.0102 gwei | ~0.00003 ETH | 0.0002 ETH |
 | Robinhood Chain testnet | 0.02 gwei | ~0.00006 ETH | 0.0003 ETH |
-| HyperEVM testnet | 0.2 gwei | ~0.0006 HYPE | 0.003 HYPE |
+| HyperEVM testnet | 0.2 gwei | ~0.0005 HYPE | 0.000975 HYPE (see below) |
 | Tempo testnet | n/a | (pathUSD, from Tempo's faucet) | nothing is sent |
+
+**HyperEVM top-up, re-sized on 2026-11-16 from measured gas.** The testnet faucet gives
+0.0001 HYPE an hour, so the top-up is 2x the largest wallet's measured need instead of 5x a
+price estimate. Measured need = the gas each wallet used in the Robinhood demo receipts
+(plain Ethereum gas, as on HyperEVM) x HyperEVM's max fee at the time (0.1 gwei base fee +
+0.1 gwei gas price = 0.2 gwei):
+
+| Wallet | Gas in the Robinhood demo | Need at 0.2 gwei | 2x |
+|---|---|---|---|
+| issuer | 2,437,086 | 0.000487 HYPE | **0.000975 HYPE** |
+| investor A | 727,482 | 0.000145 HYPE | 0.000291 HYPE |
+| investor B | 724,701 | 0.000145 HYPE | 0.000290 HYPE |
+| listing authority | 412,398 | 0.0000825 HYPE | 0.000165 HYPE |
+| operator | 204,416 | 0.0000409 HYPE | 0.0000818 HYPE |
+
+`DEMO_GAS_FUNDING_WEI_998` is one amount for all five wallets, so it is the issuer's 2x
+(975000000000000 wei); the other four get more than 2x their need. It also covers each
+wallet's gas preflight figure (the issuer's is 0.000884 HYPE).
 
 ### Gas preflight: no broadcast starts with an underfunded wallet
 
