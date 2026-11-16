@@ -10,6 +10,9 @@ broadcast/
 
 # Foundry
 lcov.info
+
+# HyperCore big-blocks helper output (script/hyperevm): unsigned typed data and request body
+hyperevm-signing/
 *.lock.json
 
 # Node (in case helper tools are added)

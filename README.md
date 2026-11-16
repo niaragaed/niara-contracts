@@ -331,18 +331,40 @@ AssetTokenFactory, P2PEscrow is 12.2 KB). That is a design decision, not yet tak
 forge's limit for P2PEscrow is 3.64M, so the deployer must be on big blocks for phase 1. Phase
 2 and the demo fit small blocks (largest 0.66M), and the five other wallets never need them.
 The switch is the HyperCore action `{"type":"evmUserModify","usingBigBlocks":true}`, signed by
-the deployer itself. To sign it without the key leaving its keystore: build the EIP-712
-"phantom agent" payload of that action (domain `Exchange`, version `1`, chain id 1337,
-verifying contract zero; type `Agent(string source,bytes32 connectionId)` with source `b` for
-testnet and `connectionId = keccak256(msgpack(action) ‖ nonce as 8 bytes big-endian ‖ 0x00)`),
-sign it with `cast wallet sign --data --from-file agent.json --account niara-evm-deployer`, and
-POST `{"action", "nonce", "signature": {"r", "s", "v"}}` to
-`https://api.hyperliquid-testnet.xyz/exchange`. HyperCore only accepts actions from an address
-it knows, so the deployer may first need a HyperCore balance (HYPE moved from HyperEVM to
-HyperCore through the HYPE system address `0x2222222222222222222222222222222222222222`). Check
-with `cast rpc eth_usingBigBlocks <deployer> --rpc-url hyperevm_testnet`, and switch back with
-`usingBigBlocks: false` after phase 1. Not yet exercised from this repository: check the
-details against Hyperliquid's API documentation before relying on them.
+the deployer itself. `script/hyperevm/BigBlocks.s.sol` prepares it and sends nothing: it
+builds the action, hashes it the way Hyperliquid's official Python SDK does (`action_hash`:
+msgpack of the action, the nonce, no vault; then the EIP-712 "phantom agent", source `b` for
+testnet) and writes the typed data and the unsigned request body to `hyperevm-signing/`
+(git-ignored). `test/script/HyperCoreL1Action.t.sol` checks the hashing against the SDK's own
+signature vectors (`tests/signing_test.py`), on mainnet and testnet, and checks that the
+typed-data file hashes to the same digest. The SDK has no vector for `evmUserModify` itself; its
+vectors cover every piece of it (string keys and values, a boolean, the nonce, the vault flag,
+the EIP-712 digest).
+
+HyperCore only accepts actions from an address it knows, so the deployer may first need a
+HyperCore balance (HYPE moved from HyperEVM to HyperCore through the HYPE system address
+`0x2222222222222222222222222222222222222222`). In PowerShell, from the repository root:
+
+```powershell
+# 1. Prepare (no network, no key). Submit the same day: the nonce is the current time.
+forge script script/hyperevm/BigBlocks.s.sol
+
+# 2. Sign with the deployer's keystore and check who signed.
+$sig = (cast wallet sign --data --from-file hyperevm-signing/big-blocks-typed-data.json --account niara-evm-deployer | Select-Object -Last 1).Trim()
+cast wallet verify --address 0x7667C862d1586D3D15298d38a7a8FBD7afC214c3 --data --from-file hyperevm-signing/big-blocks-typed-data.json $sig
+
+# 3. Add the signature as {r, s, v} and submit.
+$body = Get-Content hyperevm-signing/big-blocks-request.json -Raw | ConvertFrom-Json
+$body | Add-Member -NotePropertyName signature -NotePropertyValue ([ordered]@{ r = '0x' + $sig.Substring(2, 64); s = '0x' + $sig.Substring(66, 64); v = [Convert]::ToInt32($sig.Substring(130, 2), 16) })
+Invoke-RestMethod -Method Post -Uri https://api.hyperliquid-testnet.xyz/exchange -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 5 -Compress)
+
+# 4. Check (true once it applies).
+cast rpc eth_usingBigBlocks 0x7667C862d1586D3D15298d38a7a8FBD7afC214c3 --rpc-url hyperevm_testnet
+```
+
+After phase 1, switch back with `forge script script/hyperevm/BigBlocks.s.sol --sig
+"runDisable()"` and the same steps 2 to 4. Not yet exercised against Hyperliquid's API from
+this repository.
 
 **Tempo fees.** No native gas token: fees are paid in pathUSD
 (`0x20c0000000000000000000000000000000000000`, 6 decimals), the default fee token
@@ -1136,6 +1158,9 @@ script/
   Deploy.s.sol           (phase 1: deploy + propose the wiring; phase 2 via --sig "executeWiring()")
   Demo.s.sol             (three flows as real transactions, six distinct role wallets)
   LocalSimulation.s.sol  (both deploy phases + the demo in one dry run, local Anvil only)
+  hyperevm/
+    HyperCoreL1Action.sol (HyperCore L1-action hashing: msgpack, connectionId, EIP-712 digest)
+    BigBlocks.s.sol      (prepares the big-blocks switch for signing; sends nothing)
 test/
   mocks/
     MockUSDT.sol                 (6 decimals)
@@ -1154,6 +1179,8 @@ test/
   script/DeployScript.t.sol      (both deployment phases run in-process, on each chain id)
   script/DemoScript.t.sol        (the three demo flows run in-process on a scripted deployment)
   script/LocalSimulation.t.sol   (the rehearsal's Anvil-only guard; the scripts' environment readers)
+  script/GasPreflight.t.sol      (the gas preflight and the deploy phases' gas needs)
+  script/HyperCoreL1Action.t.sol (HyperCore hashing against the official SDK's signature vectors)
   P2PEscrow.t.sol                (every path of the escrow, hostile tokens, log order)
   P2PEscrowInvariant.t.sol + invariant/EscrowHandler.sol
                                  (stateful fuzzing of the escrow: Solana invariants 6 and 7)
