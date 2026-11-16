@@ -560,6 +560,68 @@ the scripts' logic, order and figures on each chain id; it does not exercise key
 signing, the real one-hour wait, or a chain's own gas rules (Anvil charges Ethereum gas
 everywhere: see "Network quirks").
 
+## v1 deployments
+
+Record of the real v1 deployments, one chain at a time, in the order Base Sepolia,
+Sepolia, Robinhood Chain testnet, HyperEVM testnet, Tempo testnet. Each chain starts
+only after the previous one's phase 1, phase 2 and demo are verified. None of this code
+has been audited, and the two mock tokens have no value.
+
+### Base Sepolia (84532)
+
+**Status:** phase 1 done (2026-11-16 00:51:59 to 00:52:07 UTC, blocks 59342255 to
+59342292). Phase 2 and the demo are not done yet.
+
+Signed by the deployer `0x7667C862d1586D3D15298d38a7a8FBD7afC214c3`, which is the admin
+of every contract. Phase 1 made 11 transactions and used 12,057,706 gas, for
+0.0000604 ETH at about 0.005 gwei.
+
+| Contract | Address |
+|---|---|
+| ListingRegistry | [`0x883081A2f4D1860aa92f03Cb3FE0f0aDcEc0C58f`](https://sepolia.basescan.org/address/0x883081A2f4D1860aa92f03Cb3FE0f0aDcEc0C58f) |
+| AssetTokenFactory (created by the registry) | [`0x826CAb7424a6D81184BfD83e2Be828cC8834E5d4`](https://sepolia.basescan.org/address/0x826CAb7424a6D81184BfD83e2Be828cC8834E5d4) |
+| CashbackDistributor | [`0x4b10fF1a44Aca4118F75b1f326cC2EE46b73ADD4`](https://sepolia.basescan.org/address/0x4b10fF1a44Aca4118F75b1f326cC2EE46b73ADD4) |
+| NiaraSettlement | [`0x14C6F9DeD6C97F67149B4305c57331F9d3820B6F`](https://sepolia.basescan.org/address/0x14C6F9DeD6C97F67149B4305c57331F9d3820B6F) |
+| P2PEscrow | [`0xd4b7c1b5DE8AccAf78efFF467e5a33e82B6cE361`](https://sepolia.basescan.org/address/0xd4b7c1b5DE8AccAf78efFF467e5a33e82B6cE361) |
+| Mock USDT (test token, no value; fee token) | [`0x4ED579b02B53d050624c0F04Fb1F4D9b1d347457`](https://sepolia.basescan.org/address/0x4ED579b02B53d050624c0F04Fb1F4D9b1d347457) |
+| Mock BRL (test token, no value) | [`0x262422490d3829556aFFAC970B9B2B7D093d500B`](https://sepolia.basescan.org/address/0x262422490d3829556aFFAC970B9B2B7D093d500B) |
+
+Phase 1 transactions:
+
+| # | Action | Gas | Transaction |
+|---|---|---|---|
+| 1 | Create mock USDT | 662,844 | [`0x9e8019…6db85c`](https://sepolia.basescan.org/tx/0x9e801919c9e9b81df4d48fac8adcd3c8226a35fabf968ee15e43c8d5256db85c) |
+| 2 | Create mock BRL | 662,820 | [`0xa53a1c…f53770`](https://sepolia.basescan.org/tx/0xa53a1ce77220afab63d0e70080b4e61fb83379c658349c21cd9af3f65df53770) |
+| 3 | Create ListingRegistry (and its AssetTokenFactory) | 4,051,011 | [`0xa6d74a…6d2a6`](https://sepolia.basescan.org/tx/0xa6d74a9553aeb56962cfbae53b900992c866653f88d8d29a992333bcb5e6d2a6) |
+| 4 | Create CashbackDistributor | 1,805,264 | [`0xdf0b5c…d66e0`](https://sepolia.basescan.org/tx/0xdf0b5c0f829b6697cf200cd349c27c9f9c27bfcb1b0c7f3a14c0f8e0e16d66e0) |
+| 5 | Create NiaraSettlement | 1,805,066 | [`0x382175…e1c`](https://sepolia.basescan.org/tx/0x382175c214bc6aeeef0f371e630e7587140ccf962a4762818cef3b8025aeff1c) |
+| 6 | Create P2PEscrow | 2,802,608 | [`0x4334ae…fdf07`](https://sepolia.basescan.org/tx/0x4334ae43cb25b619c8af3e217d4823001eab49138c374cde487bee43607fdf07) |
+| 7 | Propose `SETTLEMENT_ROLE` → NiaraSettlement (distributor) | 53,210 | [`0xf492cf…c497`](https://sepolia.basescan.org/tx/0xf492cfd874fa690794f8a866b272369260a15a657b3104533842c7e3c927c497) |
+| 8 | Propose `ESCROW_ROLE` → P2PEscrow (distributor) | 53,210 | [`0x5f22ec…2949`](https://sepolia.basescan.org/tx/0x5f22ec02d7b0979c2f9de7ed8ec7ab3cfb95f835c0e33bf33d49ca3940012949) |
+| 9 | Propose `LISTING_REGISTRY_ROLE` → ListingRegistry (distributor) | 53,198 | [`0xbe9835…5da4`](https://sepolia.basescan.org/tx/0xbe98353b6afdcadcdc8327b9d7f7ba41de273f07f0e5198acfb21432ee1a5da4) |
+| 10 | Propose `SETTLEMENT_OPERATOR_ROLE` → operator (settlement) | 53,254 | [`0x830474…ecca`](https://sepolia.basescan.org/tx/0x8304748f15c61732656f08f19f2f941bc95097d09e46f953a25bfbc1f837ecca) |
+| 11 | Propose `setSettlement` → NiaraSettlement (registry) | 55,221 | [`0x740054…e9ab`](https://sepolia.basescan.org/tx/0x74005480d672c3d1fa3cc7cb6d26d5a7ea6178ff500b0c1c85bfb8f61c49e9ab) |
+
+**Checked after phase 1 with read-only calls (2026-11-16):**
+- All 11 receipts succeeded and were sent from the deployer, whose nonce is now 11.
+- All seven addresses hold code.
+- The contracts point to each other as expected: the registry's factory; the registry in
+  the distributor, settlement and escrow; the distributor and fee token (mock USDT) in the
+  settlement; the settlement in the escrow.
+- Parameters: fee 50 bps (cap 50), cashback 2000 bps, timelock 3600 s on all four
+  contracts, protocol not paused. Both mocks use 6 decimals and have zero supply.
+- Roles:
+  - The deployer holds `DEFAULT_ADMIN_ROLE` on all four contracts, `PAUSER_ROLE` on the
+    registry, and `TREASURY_ROLE` on the distributor and the escrow.
+  - The listing authority `0x488dA5CDD3cB6A32C37c3d310a252520da493FAa` holds
+    `LISTING_AUTHORITY_ROLE`; the deployer does not.
+  - Neither the listing authority nor the operator holds admin anywhere.
+- The four role grants and `ListingRegistry.settlement` are still unset, as expected
+  before phase 2.
+- All five proposals are pending. The latest one becomes executable at
+  **1794793927 (2026-11-16 01:52:07 UTC)**. The script's log printed 1794793911; that was
+  the timestamp of its local simulation, so the on-chain value is the one that counts.
+
 ## Historical: the July 2026 Sepolia deployment (backed model)
 
 The transactions below are the record of the first Sepolia deployment (2026-07-22),

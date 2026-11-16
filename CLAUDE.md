@@ -265,13 +265,14 @@ no overriding).
 
 ## Known open items
 
-- **The v1 exchange has NOT been deployed anywhere.** `script/Deploy.s.sol` and
-  `script/Demo.s.sol` (v1: registry, factory, settlement, escrow, mock test tokens) were
-  only rehearsed as dry runs against local Anvil nodes started with the Sepolia and Base
-  Sepolia chain ids (2026-11-12), without `--broadcast`. Deploying to Sepolia or Base
-  Sepolia requires an explicit request, and the user's confirmation at each step (phase
-  1, phase 2, demo): never trigger `--broadcast` on your own, not even against a local
-  node unless asked.
+- **v1 exchange deployment status:** only Base Sepolia phase 1 is deployed (the user
+  broadcast it on 2026-11-16). Phase 2 and the demo there are still pending, and no other
+  chain has a v1 deployment. Addresses, transactions and checks are in the README, "v1
+  deployments". Chains go one at a time (Base Sepolia, Sepolia, Robinhood, HyperEVM,
+  Tempo), each only after the previous one's phase 1, phase 2 and demo are verified.
+  Every step on every chain needs an explicit request and the user's confirmation: the
+  user runs `--broadcast` themselves; never trigger it on your own, not even against a
+  local node unless asked.
 - The July 2026 Sepolia deployment (2026-07-22) documented in the README ("Historical")
   is the earlier backed model (`AssetToken` + `BackingGateway`), made with the previous
   versions of the scripts. It is not the v1 exchange and predates the `ListingRegistry`.
