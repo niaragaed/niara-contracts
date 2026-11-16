@@ -570,7 +570,7 @@ has been audited, and the two mock tokens have no value.
 ### Base Sepolia (84532)
 
 **Status:** phase 1 done (2026-11-16 00:51:59 to 00:52:07 UTC, blocks 59342255 to
-59342292). Phase 2 and the demo are not done yet.
+59342292) and phase 2 done (blocks 59360951 to 59362038). The demo is not done yet.
 
 Signed by the deployer `0x7667C862d1586D3D15298d38a7a8FBD7afC214c3`, which is the admin
 of every contract. Phase 1 made 11 transactions and used 12,057,706 gas, for
@@ -621,6 +621,38 @@ Phase 1 transactions:
 - All five proposals are pending. The latest one becomes executable at
   **1794793927 (2026-11-16 01:52:07 UTC)**. The script's log printed 1794793911; that was
   the timestamp of its local simulation, so the on-chain value is the one that counts.
+
+#### Phase 2 (2026-11-16)
+
+Run in two attempts. The first executed the five proposals (signed by the deployer) and
+then failed on the currency listings with `insufficient funds ... have 0`: the listing
+authority wallet had no ETH, and the dry-run estimate does not flag that. The deployer then
+sent it 0.0002 ETH by hand and the script was run again. It skips what is already done, so it
+only sent the two listings. Nothing was left half-applied.
+
+| # | Action | Gas | Transaction |
+|---|---|---|---|
+| 1 | Execute `SETTLEMENT_ROLE` → NiaraSettlement (distributor) | 53397 | [`0x54f206…c7a9d7`](https://sepolia.basescan.org/tx/0x54f206dd66560c12c2583b540b9d78c548e9307872767173f6ef238356c7a9d7) |
+| 2 | Execute `ESCROW_ROLE` → P2PEscrow (distributor) | 53397 | [`0x7208c7…1ce107`](https://sepolia.basescan.org/tx/0x7208c72c12eb9e4b4506b78811b15a32355d06bb73ddd94a9a109abccc1ce107) |
+| 3 | Execute `LISTING_REGISTRY_ROLE` → ListingRegistry (distributor) | 53385 | [`0x78e704…c8ad37`](https://sepolia.basescan.org/tx/0x78e704b4428145193e646cdfc682591853f1ad0f103341d16e3318e96ec8ad37) |
+| 4 | Execute `SETTLEMENT_OPERATOR_ROLE` → operator (settlement) | 53419 | [`0xddbf77…d044b0`](https://sepolia.basescan.org/tx/0xddbf77cc9ba97e191f69bef2cf04e22052d294a462c35105ef18f47ee1d044b0) |
+| 5 | Execute `setSettlement` → NiaraSettlement (registry) | 52986 | [`0xdcceb6…fb55c6`](https://sepolia.basescan.org/tx/0xdcceb6497b4f4c9daee1c8710669eeaae3af799358e50549e16c6567edfb55c6) |
+| 6 | Deployer sends 0.0002 ETH to the listing authority (manual `cast send`, see below) | 21000 | [`0xf7ba23…ca5143`](https://sepolia.basescan.org/tx/0xf7ba23e20c5476a968e3571e99d62906fe576496133751c45799ae9e5bca5143) |
+| 7 | List mock USDT as an Approved Currency (listing authority) | 80464 | [`0x21b0cf…b9a2ce`](https://sepolia.basescan.org/tx/0x21b0cf69b3b8eef6f7ac089d5ac2c57c9376b0ae8a9d06de87abc24a69b9a2ce) |
+| 8 | List mock BRL as an Approved Currency (listing authority) | 80464 | [`0x47f400…01ee88`](https://sepolia.basescan.org/tx/0x47f400928b97abbb343dd337bc5bd21995926d3a4a42fa87f305ff9b0d01ee88) |
+
+**Checked after phase 2 with read-only calls (2026-11-16):**
+- All 8 receipts succeeded. Nonces: deployer 17 (11 + 5 + 1), listing authority 2.
+- `SETTLEMENT_ROLE`, `ESCROW_ROLE` and `LISTING_REGISTRY_ROLE` on the distributor and
+  `SETTLEMENT_OPERATOR_ROLE` on the settlement are held by NiaraSettlement, P2PEscrow,
+  ListingRegistry and the operator respectively. `ListingRegistry.settlement` is
+  NiaraSettlement.
+- Mock USDT and mock BRL are Approved Currencies (the script's own `verify()` check below confirms it).
+- Admin is still only the deployer on all four contracts (neither the listing authority nor
+  the operator holds it).
+- `forge script script/Deploy.s.sol --sig "verify()"` (read-only) passes: "Deployment
+  verified on Base Sepolia".
+- Balances afterwards: deployer 0.00374 ETH, listing authority 0.000199 ETH, operator 0.
 
 ## Historical: the July 2026 Sepolia deployment (backed model)
 
