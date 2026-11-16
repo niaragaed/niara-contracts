@@ -764,7 +764,7 @@ tokens, no value):
 ### Robinhood Chain testnet (46630)
 
 **Status:** phase 1 done (2026-11-16 02:31:28 to 02:31:53 UTC, blocks 153889845 to
-153890014). Phase 2 and the demo are not done yet.
+153890014) and phase 2 done (blocks 154000423 to 154000482). The demo is not done yet.
 
 Signed by the deployer `0x7667C862d1586D3D15298d38a7a8FBD7afC214c3` with
 `--gas-estimate-multiplier 200`; the gas preflight passed (needs 0.00052 ETH, had 0.007). 11
@@ -817,6 +817,31 @@ Sepolia, with the same results.
   (2026-11-16 03:31:53 UTC)**. The script printed 1794799880, its simulation's timestamp.
 - The listing authority holds 0.0002 ETH, and a dry run of phase 2 passes the gas
   preflight for both wallets (deployer needs 0.000015 ETH, listing authority 0.0000088 ETH).
+
+#### Phase 2 (2026-11-16 08:21:29 to 08:21:41 UTC)
+
+One run, `--gas-estimate-multiplier 200`. The gas preflight passed for both wallets
+(the listing authority had been funded with 0.0002 ETH beforehand, transaction 12 above).
+
+| # | Action | Gas | Transaction |
+|---|---|---|---|
+| 1 | Execute `SETTLEMENT_ROLE` → NiaraSettlement (distributor) | 53,397 | [`0x34e529…b95915`](https://explorer.testnet.chain.robinhood.com/tx/0x34e529b4bdc5b54dbf503b5555009d20675ccbf39d2892b3221242b94cb95915) |
+| 2 | Execute `ESCROW_ROLE` → P2PEscrow (distributor) | 53,397 | [`0x577d8f…2d22c6`](https://explorer.testnet.chain.robinhood.com/tx/0x577d8f3e759a0fe9951aee1b9ef2f00637364dc415d63007ed924b3ab72d22c6) |
+| 3 | Execute `LISTING_REGISTRY_ROLE` → ListingRegistry (distributor) | 53,385 | [`0xb3e90f…22d5d9`](https://explorer.testnet.chain.robinhood.com/tx/0xb3e90f133ea3aebc8db8db911e35219c650d0ecd926d08a1ae3ce9f57322d5d9) |
+| 4 | Execute `SETTLEMENT_OPERATOR_ROLE` → operator (settlement) | 53,419 | [`0x272f26…5d69e1`](https://explorer.testnet.chain.robinhood.com/tx/0x272f26931b7ace96eb8ceef8ab14a2162438fdfe56643ec9dc464f09fd5d69e1) |
+| 5 | Execute `setSettlement` → NiaraSettlement (registry) | 52,986 | [`0x781eba…dc8a6e`](https://explorer.testnet.chain.robinhood.com/tx/0x781eba79af6558ee227361919b576be67cbd51c63585b76a882e472438dc8a6e) |
+| 6 | List mock USDT as an Approved Currency (listing authority) | 80,464 | [`0xd6a5ef…41c906`](https://explorer.testnet.chain.robinhood.com/tx/0xd6a5ef753c0543d99c8cebe8deee17efc0a9e0a07c55d42fd842147eca41c906) |
+| 7 | List mock BRL as an Approved Currency (listing authority) | 80,464 | [`0xae5b71…9bd7a8`](https://explorer.testnet.chain.robinhood.com/tx/0xae5b71203ec92f988e9570a4781596e6977a4695bba01717c558d24dde9bd7a8) |
+
+**Checked after phase 2 with read-only calls (2026-11-16):**
+- All 7 receipts succeeded: the five executes from the deployer, the two listings from the
+  listing authority. Nonces: deployer 17, listing authority 2.
+- `forge script script/Deploy.s.sol --sig "verify()"` (read-only) passes: "Deployment
+  verified on Robinhood Chain testnet" (roles, settlement link, both mock currencies
+  Approved, fee, cashback, not paused).
+- Admin is still only the deployer on all four contracts.
+- A dry run of the demo completes all three flows and passes the gas preflight for all six
+  wallets.
 
 ## Historical: the July 2026 Sepolia deployment (backed model)
 
