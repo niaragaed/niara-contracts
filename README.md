@@ -370,11 +370,10 @@ this repository.
 (`0x20c0000000000000000000000000000000000000`, 6 decimals), the default fee token
 (`--tempo.fee-token` pins it). `eth_getBalance` returns a fixed `0x4242…` placeholder, which
 is not a balance; read `balanceOf` on pathUSD instead. Gas prices are in attodollars (forge
-prints the estimate in USD): phase 1 costs about 0.04 to 0.08 pathUSD. On Tempo every new
-storage slot costs ~230k gas more than on Ethereum, so small transactions that create state
-(a first mint, an approval, `listCurrency`) are repriced far more than 7x; measure phase 2 and
-the demo with `eth_estimateGas` on the deployed contracts before broadcasting them, and expect
-a larger multiplier there.
+prints the estimate in USD): phase 1 cost 0.0376 pathUSD. On Tempo every new storage slot
+costs ~230k gas more than on Ethereum, so small transactions that create state (a first mint,
+an approval, `submitListing`) are repriced far more than 7x. Phase 2 and the demo were measured
+on the deployed contracts (below): phase 2 needs 200, the demo does not fit one multiplier.
 
 Measured on Tempo's node on 2026-11-16 (`eth_simulateV1`, nothing sent):
 - **Phase 1 at 700:** mock tokens 4.18M and 3.93M gas (6.3x and 5.9x forge's estimate),
@@ -388,9 +387,35 @@ Measured on Tempo's node on 2026-11-16 (`eth_simulateV1`, nothing sent):
   Every demo wallet pays this once on Tempo.
 - **The public RPC caps one simulation at 50M gas in total**, across all its blocks (the sixth
   phase 1 creation ran out of gas at exactly 50.0M cumulative). Phase 1 alone uses ~63M on
-  Tempo, so phase 2 and the demo cannot be replayed on top of a simulated phase 1: they are
-  measured after phase 1 is deployed, against the real contracts, and
-  `GAS_ESTIMATE_MULTIPLIER_42431` is set from that measurement.
+  Tempo, so phase 2 and the demo cannot be replayed on top of a simulated phase 1: they were
+  measured after phase 1 was deployed, against the real contracts (next).
+
+**Phase 2 and the demo, measured against the deployed contracts (2026-11-16).** Method: one
+forge dry run of phase 2 followed by the three demo flows against the real chain state, at
+`--gas-estimate-multiplier 100` so each transaction carries forge's own gas figure; then those 40
+transactions replayed in order on Tempo's node with `eth_simulateV1` (nothing sent), each with
+the limit forge would set (its figure x the multiplier), bisecting the multiplier. Gas used by
+the node, phase 2 plus the demo: 27.5M (phase 2 1.6M, the 33 demo transactions 25.9M).
+
+- **Where forge's figure comes from.** For a call the node can estimate against the chain as it
+  is (all seven phase 2 transactions; in the demo `createAssetToken`, the faucet mints and the
+  first approvals), forge uses the node's own `eth_estimateGas`, already priced the Tempo way.
+  For a call that depends on an earlier transaction of the same run (`submitListing`,
+  `quoteListing`, `payListingFee`, `requestIssuance`, `approveIssuance`, `settle`, `openDeal`,
+  `acceptDeal`), it falls back to its local Ethereum gas, which Tempo reprices.
+- **Phase 2 needs 1.0x.** Every transaction succeeds at exactly forge's figure and the first
+  fails at 95%. The listing authority's first `listCurrency` (800,324) includes the ~250k first
+  transaction surcharge. **200** is set (a 2x margin, largest limit 1.6M).
+- **The demo's dependent transactions need up to 8.03x:** `requestIssuance` 130,160 -> 1,045,304
+  gas (8.03x), `submitListing` 7.20x, `openDeal` 7.21x and 6.11x, `quoteListing` 6.81x,
+  `payListingFee` 5.66x, `approveIssuance` 5.52x, `settle` 4.21x. The whole sequence passes from
+  about **804** and fails at 797, so 804 has no margin.
+- **The demo cannot be run at one multiplier if 30M is a hard cap on a transaction's gas limit.**
+  `createAssetToken` (4,238,004, already the node's figure, 3.95M to 4.20M used) is multiplied
+  too: at 804 its limit is 34.1M, over the 30M `mainBlockGeneralGasLimit`, and at the 700 that
+  just fits (29.7M) the dependent transactions run out of gas (`submitListing` first, 774,851
+  against 796,782 needed). `eth_call` and `eth_estimateGas` accept a gas value above 30M, so the
+  cap on a real transaction could not be tested without sending one.
 
 **Demo gas top-up per chain** (`DEMO_GAS_FUNDING_WEI_<chainid>`), sized from the measured gas
 (the issuer, the largest spender, uses 2.25M gas in the demo; the other wallets 0.15M to
@@ -442,8 +467,9 @@ in that phase and checks it can pay for its transactions:
 - **Multiplier**: `GAS_ESTIMATE_MULTIPLIER_<chainid>` if set, else the per-chain default: 200
   on Robinhood, 700 on Tempo, 800 on Sepolia, 130 (forge's default) elsewhere. **It must
   match the `--gas-estimate-multiplier` on the command line**; the script cannot read the
-  flag. Tempo's phase 2 and demo need a larger multiplier than phase 1 (see "Tempo fees"):
-  set `GAS_ESTIMATE_MULTIPLIER_42431` and pass the same value.
+  flag. On Tempo phase 2 needs only 200 and the demo needs more than any single value that
+  keeps `createAssetToken` under 30M (see "Tempo fees"): set `GAS_ESTIMATE_MULTIPLIER_42431`
+  and pass the same value.
 - **The demo's top-up counts**: before the flows, `run()` has the deployer top up each wallet
   below `DEMO_GAS_FUNDING_WEI_<chainid>`, so the deployer must also hold that value, and each
   topped-up wallet counts it as received. Single flows send no top-up.
@@ -972,6 +998,73 @@ Sepolia.
 - CashbackDistributor holds 2,065 mock USDT, all protocol balance (listing fees 2,000 + fees
   80 − cashback 15); no cashback left unwithdrawn.
 - P2PEscrow `totalEscrowed` is 0 for mock USDT, mock BRL and the bond.
+
+### Tempo testnet, Moderato (42431)
+
+**Status:** phase 1 done (2026-11-16 11:43:31 to 11:43:52 UTC, blocks 44456008 to 44456049).
+Phase 2 and the demo have not run. Phase 1 was broadcast from a PowerShell session whose output
+was lost, so this record was rebuilt afterwards from the chain itself (receipts, blocks and
+read-only calls) and from `broadcast/Deploy.s.sol/42431/run-latest.json`: the 11 hashes in that
+file are the 11 transactions on chain, and every receipt matches its gas.
+
+Signed by the deployer `0x7667C862d1586D3D15298d38a7a8FBD7afC214c3`, the admin of every
+contract. The gas limits in the broadcast file are 7x forge's figures, i.e.
+`--gas-estimate-multiplier 700`; the smallest margin over gas used is 11% (the mock tokens).
+11 transactions, 62,728,106 gas, about 0.0376 pathUSD (effective gas price 600,000,001
+attodollars per gas, fee token pathUSD paid by the deployer). That is 0.8% under the 63.2M
+simulated on 2026-11-16 (see "Tempo fees"). The addresses are the same as on Base Sepolia and
+Robinhood Chain: the deployer's nonces were 0 to 10 on all three.
+
+| Contract | Address |
+|---|---|
+| ListingRegistry | [`0x883081A2f4D1860aa92f03Cb3FE0f0aDcEc0C58f`](https://explore.testnet.tempo.xyz/address/0x883081A2f4D1860aa92f03Cb3FE0f0aDcEc0C58f) |
+| AssetTokenFactory (created by the registry) | [`0x826CAb7424a6D81184BfD83e2Be828cC8834E5d4`](https://explore.testnet.tempo.xyz/address/0x826CAb7424a6D81184BfD83e2Be828cC8834E5d4) |
+| CashbackDistributor | [`0x4b10fF1a44Aca4118F75b1f326cC2EE46b73ADD4`](https://explore.testnet.tempo.xyz/address/0x4b10fF1a44Aca4118F75b1f326cC2EE46b73ADD4) |
+| NiaraSettlement | [`0x14C6F9DeD6C97F67149B4305c57331F9d3820B6F`](https://explore.testnet.tempo.xyz/address/0x14C6F9DeD6C97F67149B4305c57331F9d3820B6F) |
+| P2PEscrow | [`0xd4b7c1b5DE8AccAf78efFF467e5a33e82B6cE361`](https://explore.testnet.tempo.xyz/address/0xd4b7c1b5DE8AccAf78efFF467e5a33e82B6cE361) |
+| Mock USDT (test token, no value; fee token) | [`0x4ED579b02B53d050624c0F04Fb1F4D9b1d347457`](https://explore.testnet.tempo.xyz/address/0x4ED579b02B53d050624c0F04Fb1F4D9b1d347457) |
+| Mock BRL (test token, no value) | [`0x262422490d3829556aFFAC970B9B2B7D093d500B`](https://explore.testnet.tempo.xyz/address/0x262422490d3829556aFFAC970B9B2B7D093d500B) |
+
+Phase 1 transactions (Tempo type `0x76`, all from the deployer):
+
+| # | Action | Gas | Transaction |
+|---|---|---|---|
+| 1 | Create mock USDT | 4,177,244 | [`0xa9c0c2…602f65`](https://explore.testnet.tempo.xyz/tx/0xa9c0c27f4d9605f06fab7f0cc2e65dfebc65e94593d2f8f29a9c182cee602f65) |
+| 2 | Create mock BRL | 3,927,220 | [`0x9ae649…0b4cf1`](https://explore.testnet.tempo.xyz/tx/0x9ae6491dd7a36025d4d721755a491ea766eacf7dde8e028fc47c8a4f500b4cf1) |
+| 3 | Create ListingRegistry (and its AssetTokenFactory) | 20,329,611 | [`0xdb825a…e57be6`](https://explore.testnet.tempo.xyz/tx/0xdb825a8a0fa7107a658a098f1674acdbc2ffdcd94d4cd989670d6e8577e57be6) |
+| 4 | Create CashbackDistributor | 9,445,464 | [`0x4b23da…56ab3e`](https://explore.testnet.tempo.xyz/tx/0x4b23da852b0dd05681b5d913cca4bb7003e175cebd37e55620eed6acaa56ab3e) |
+| 5 | Create NiaraSettlement | 9,448,466 | [`0x9f8ebc…ad953e`](https://explore.testnet.tempo.xyz/tx/0x9f8ebcea75cb8cf4627736b6ab4f937b6d97651e6d674074233026e7cfad953e) |
+| 6 | Create P2PEscrow | 13,971,008 | [`0x5cde77…5f9d80`](https://explore.testnet.tempo.xyz/tx/0x5cde77db991838fb2e1f4cd6450eac3cb7dfbc35ea2c9cb270a97539b85f9d80) |
+| 7 | Propose `SETTLEMENT_ROLE` → NiaraSettlement (distributor) | 285,410 | [`0xd27230…cdc521`](https://explore.testnet.tempo.xyz/tx/0xd27230d2bb8ae39d005ba36ae11762351dbddce53bb9ca24781e4b32d7cdc521) |
+| 8 | Propose `ESCROW_ROLE` → P2PEscrow (distributor) | 285,410 | [`0x0b4c85…d0bf8e`](https://explore.testnet.tempo.xyz/tx/0x0b4c8547e1c0f2d853a1e142d3894c8dfd749533229a47cbd96d8e0855d0bf8e) |
+| 9 | Propose `LISTING_REGISTRY_ROLE` → ListingRegistry (distributor) | 285,398 | [`0x52a00c…916014`](https://explore.testnet.tempo.xyz/tx/0x52a00cad39e73ac89c6daadb4e8b671ef4730de58f234b313b96c8813e916014) |
+| 10 | Propose `SETTLEMENT_OPERATOR_ROLE` → operator (settlement) | 285,454 | [`0x312b27…6d6d0e`](https://explore.testnet.tempo.xyz/tx/0x312b278295c8465c67aab02cf920642f7ed214363c96e0f0d8334e3ddc6d6d0e) |
+| 11 | Propose `setSettlement` → NiaraSettlement (registry) | 287,421 | [`0xfb7b07…3b924f`](https://explore.testnet.tempo.xyz/tx/0xfb7b071381d9fb450cc542cae457f1e3c997da437fa9caa777629dfa0b3b924f) |
+
+**Checked after phase 1 with read-only calls (2026-11-16):** the same checks as on Base
+Sepolia and Robinhood Chain, with the same results.
+- All 11 receipts succeeded and were sent from the deployer, whose nonce is now 11. The
+  listing authority and the operator are still at nonce 0 (each holds 1,000,000 pathUSD from
+  the faucet).
+- All seven addresses hold code (the registry 12,985 bytes, P2PEscrow 12,222, the distributor
+  and the settlement about 7.5 KB each, the factory 4,752, each mock 2,342).
+- The contracts point to each other as expected: the registry's factory; the registry in the
+  distributor, settlement and escrow; the distributor and fee token (mock USDT) in the
+  settlement; the settlement in the escrow.
+- Parameters: fee 50 bps (cap 50), cashback 2000 bps (cap 10000), timelock 3600 s on all four
+  contracts, protocol not paused. Both mocks use 6 decimals and have zero supply.
+- Roles:
+  - The deployer holds `DEFAULT_ADMIN_ROLE` on all four contracts, `PAUSER_ROLE` on the
+    registry, and `TREASURY_ROLE` on the distributor and the escrow.
+  - The listing authority `0x488dA5CDD3cB6A32C37c3d310a252520da493FAa` holds
+    `LISTING_AUTHORITY_ROLE`; the deployer does not.
+  - Neither the listing authority nor the operator holds admin anywhere.
+- The four role grants and `ListingRegistry.settlement` are still unset, as expected before
+  phase 2 (`verify()` reverts `WiringIncomplete("SETTLEMENT_ROLE -> NiaraSettlement")`).
+- All five proposals are pending, and the latest became executable at **1794833032
+  (2026-11-16 12:43:52 UTC)**. Chain time was already past it when checked (latest block
+  1794873165, 23:52 UTC), so phase 2 can run now.
+- A dry run of phase 2 passes the gas preflight for both wallets.
 
 ## Historical: the July 2026 Sepolia deployment (backed model)
 
