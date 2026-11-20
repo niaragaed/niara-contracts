@@ -272,8 +272,8 @@ no overriding).
 
 - **v1 exchange deployment status:** Base Sepolia is complete (phase 1, phase 2 and the
   demo, broadcast by the user on 2026-11-16 and verified). Robinhood Chain testnet is
-  complete too (2026-11-16). Tempo testnet has phase 1 and phase 2 done (2026-11-16 and
-  2026-11-20, verified); its demo is ready but not run: on Tempo every demo call carries an
+  complete too (2026-11-16). Tempo testnet is complete too (phase 1
+  2026-11-16, phase 2 and the demo 2026-11-20, all verified); on Tempo every demo call carries an
   explicit gas limit (`TEMPO_GAS_*` in `Demo.s.sol`, 1.5x the node's measured minimum) and the
   demo runs with `--skip-simulation` so forge keeps them (README, "Tempo fees"). HyperEVM has no
   v1 deployment. Addresses, transactions and checks are in the README, "v1 deployments".

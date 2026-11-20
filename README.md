@@ -436,9 +436,9 @@ no gas option.
   survives only when that estimate fails. A dry run without the flag showed exactly that: 16 of the
   33 limits were replaced (`createAssetToken`, the mints and approvals). That step does not run
   when simulation is skipped, and at send time a transaction with an explicit limit is not
-  re-estimated. With `--skip-simulation` the dry run carries all 33 constants unchanged. Phase 2
-  showed that what forge sends is what its dry run recorded (its broadcast file has the same 7
-  gas limits as its dry run).
+  re-estimated. With `--skip-simulation` the dry run carries all 33 constants unchanged, and so
+  did the real demo broadcast on 2026-11-20 (its 33 gas limits are the constants; see the Tempo
+  demo record under "v1 deployments").
 - **Checked on the node.** `run()` and each flow alone, replayed with exactly these limits: every
   transaction succeeds (`run()` 33 transactions, 25.9M gas used under 50.3M of limits).
 - **Other chains unchanged.** A Base Sepolia dry run of flow 3 gives forge's usual estimates. The
@@ -1034,8 +1034,9 @@ Sepolia.
 
 ### Tempo testnet, Moderato (42431)
 
-**Status:** phase 1 done (2026-11-16 11:43:31 to 11:43:52 UTC, blocks 44456008 to 44456049)
-and phase 2 done (2026-11-20, blocks 45139702 to 45139717), both verified. The demo has not run.
+**Status:** phase 1 done (2026-11-16 11:43:31 to 11:43:52 UTC, blocks 44456008 to 44456049),
+phase 2 done (2026-11-20, blocks 45139702 to 45139717) and the demo done (blocks 45155885 to
+45155990). All three verified; Tempo testnet is complete.
 Phase 1 was broadcast from a PowerShell session whose output
 was lost, so this record was rebuilt afterwards from the chain itself (receipts, blocks and
 read-only calls) and from `broadcast/Deploy.s.sol/42431/run-latest.json`: the 11 hashes in that
@@ -1128,6 +1129,75 @@ passed for both wallets (needs 901 and 529 pathUSD base units). 7 transactions, 
 - Admin is still only the deployer on all four contracts.
 - Dry runs of the demo (`run()` and each flow alone) complete all three flows and pass the gas
   preflight for all six wallets.
+
+#### Demo (2026-11-20 21:38:50 to 21:39:48 UTC)
+
+`script/Demo.s.sol` with `--skip-simulation --gas-estimate-multiplier 200` and six `--account`
+flags (the PowerShell array, as on Robinhood), all three flows. 33 transactions in blocks 45155885
+to 45155990, 25,913,383 gas, 0.01555 pathUSD at 600,000,001 attodollars per gas. Nothing was sent
+by the deployer: Tempo has no gas top-up. The gas preflight passed for all six wallets.
+
+**Every transaction carried its explicit Tempo gas limit** (`TEMPO_GAS_*`, column "Limit"): the
+gas limits in `broadcast/Demo.s.sol/42431/run-latest.json` equal the 33 constants. So forge
+re-estimated none of them at send time, and the multiplier did not apply. The gas used equals
+the `eth_simulateV1` replay of 2026-11-20 transaction by transaction. The instruments have the
+same addresses as on Base Sepolia and Robinhood Chain:
+
+| Instrument | Address |
+|---|---|
+| Niara Demo Equity (TEST) | [`0x0f1c771c8943cD7EC2b4c654CEea49B41336bDD7`](https://explore.testnet.tempo.xyz/address/0x0f1c771c8943cD7EC2b4c654CEea49B41336bDD7) |
+| Niara Demo Bond 2030 (TEST) | [`0x4b6999CF049b05e23202e85bdF936edeBe77B5b2`](https://explore.testnet.tempo.xyz/address/0x4b6999CF049b05e23202e85bdF936edeBe77B5b2) |
+
+| # | Step | Signed by | Gas | Limit | Transaction |
+|---|---|---|---|---|---|
+| | **Flow 1: equity, order book** | | | | |
+| 1 | `createAssetToken` (equity) | issuer | 4,203,476 | 6,310,000 | [`0xb2bdd0…3e9d9c`](https://explore.testnet.tempo.xyz/tx/0xb2bdd0b70c110ae0eea594a8aa84fe43150b9c9f560fee35c8cf41ce423e9d9c) |
+| 2 | `submitListing` | issuer | 796,782 | 1,200,000 | [`0x41879c…bcf541`](https://explore.testnet.tempo.xyz/tx/0x41879c4f46740401628fde91b4cc883dbfed8623090378bb33477bff5abcf541) |
+| 3 | `quoteListing` (1,000 mock USDT) | listing authority | 803,735 | 1,210,000 | [`0xdf98d3…376404`](https://explore.testnet.tempo.xyz/tx/0xdf98d3c4c717604c758c5ff211fd2f97d100b5186a04c7ac3c411bcbe6376404) |
+| 4 | mock USDT faucet `mint` | issuer | 531,290 | 800,000 | [`0xf4c837…f0b560`](https://explore.testnet.tempo.xyz/tx/0xf4c83743ace1b385d0980dd925d7f19c4368bef3299eb8ff19328a8c1bf0b560) |
+| 5 | mock USDT `approve` | issuer | 278,531 | 420,000 | [`0x39dc21…5140e0`](https://explore.testnet.tempo.xyz/tx/0x39dc219f04b8aad58c59679e3e4e9f717d9e25f57cff4f0fb0732243875140e0) |
+| 6 | `payListingFee` (listing approved) | issuer | 1,109,165 | 2,050,000 | [`0x7b89fb…6bd544`](https://explore.testnet.tempo.xyz/tx/0x7b89fbe10476cb6b7e4303503409d68a0a1c273446f6acc6c5a460f2d96bd544) |
+| 7 | `requestIssuance` (batch 1) | issuer | 1,045,304 | 1,570,000 | [`0x940e71…f6118e`](https://explore.testnet.tempo.xyz/tx/0x940e71bbb3260c5f7701d6f7c76f3cb988f26ff9bc07498c78ebc12106f6118e) |
+| 8 | `approveIssuance` (registry mints) | listing authority | 557,464 | 860,000 | [`0xf6d13e…0f3e25`](https://explore.testnet.tempo.xyz/tx/0xf6d13ebb3ec37bf797d4ec8067f10c8b05887b922fadbb44442f2b7a2a0f3e25) |
+| 9 | shares `approve` | investor B | 528,624 | 800,000 | [`0xc80b29…cdf17b`](https://explore.testnet.tempo.xyz/tx/0xc80b292ccdbb05d08637f574fb7310b0e98950b4a82779f54b7edb5628cdf17b) |
+| 10 | mock USDT faucet `mint` | investor A | 289,002 | 810,000 | [`0x281b53…228229`](https://explore.testnet.tempo.xyz/tx/0x281b53c28ba13aed026250242288d7c0ef2e7a2b277fa1af759518f72f228229) |
+| 11 | mock USDT `approve` | investor A | 278,543 | 420,000 | [`0xf94c5a…6c020d`](https://explore.testnet.tempo.xyz/tx/0xf94c5a1f35f251efa766df2e54a717deeb19382e8b943044d2de3afd5b6c020d) |
+| 12 | **`settle`** (100 shares for 10,000 mock USDT, fee 50) | operator | 913,528 | 2,120,000 | [`0xa260f8…c14152`](https://explore.testnet.tempo.xyz/tx/0xa260f8cd9e918a189c62031a00a8facf27bfe66c1634f9fa49f6840b0fc14152) |
+| 13 | cashback `withdraw` (10 mock USDT) | issuer | 74,971 | 500,000 | [`0xd0b7dd…00987b`](https://explore.testnet.tempo.xyz/tx/0xd0b7dd156383d2c47eb301712a2d25500041ebede87dc917611cf267a700987b) |
+| | **Flow 2: fixed income, P2P deal** | | | | |
+| 14 | `createAssetToken` (bond) | issuer | 3,953,524 | 6,310,000 | [`0xffea09…782da8`](https://explore.testnet.tempo.xyz/tx/0xffea094894e005ae093dc4f58417003f6b1709f09e1f7ef6669deaf66b782da8) |
+| 15 | `submitListing` | issuer | 796,782 | 1,200,000 | [`0xbf41e8…c4e10f`](https://explore.testnet.tempo.xyz/tx/0xbf41e815e96efb7886c183d39addd6aedb3f79d33cff6fe18c402a0958c4e10f) |
+| 16 | `quoteListing` (1,000 mock USDT) | listing authority | 803,735 | 1,210,000 | [`0x6f67b8…738aa0`](https://explore.testnet.tempo.xyz/tx/0x6f67b876be9f692c02286d57d34cbebdfe4a757d51e96b998fd4ea2353738aa0) |
+| 17 | mock USDT faucet `mint` | issuer | 34,690 | 800,000 | [`0x9c0a95…5cafbe`](https://explore.testnet.tempo.xyz/tx/0x9c0a95423472ec894fbbfcfb1a6ed6526c032b3729825297d53f344f795cafbe) |
+| 18 | mock USDT `approve` | issuer | 278,531 | 420,000 | [`0xb076c9…9d6924`](https://explore.testnet.tempo.xyz/tx/0xb076c944efb605ea2bc544333d33cb4f09c8661a68a66e91cdfb01ee2c9d6924) |
+| 19 | `payListingFee` (listing approved) | issuer | 610,165 | 2,050,000 | [`0x219e6d…c01160`](https://explore.testnet.tempo.xyz/tx/0x219e6daca39994c0ab8023f95ab32637b0f2bc33acf70b210e2fbbe315c01160) |
+| 20 | `requestIssuance` (batch 1) | issuer | 1,045,304 | 1,570,000 | [`0x84f09b…83babf`](https://explore.testnet.tempo.xyz/tx/0x84f09b3ae528bc1619d72f23e18fa2f4369d94456f5ca23513091a5aa783babf) |
+| 21 | `approveIssuance` (registry mints) | listing authority | 557,464 | 860,000 | [`0x2c1788…116034`](https://explore.testnet.tempo.xyz/tx/0x2c178842981c16c3debeff87200d3c4acb6c7569f4cf71ce5f98274e94116034) |
+| 22 | bonds `approve` | investor A | 278,624 | 800,000 | [`0x00e52a…686029`](https://explore.testnet.tempo.xyz/tx/0x00e52a89a1cc47945f03513264e499993b7259398059c0c2398ecd3cc6686029) |
+| 23 | **`openDeal`** (escrows 50 bonds) | investor A | 2,379,048 | 3,950,000 | [`0x4182b6…16080a`](https://explore.testnet.tempo.xyz/tx/0x4182b6593d8e4eeca9648eb233a01b5380f73382017e6ce718f3cfd32a16080a) |
+| 24 | mock USDT faucet `mint` | investor B | 34,702 | 810,000 | [`0xc97023…091ca1`](https://explore.testnet.tempo.xyz/tx/0xc970234d8f7520bb8b351acfe36fe32cbbe44b86767b7b3c458fb23592091ca1) |
+| 25 | mock USDT `approve` | investor B | 33,543 | 420,000 | [`0xa6ee63…547a2c`](https://explore.testnet.tempo.xyz/tx/0xa6ee6391b3737377e3562522a19fa6525783154610915b4958d46deca6547a2c) |
+| 26 | **`acceptDeal`** (pays 5,000 mock USDT, fee 25) | investor B | 192,546 | 1,410,000 | [`0x2d5f44…c36dc4`](https://explore.testnet.tempo.xyz/tx/0x2d5f44021bd433ac7520b00669b2840e4570c4b1c6dcc0201a09032493c36dc4) |
+| 27 | cashback `withdraw` (5 mock USDT) | issuer | 70,671 | 500,000 | [`0x8cd02a…5e3275`](https://explore.testnet.tempo.xyz/tx/0x8cd02a31ca868d51d1d82171cabce88fcf153f0c1cad69927aa1e95b935e3275) |
+| | **Flow 3: currency, P2P deal** | | | | |
+| 28 | mock USDT faucet `mint` | investor B | 34,690 | 1,180,000 | [`0xded07b…7201fc`](https://explore.testnet.tempo.xyz/tx/0xded07b20d9cd423cf00c394ccaf4a52edc378723bc36b5908efe9ebbb57201fc) |
+| 29 | mock USDT `approve` | investor B | 278,531 | 420,000 | [`0x6b5393…8851f7`](https://explore.testnet.tempo.xyz/tx/0x6b53930201b8937bb6a198b24223f9045285613e9db4ee6142dc50251a8851f7) |
+| 30 | **`openDeal`** (escrows 1,000 mock USDT) | investor B | 2,134,053 | 3,950,000 | [`0xd7855b…c57574`](https://explore.testnet.tempo.xyz/tx/0xd7855b697e2566e6a42819fcfaac8dc69febe76f1d0f964bce133edb1ec57574) |
+| 31 | mock BRL faucet `mint` | investor A | 531,302 | 1,180,000 | [`0xcb5bf9…605ea0`](https://explore.testnet.tempo.xyz/tx/0xcb5bf99af15a79a0d0376a1c13e9b6bb719ef5947848909eb27a8acabc605ea0) |
+| 32 | mock BRL `approve` | investor A | 278,543 | 420,000 | [`0x54c275…aeecfa`](https://explore.testnet.tempo.xyz/tx/0x54c275a35cb9c801ba1bd2f48564318a288dc6036fe30d925944d0d7dcaeecfa) |
+| 33 | **`acceptDeal`** (delivers 5,500 mock BRL, fee 5) | investor A | 176,520 | 1,760,000 | [`0x182514…c9084b`](https://explore.testnet.tempo.xyz/tx/0x182514e53c8e835d82ad5405e5a6f4625ca77af822c4207fd418dcd483c9084b) |
+
+**Checked after the demo with read-only calls (2026-11-20):** the same end state as on Base
+Sepolia and Robinhood Chain.
+- All 33 receipts succeeded, each from the wallet of its role. Nonces: listing authority 6,
+  operator 1, issuer 14, investor A 7, investor B 7; the deployer is still at 16.
+- Equity: supply 1,000; investor A 100, investor B 900. Bond: supply 500; investor A 450,
+  investor B 50; none left in the escrow. Both listings Approved.
+- Mock USDT: investor A 5,970, investor B 9,950, issuer 15 (cashback). Mock BRL: investor B
+  5,500.
+- CashbackDistributor holds 2,065 mock USDT, all protocol balance (listing fees 2,000 + fees
+  80 − cashback 15); no cashback left unwithdrawn.
+- P2PEscrow `totalEscrowed` is 0 for mock USDT, mock BRL and the bond.
 
 ## Historical: the July 2026 Sepolia deployment (backed model)
 
