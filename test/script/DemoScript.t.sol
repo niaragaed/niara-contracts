@@ -562,6 +562,236 @@ contract DemoScriptTest is Test {
         assertGe(needs[5].gas * 130, 1_049_512 * 100); // investor B
     }
 
+    // ── Tempo: an explicit gas limit per call ────────────────────────────────────────────
+
+    function test_CallGas_IsTheTempoLimitOnTempo() public {
+        vm.chainId(42431);
+        assertEq(demo.callGas(1_234_567), 1_234_567);
+    }
+
+    /// @notice Elsewhere a call forwards all the gas left, as a call with no gas option does.
+    function test_CallGas_ForwardsAllTheGasLeftOnTheOtherTestnets() public {
+        uint256[4] memory chains = [uint256(11155111), 84532, 46630, 998];
+        for (uint256 i = 0; i < chains.length; i++) {
+            vm.chainId(chains[i]);
+            assertGt(demo.callGas(1_234_567), demo.TEMPO_MAX_TX_GAS());
+        }
+    }
+
+    /// @notice Each Tempo limit is 1.5x the smallest gas limit Tempo's node accepted for that
+    /// call (measured 2026-11-20), rounded up to 10,000, and stays under Tempo's 30M general
+    /// gas limit.
+    function test_TempoGasLimits_AreOneAndAHalfTimesTheNodeMinimumUnder30M() public view {
+        uint256[25] memory limits = [
+            demo.TEMPO_GAS_CREATE_ASSET_TOKEN(),
+            demo.TEMPO_GAS_SUBMIT_LISTING(),
+            demo.TEMPO_GAS_QUOTE_LISTING(),
+            demo.TEMPO_GAS_ISSUER_USDT_MINT(),
+            demo.TEMPO_GAS_ISSUER_USDT_APPROVE(),
+            demo.TEMPO_GAS_PAY_LISTING_FEE(),
+            demo.TEMPO_GAS_REQUEST_ISSUANCE(),
+            demo.TEMPO_GAS_APPROVE_ISSUANCE(),
+            demo.TEMPO_GAS_EQUITY_SELLER_APPROVE(),
+            demo.TEMPO_GAS_EQUITY_BUYER_MINT(),
+            demo.TEMPO_GAS_EQUITY_BUYER_APPROVE(),
+            demo.TEMPO_GAS_SETTLE(),
+            demo.TEMPO_GAS_EQUITY_WITHDRAW(),
+            demo.TEMPO_GAS_BOND_SELLER_APPROVE(),
+            demo.TEMPO_GAS_BOND_OPEN_DEAL(),
+            demo.TEMPO_GAS_BOND_BUYER_MINT(),
+            demo.TEMPO_GAS_BOND_BUYER_APPROVE(),
+            demo.TEMPO_GAS_BOND_ACCEPT_DEAL(),
+            demo.TEMPO_GAS_BOND_WITHDRAW(),
+            demo.TEMPO_GAS_FX_USDT_MINT(),
+            demo.TEMPO_GAS_FX_USDT_APPROVE(),
+            demo.TEMPO_GAS_FX_OPEN_DEAL(),
+            demo.TEMPO_GAS_FX_BRL_MINT(),
+            demo.TEMPO_GAS_FX_BRL_APPROVE(),
+            demo.TEMPO_GAS_FX_ACCEPT_DEAL()
+        ];
+        uint256[25] memory minimums = [
+            uint256(4_203_524),
+            796_782,
+            803_735,
+            531_290,
+            278_531,
+            1_365_062,
+            1_045_304,
+            568_351,
+            528_624,
+            534_257,
+            278_543,
+            1_410_436,
+            326_825,
+            528_624,
+            2_629_671,
+            534_257,
+            278_563,
+            934_697,
+            326_825,
+            781_290,
+            278_531,
+            2_629_791,
+            781_302,
+            278_543,
+            1_172_305
+        ];
+        assertEq(demo.TEMPO_MAX_TX_GAS(), 30_000_000);
+        for (uint256 i = 0; i < limits.length; i++) {
+            assertEq(limits[i], (minimums[i] * 3 + 19_999) / 20_000 * 10_000);
+            assertLt(limits[i], demo.TEMPO_MAX_TX_GAS());
+        }
+    }
+
+    /// @notice On Tempo the preflight counts each wallet's explicit limits (`fixedGas`) and no
+    /// estimated gas.
+    function test_DemoGasNeeds_OnTempoSumsTheExplicitLimits() public {
+        vm.chainId(42431);
+        NiaraScriptBase.GasNeed[] memory needs = demo.demoGasNeeds(roles, true, true, true, 0);
+        for (uint256 i = 0; i < needs.length; i++) {
+            assertEq(needs[i].gas, 0);
+        }
+        uint256 issue = demo.TEMPO_GAS_CREATE_ASSET_TOKEN() + demo.TEMPO_GAS_SUBMIT_LISTING()
+            + demo.TEMPO_GAS_ISSUER_USDT_MINT() + demo.TEMPO_GAS_ISSUER_USDT_APPROVE()
+            + demo.TEMPO_GAS_PAY_LISTING_FEE() + demo.TEMPO_GAS_REQUEST_ISSUANCE();
+        assertEq(needs[0].fixedGas, 0);
+        assertEq(needs[1].fixedGas, 2 * (demo.TEMPO_GAS_QUOTE_LISTING() + demo.TEMPO_GAS_APPROVE_ISSUANCE()));
+        assertEq(needs[2].fixedGas, demo.TEMPO_GAS_SETTLE());
+        assertEq(needs[3].fixedGas, 2 * issue + demo.TEMPO_GAS_EQUITY_WITHDRAW() + demo.TEMPO_GAS_BOND_WITHDRAW());
+        assertEq(
+            needs[4].fixedGas,
+            demo.TEMPO_GAS_EQUITY_BUYER_MINT() + demo.TEMPO_GAS_EQUITY_BUYER_APPROVE()
+                + demo.TEMPO_GAS_BOND_SELLER_APPROVE() + demo.TEMPO_GAS_BOND_OPEN_DEAL() + demo.TEMPO_GAS_FX_BRL_MINT()
+                + demo.TEMPO_GAS_FX_BRL_APPROVE() + demo.TEMPO_GAS_FX_ACCEPT_DEAL()
+        );
+        assertEq(
+            needs[5].fixedGas,
+            demo.TEMPO_GAS_EQUITY_SELLER_APPROVE() + demo.TEMPO_GAS_BOND_BUYER_MINT()
+                + demo.TEMPO_GAS_BOND_BUYER_APPROVE() + demo.TEMPO_GAS_BOND_ACCEPT_DEAL()
+                + demo.TEMPO_GAS_FX_USDT_MINT() + demo.TEMPO_GAS_FX_USDT_APPROVE() + demo.TEMPO_GAS_FX_OPEN_DEAL()
+        );
+    }
+
+    function test_DemoGasNeeds_OnTempoCurrencyFlowOnlyNeedsTheInvestors() public {
+        vm.chainId(42431);
+        NiaraScriptBase.GasNeed[] memory needs = demo.demoGasNeeds(roles, false, false, true, 0);
+        for (uint256 i = 0; i < 4; i++) {
+            assertEq(needs[i].fixedGas, 0);
+        }
+        assertEq(
+            needs[4].fixedGas,
+            demo.TEMPO_GAS_FX_BRL_MINT() + demo.TEMPO_GAS_FX_BRL_APPROVE() + demo.TEMPO_GAS_FX_ACCEPT_DEAL()
+        );
+        assertEq(
+            needs[5].fixedGas,
+            demo.TEMPO_GAS_FX_USDT_MINT() + demo.TEMPO_GAS_FX_USDT_APPROVE() + demo.TEMPO_GAS_FX_OPEN_DEAL()
+        );
+    }
+
+    /// @notice The other testnets keep the estimated budgets and no fixed limits.
+    function test_DemoGasNeeds_NoFixedLimitsOffTempo() public {
+        uint256[4] memory chains = [uint256(11155111), 84532, 46630, 998];
+        for (uint256 c = 0; c < chains.length; c++) {
+            vm.chainId(chains[c]);
+            NiaraScriptBase.GasNeed[] memory needs = demo.demoGasNeeds(roles, true, true, true, 0);
+            for (uint256 i = 0; i < needs.length; i++) {
+                assertEq(needs[i].fixedGas, 0);
+            }
+            assertEq(needs[3].gas, demo.EQUITY_ISSUER_GAS() + demo.BOND_ISSUER_GAS());
+        }
+    }
+
+    /// @notice On Tempo each of the 33 calls of the three flows is made with exactly its limit.
+    function test_RunAll_OnTempoEveryCallCarriesItsGasLimit() public {
+        vm.chainId(42431);
+        uint64 factoryNonce = vm.getNonce(address(d.factory));
+        address equity = vm.computeCreateAddress(address(d.factory), factoryNonce);
+        address bond = vm.computeCreateAddress(address(d.factory), factoryNonce + 1);
+        uint256 listingFee = 1_000e6;
+        address registry = address(d.registry);
+        address escrow = address(d.escrow);
+        address settlement = address(d.settlement);
+        address distributor = address(d.distributor);
+
+        // Steps 1 to 5, once per instrument.
+        address factory = address(d.factory);
+        _expectGas(factory, demo.TEMPO_GAS_CREATE_ASSET_TOKEN(), _sel(d.factory.createAssetToken.selector), 2);
+        _expectGas(registry, demo.TEMPO_GAS_SUBMIT_LISTING(), _sel(d.registry.submitListing.selector), 2);
+        _expectGas(registry, demo.TEMPO_GAS_QUOTE_LISTING(), _sel(d.registry.quoteListing.selector), 2);
+        _expectGas(address(usdt), demo.TEMPO_GAS_ISSUER_USDT_MINT(), _mint(roles.issuer, listingFee), 2);
+        _expectGas(address(usdt), demo.TEMPO_GAS_ISSUER_USDT_APPROVE(), _approve(registry, listingFee), 2);
+        _expectGas(registry, demo.TEMPO_GAS_PAY_LISTING_FEE(), _sel(d.registry.payListingFee.selector), 2);
+        _expectGas(registry, demo.TEMPO_GAS_REQUEST_ISSUANCE(), _sel(d.registry.requestIssuance.selector), 2);
+        _expectGas(registry, demo.TEMPO_GAS_APPROVE_ISSUANCE(), _sel(d.registry.approveIssuance.selector), 2);
+
+        // Flow 1.
+        _expectGas(equity, demo.TEMPO_GAS_EQUITY_SELLER_APPROVE(), _approve(settlement, demo.EQUITY_TRADE()), 1);
+        _expectGas(address(usdt), demo.TEMPO_GAS_EQUITY_BUYER_MINT(), _mint(roles.investorA, demo.EQUITY_PRICE()), 1);
+        _expectGas(address(usdt), demo.TEMPO_GAS_EQUITY_BUYER_APPROVE(), _approve(settlement, demo.EQUITY_PRICE()), 1);
+        _expectGas(settlement, demo.TEMPO_GAS_SETTLE(), _sel(d.settlement.settle.selector), 1);
+        _expectGas(distributor, demo.TEMPO_GAS_EQUITY_WITHDRAW(), _withdraw(equity), 1);
+
+        // Flow 2.
+        _expectGas(bond, demo.TEMPO_GAS_BOND_SELLER_APPROVE(), _approve(escrow, demo.BOND_TRADE()), 1);
+        _expectGas(address(usdt), demo.TEMPO_GAS_BOND_BUYER_MINT(), _mint(roles.investorB, demo.BOND_PRICE()), 1);
+        _expectGas(address(usdt), demo.TEMPO_GAS_BOND_BUYER_APPROVE(), _approve(escrow, demo.BOND_PRICE()), 1);
+        _expectGas(escrow, demo.TEMPO_GAS_BOND_ACCEPT_DEAL(), _accept(roles.investorA, "niara-demo-bond-deal"), 1);
+        _expectGas(distributor, demo.TEMPO_GAS_BOND_WITHDRAW(), _withdraw(bond), 1);
+
+        // Flow 3. Both deals open with the same limit, so `openDeal` is expected twice.
+        assertEq(demo.TEMPO_GAS_BOND_OPEN_DEAL(), demo.TEMPO_GAS_FX_OPEN_DEAL());
+        _expectGas(escrow, demo.TEMPO_GAS_FX_OPEN_DEAL(), _sel(d.escrow.openDeal.selector), 2);
+        _expectGas(address(usdt), demo.TEMPO_GAS_FX_USDT_MINT(), _mint(roles.investorB, demo.FX_USDT_AMOUNT()), 1);
+        _expectGas(address(usdt), demo.TEMPO_GAS_FX_USDT_APPROVE(), _approve(escrow, demo.FX_USDT_AMOUNT()), 1);
+        _expectGas(address(brl), demo.TEMPO_GAS_FX_BRL_MINT(), _mint(roles.investorA, demo.FX_BRL_AMOUNT()), 1);
+        _expectGas(address(brl), demo.TEMPO_GAS_FX_BRL_APPROVE(), _approve(escrow, demo.FX_BRL_AMOUNT()), 1);
+        _expectGas(escrow, demo.TEMPO_GAS_FX_ACCEPT_DEAL(), _accept(roles.investorB, "niara-demo-fx-deal"), 1);
+
+        demo.runAll(roles, d);
+        assertEq(IERC20(equity).totalSupply(), demo.EQUITY_BATCH());
+        assertEq(IERC20(bond).totalSupply(), demo.BOND_BATCH());
+    }
+
+    /// @notice Off Tempo no call is made with a Tempo limit: forge keeps estimating them.
+    function test_RunAll_OffTempoNoCallCarriesATempoLimit() public {
+        vm.chainId(84532);
+        address factory = address(d.factory);
+        _expectGas(factory, demo.TEMPO_GAS_CREATE_ASSET_TOKEN(), _sel(d.factory.createAssetToken.selector), 0);
+        _expectGas(address(d.settlement), demo.TEMPO_GAS_SETTLE(), _sel(d.settlement.settle.selector), 0);
+        _expectGas(address(d.escrow), demo.TEMPO_GAS_FX_ACCEPT_DEAL(), _sel(d.escrow.acceptDeal.selector), 0);
+        _expectGas(address(usdt), demo.TEMPO_GAS_ISSUER_USDT_MINT(), _mint(roles.issuer, 1_000e6), 0);
+        demo.runAll(roles, d);
+    }
+
+    /// @dev Expects exactly `count` calls to `callee` with no value, exactly `gasLimit` gas and
+    /// calldata starting with `data`.
+    function _expectGas(address callee, uint256 gasLimit, bytes memory data, uint64 count) internal {
+        vm.expectCall(callee, 0, uint64(gasLimit), data, count);
+    }
+
+    function _sel(bytes4 selector) internal pure returns (bytes memory) {
+        return abi.encodePacked(selector);
+    }
+
+    function _mint(address to, uint256 amount) internal view returns (bytes memory) {
+        return abi.encodeCall(d.mockUsdt.mint, (to, amount));
+    }
+
+    function _approve(address spender, uint256 amount) internal view returns (bytes memory) {
+        return abi.encodeCall(usdt.approve, (spender, amount));
+    }
+
+    /// @dev `acceptDeal` of the first deal `proposer` opens under `label` (the script's
+    /// `_freshDealId` with index 0, on a deployment with no earlier deal).
+    function _accept(address proposer, string memory label) internal view returns (bytes memory) {
+        bytes16 dealId = bytes16(keccak256(abi.encode(label, block.chainid, uint256(0))));
+        return abi.encodeCall(d.escrow.acceptDeal, (d.escrow.dealKeyOf(proposer, dealId)));
+    }
+
+    function _withdraw(address instrument) internal view returns (bytes memory) {
+        return abi.encodeCall(d.distributor.withdraw, (instrument, address(usdt)));
+    }
+
     function test_Constants_DemoAmounts() public view {
         assertEq(demo.DEFAULT_GAS_FUNDING(), 0.02 ether);
         assertEq(demo.EQUITY_BATCH(), 1_000 ether);

@@ -108,6 +108,24 @@ contract GasPreflightTest is Test {
         assertEq(script.gasCost(1, 1), 1);
     }
 
+    /// @notice A transaction with an explicit gas limit is sent with that limit as it is, so
+    /// its cost ignores the multiplier. Chain 31339 is set to 900 here, a chain no other test
+    /// computes a cost on (`vm.setEnv` changes the whole process).
+    function test_GasLimitCost_IgnoresTheMultiplier() public {
+        vm.chainId(31339);
+        vm.setEnv("GAS_ESTIMATE_MULTIPLIER_31339", "900");
+        assertEq(script.gasLimitCost(1_000_000, 10_000_000), 1_000_000 * 10_000_000);
+        assertEq(script.gasCost(1_000_000, 10_000_000), 9 * 1_000_000 * 10_000_000);
+        assertEq(script.gasLimitCost(0, 10_000_000), 0);
+    }
+
+    /// @notice On Tempo the cost of a fixed limit is converted to pathUSD base units, rounded up.
+    function test_GasLimitCost_ConvertsToPathUsdOnTempo() public {
+        vm.chainId(TEMPO_TESTNET);
+        assertEq(script.gasLimitCost(1_000_000, 1_200_000_000), 1_200);
+        assertEq(script.gasLimitCost(1, 1), 1);
+    }
+
     // ── Shortfall and report ───────────────────────────────────────────────────────────
 
     function test_GasShortfall_CountsValueSentAndValueReceived() public {
@@ -115,7 +133,7 @@ contract GasPreflightTest is Test {
         uint256 cost = script.gasCost(100_000, fee);
         vm.deal(deployer, cost);
 
-        NiaraScriptBase.GasNeed memory need = NiaraScriptBase.GasNeed("deployer", deployer, 100_000, 0, 0);
+        NiaraScriptBase.GasNeed memory need = NiaraScriptBase.GasNeed("deployer", deployer, 100_000, 0, 0, 0);
         (uint256 required, uint256 available, uint256 missing) = script.gasShortfall(need, fee);
         assertEq(required, cost);
         assertEq(available, cost);
@@ -133,13 +151,30 @@ contract GasPreflightTest is Test {
         assertEq(missing, 0);
     }
 
+    /// @notice Fixed gas limits (`fixedGas`) are counted on top of the estimated gas, without
+    /// the multiplier.
+    function test_GasShortfall_CountsFixedGasWithoutTheMultiplier() public {
+        uint256 fee = 1 gwei;
+        NiaraScriptBase.GasNeed memory need = NiaraScriptBase.GasNeed("issuer", deployer, 100_000, 0, 0, 50_000);
+        uint256 expected = script.gasCost(100_000, fee) + 50_000 * fee;
+        vm.deal(deployer, expected - 1);
+        (uint256 required,, uint256 missing) = script.gasShortfall(need, fee);
+        assertEq(required, expected);
+        assertEq(missing, 1);
+
+        // Only fixed limits: exactly limit * fee.
+        need.gas = 0;
+        (required,,) = script.gasShortfall(need, fee);
+        assertEq(required, 50_000 * fee);
+    }
+
     function test_CheckGasFunds_PassesWhenEveryWalletIsCovered() public {
         uint256 fee = 1 gwei;
         vm.deal(deployer, script.gasCost(100_000, fee));
         vm.deal(operator, 1 ether);
         NiaraScriptBase.GasNeed[] memory needs = new NiaraScriptBase.GasNeed[](2);
-        needs[0] = NiaraScriptBase.GasNeed("deployer", deployer, 100_000, 0, 0);
-        needs[1] = NiaraScriptBase.GasNeed("operator", operator, 50_000, 0, 0);
+        needs[0] = NiaraScriptBase.GasNeed("deployer", deployer, 100_000, 0, 0, 0);
+        needs[1] = NiaraScriptBase.GasNeed("operator", operator, 50_000, 0, 0, 0);
         assertEq(script.checkGasFunds("phase", needs, fee, true), 0);
     }
 
@@ -153,9 +188,9 @@ contract GasPreflightTest is Test {
         vm.deal(listingAuthority, 0);
 
         NiaraScriptBase.GasNeed[] memory needs = new NiaraScriptBase.GasNeed[](3);
-        needs[0] = NiaraScriptBase.GasNeed("deployer", deployer, 100_000, 0, 0);
-        needs[1] = NiaraScriptBase.GasNeed("operator", operator, 50_000, 0, 0);
-        needs[2] = NiaraScriptBase.GasNeed("listing authority", listingAuthority, 40_000, 0, 0);
+        needs[0] = NiaraScriptBase.GasNeed("deployer", deployer, 100_000, 0, 0, 0);
+        needs[1] = NiaraScriptBase.GasNeed("operator", operator, 50_000, 0, 0, 0);
+        needs[2] = NiaraScriptBase.GasNeed("listing authority", listingAuthority, 40_000, 0, 0, 0);
 
         string memory expected = string.concat(
             "deployer ",
@@ -178,8 +213,8 @@ contract GasPreflightTest is Test {
     /// @notice Not enforcing (a dry run) only reports how many wallets are short.
     function test_CheckGasFunds_WarnsWithoutReverting() public {
         NiaraScriptBase.GasNeed[] memory needs = new NiaraScriptBase.GasNeed[](2);
-        needs[0] = NiaraScriptBase.GasNeed("deployer", deployer, 100_000, 0, 0);
-        needs[1] = NiaraScriptBase.GasNeed("operator", operator, 50_000, 0, 0);
+        needs[0] = NiaraScriptBase.GasNeed("deployer", deployer, 100_000, 0, 0, 0);
+        needs[1] = NiaraScriptBase.GasNeed("operator", operator, 50_000, 0, 0, 0);
         assertEq(script.checkGasFunds("phase", needs, 1 gwei, false), 2);
     }
 
@@ -192,7 +227,7 @@ contract GasPreflightTest is Test {
         vm.deal(deployer, 100 ether); // native balance is ignored on Tempo
 
         NiaraScriptBase.GasNeed[] memory needs = new NiaraScriptBase.GasNeed[](1);
-        needs[0] = NiaraScriptBase.GasNeed("deployer", deployer, 13_000_000, 0, 0);
+        needs[0] = NiaraScriptBase.GasNeed("deployer", deployer, 13_000_000, 0, 0, 0);
         string memory expected = string.concat(
             "deployer ",
             vm.toString(deployer),

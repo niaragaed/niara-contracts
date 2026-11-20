@@ -373,7 +373,8 @@ is not a balance; read `balanceOf` on pathUSD instead. Gas prices are in attodol
 prints the estimate in USD): phase 1 cost 0.0376 pathUSD. On Tempo every new storage slot
 costs ~230k gas more than on Ethereum, so small transactions that create state (a first mint,
 an approval, `submitListing`) are repriced far more than 7x. Phase 2 and the demo were measured
-on the deployed contracts (below): phase 2 needs 200, the demo does not fit one multiplier.
+on the deployed contracts (below): phase 2 needs 200. No single multiplier fits the demo, so on
+Tempo every demo call carries its own gas limit and the demo runs with `--skip-simulation`.
 
 Measured on Tempo's node on 2026-11-16 (`eth_simulateV1`, nothing sent):
 - **Phase 1 at 700:** mock tokens 4.18M and 3.93M gas (6.3x and 5.9x forge's estimate),
@@ -416,6 +417,35 @@ the node, phase 2 plus the demo: 27.5M (phase 2 1.6M, the 33 demo transactions 2
   just fits (29.7M) the dependent transactions run out of gas (`submitListing` first, 774,851
   against 796,782 needed). `eth_call` and `eth_estimateGas` accept a gas value above 30M, so the
   cap on a real transaction could not be tested without sending one.
+
+**The demo on Tempo: an explicit gas limit per call (2026-11-20).** Each of the 25 call sites in
+`script/Demo.s.sol` passes `{gas: callGas(TEMPO_GAS_...)}`. On Tempo `callGas` returns that
+call's constant. On every other chain it returns `gasleft()`, which forge treats like a call with
+no gas option.
+- **How the limits were set.** Phase 2 was live, so the four demo entry points (`run()` and each
+  flow alone, from fresh wallets) were dry-run against the real contracts. For every transaction,
+  the smallest gas limit Tempo's node accepts was bisected with `eth_simulateV1`, with the earlier
+  transactions of the run applied first. Each call's constant is 1.5x the largest of those minima,
+  rounded up to 10,000. The largest is `createAssetToken` at 6,310,000 (node minimum 4,203,524),
+  far under 30M. The minimum is often well above the gas the call uses, because Tempo refunds
+  part of it: phase 2's `executeGrantRole` used 48,297 but fails below ~295k, and the currency
+  `acceptDeal` uses 430k but needs 1.17M. So the limits come from the minima, not from gas used.
+- **Forge honors them only with `--skip-simulation`.** In forge 1.7.1's `bundle()` (simulate.rs),
+  on chains with a different gas calculation, every transaction the node can estimate gets
+  `eth_estimateGas` x the multiplier, even when it has an explicit limit. The explicit limit
+  survives only when that estimate fails. A dry run without the flag showed exactly that: 16 of the
+  33 limits were replaced (`createAssetToken`, the mints and approvals). That step does not run
+  when simulation is skipped, and at send time a transaction with an explicit limit is not
+  re-estimated. With `--skip-simulation` the dry run carries all 33 constants unchanged. Phase 2
+  showed that what forge sends is what its dry run recorded (its broadcast file has the same 7
+  gas limits as its dry run).
+- **Checked on the node.** `run()` and each flow alone, replayed with exactly these limits: every
+  transaction succeeds (`run()` 33 transactions, 25.9M gas used under 50.3M of limits).
+- **Other chains unchanged.** A Base Sepolia dry run of flow 3 gives forge's usual estimates. The
+  four calls whose state matches the November 16 demo show identical gas limits. The mock BRL
+  mint and the `acceptDeal` are lower only because the wallets already hold mock BRL.
+- **Preflight.** On Tempo each wallet needs the sum of its limits x the max fee (`fixedGas`, no
+  multiplier); for all three flows the issuer needs about 0.031 pathUSD.
 
 **Demo gas top-up per chain** (`DEMO_GAS_FUNDING_WEI_<chainid>`), sized from the measured gas
 (the issuer, the largest spender, uses 2.25M gas in the demo; the other wallets 0.15M to
@@ -467,9 +497,12 @@ in that phase and checks it can pay for its transactions:
 - **Multiplier**: `GAS_ESTIMATE_MULTIPLIER_<chainid>` if set, else the per-chain default: 200
   on Robinhood, 700 on Tempo, 800 on Sepolia, 130 (forge's default) elsewhere. **It must
   match the `--gas-estimate-multiplier` on the command line**; the script cannot read the
-  flag. On Tempo phase 2 needs only 200 and the demo needs more than any single value that
-  keeps `createAssetToken` under 30M (see "Tempo fees"): set `GAS_ESTIMATE_MULTIPLIER_42431`
-  and pass the same value.
+  flag. On Tempo phase 2 used 200 (`GAS_ESTIMATE_MULTIPLIER_42431=200`); the demo does not
+  use the multiplier there (next point).
+- **Explicit gas limits** (`fixedGas`): a transaction with its own limit costs that limit × the
+  max fee, without the multiplier. On Tempo every demo call has one (`TEMPO_GAS_*` in
+  `Demo.s.sol`, see "Tempo fees"), so the demo's preflight there sums those limits per wallet
+  instead of using the budgets.
 - **The demo's top-up counts**: before the flows, `run()` has the deployer top up each wallet
   below `DEMO_GAS_FUNDING_WEI_<chainid>`, so the deployer must also hold that value, and each
   topped-up wallet counts it as received. Single flows send no top-up.
@@ -1001,8 +1034,9 @@ Sepolia.
 
 ### Tempo testnet, Moderato (42431)
 
-**Status:** phase 1 done (2026-11-16 11:43:31 to 11:43:52 UTC, blocks 44456008 to 44456049).
-Phase 2 and the demo have not run. Phase 1 was broadcast from a PowerShell session whose output
+**Status:** phase 1 done (2026-11-16 11:43:31 to 11:43:52 UTC, blocks 44456008 to 44456049)
+and phase 2 done (2026-11-20, blocks 45139702 to 45139717), both verified. The demo has not run.
+Phase 1 was broadcast from a PowerShell session whose output
 was lost, so this record was rebuilt afterwards from the chain itself (receipts, blocks and
 read-only calls) and from `broadcast/Deploy.s.sol/42431/run-latest.json`: the 11 hashes in that
 file are the 11 transactions on chain, and every receipt matches its gas.
@@ -1065,6 +1099,35 @@ Sepolia and Robinhood Chain, with the same results.
   (2026-11-16 12:43:52 UTC)**. Chain time was already past it when checked (latest block
   1794873165, 23:52 UTC), so phase 2 can run now.
 - A dry run of phase 2 passes the gas preflight for both wallets.
+
+#### Phase 2 (2026-11-20 19:09:08 to 19:09:18 UTC)
+
+One run, signed by the deployer and the listing authority (two `--account` flags),
+`--gas-estimate-multiplier 200` with `GAS_ESTIMATE_MULTIPLIER_42431=200`. The gas preflight
+passed for both wallets (needs 901 and 529 pathUSD base units). 7 transactions, 1,576,812 gas,
+0.000946 pathUSD at 600,000,001 attodollars per gas. Every gas figure is the one simulated on
+2026-11-16. The gas limits were twice the node's estimates (1.6M at most), and the
+`executeGrantRole`s used 48k under limits of 591k (see "Tempo fees").
+
+| # | Action | Signed by | Gas | Transaction |
+|---|---|---|---|---|
+| 1 | Execute `SETTLEMENT_ROLE` → NiaraSettlement (distributor) | deployer | 48,297 | [`0xc5022e…a3b395`](https://explore.testnet.tempo.xyz/tx/0xc5022e1507d064619b37f7ac8a7051926a66b8e5bafa8b7f27caed2897a3b395) |
+| 2 | Execute `ESCROW_ROLE` → P2PEscrow (distributor) | deployer | 48,297 | [`0xc286f4…5fe873`](https://explore.testnet.tempo.xyz/tx/0xc286f4210195d8414f4b861175dfa36869a98a78211a629113fbf43eb45fe873) |
+| 3 | Execute `LISTING_REGISTRY_ROLE` → ListingRegistry (distributor) | deployer | 48,285 | [`0xe344ec…1770b5`](https://explore.testnet.tempo.xyz/tx/0xe344ecdb056677807c5c0bd89191c25977ce7520bc1176527874f8adc51770b5) |
+| 4 | Execute `SETTLEMENT_OPERATOR_ROLE` → operator (settlement) | deployer | 48,319 | [`0x5859c8…4d01c3`](https://explore.testnet.tempo.xyz/tx/0x5859c804e2900ce9f2e35d4b27bdc462936d922092b6b960f6f6c4fa264d01c3) |
+| 5 | Execute `setSettlement` → NiaraSettlement (registry) | deployer | 47,886 | [`0x07364d…6ce3e9`](https://explore.testnet.tempo.xyz/tx/0x07364df73884b5069505676a76e01069e265e7bfb4be77cb00349cfb2e6ce3e9) |
+| 6 | List mock USDT as an Approved Currency | listing authority | 792,864 | [`0x644d4a…0894f7`](https://explore.testnet.tempo.xyz/tx/0x644d4a0e31e0a556deeab2e42fd2913c5ed3a24fdc9a0e381c7a1c7ce20894f7) |
+| 7 | List mock BRL as an Approved Currency | listing authority | 542,864 | [`0x833c77…56fa86`](https://explore.testnet.tempo.xyz/tx/0x833c77fb21bf6b4f6a9b1328802c65a608e4df00ad088f8be6c5d57fd956fa86) |
+
+**Checked after phase 2 with read-only calls (2026-11-20):**
+- All 7 receipts succeeded (blocks 45139702 to 45139717): the five executes from the deployer,
+  the two listings from the listing authority. Nonces: deployer 16, listing authority 2.
+- `forge script script/Deploy.s.sol --sig "verify()"` (read-only) passes: "Deployment verified on
+  Tempo testnet" (roles, settlement link, both mock currencies Approved, fee, cashback, not
+  paused).
+- Admin is still only the deployer on all four contracts.
+- Dry runs of the demo (`run()` and each flow alone) complete all three flows and pass the gas
+  preflight for all six wallets.
 
 ## Historical: the July 2026 Sepolia deployment (backed model)
 

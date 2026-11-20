@@ -87,6 +87,50 @@ contract DemoNiaraFlows is NiaraScriptBase {
     uint256 public constant FX_INVESTOR_A_GAS = 400_000;
     uint256 public constant FX_INVESTOR_B_GAS = 600_000;
 
+    // Explicit gas limit of every demo call ON TEMPO ONLY (`callGas`). Tempo reprices storage
+    // and contract creation, and forge's own figure for a call that depends on an earlier
+    // transaction of the same run is its local Ethereum gas, up to 8x too low; a multiplier big
+    // enough for those pushes `createAssetToken` past Tempo's 30M general gas limit (README,
+    // "Tempo fees"). Each value is 1.5x the smallest gas limit Tempo's node accepted for that
+    // call (bisected with `eth_simulateV1` on 2026-11-20 against the deployed contracts, after
+    // phase 2, the largest over `run()` and each flow run alone from fresh wallets, so it
+    // includes the ~250k surcharge on an account's first transaction), rounded up to 10,000.
+    // The node's minimum is shown after each one. That minimum can be well above the gas the
+    // call ends up using (`acceptDeal`: 430k used, 1.17M needed), so the limits come from it.
+    // Forge sends an explicit limit as it is, without `--gas-estimate-multiplier`.
+    /// @notice Tempo's general gas limit per block (`mainBlockGeneralGasLimit`): every Tempo
+    /// limit below must stay under it.
+    uint256 public constant TEMPO_MAX_TX_GAS = 30_000_000;
+    /// @notice Tempo gas limits. Steps 1 to 5 of flows 1 and 2 (`_issueInstrument`, `_payListingFee`).
+    uint256 public constant TEMPO_GAS_CREATE_ASSET_TOKEN = 6_310_000; // node minimum 4_203_524
+    uint256 public constant TEMPO_GAS_SUBMIT_LISTING = 1_200_000; // node minimum 796_782
+    uint256 public constant TEMPO_GAS_QUOTE_LISTING = 1_210_000; // node minimum 803_735
+    uint256 public constant TEMPO_GAS_ISSUER_USDT_MINT = 800_000; // node minimum 531_290
+    uint256 public constant TEMPO_GAS_ISSUER_USDT_APPROVE = 420_000; // node minimum 278_531
+    uint256 public constant TEMPO_GAS_PAY_LISTING_FEE = 2_050_000; // node minimum 1_365_062
+    uint256 public constant TEMPO_GAS_REQUEST_ISSUANCE = 1_570_000; // node minimum 1_045_304
+    uint256 public constant TEMPO_GAS_APPROVE_ISSUANCE = 860_000; // node minimum 568_351
+    /// @notice Tempo gas limits. Flow 1 (equity).
+    uint256 public constant TEMPO_GAS_EQUITY_SELLER_APPROVE = 800_000; // node minimum 528_624
+    uint256 public constant TEMPO_GAS_EQUITY_BUYER_MINT = 810_000; // node minimum 534_257
+    uint256 public constant TEMPO_GAS_EQUITY_BUYER_APPROVE = 420_000; // node minimum 278_543
+    uint256 public constant TEMPO_GAS_SETTLE = 2_120_000; // node minimum 1_410_436
+    uint256 public constant TEMPO_GAS_EQUITY_WITHDRAW = 500_000; // node minimum 326_825
+    /// @notice Tempo gas limits. Flow 2 (fixed income).
+    uint256 public constant TEMPO_GAS_BOND_SELLER_APPROVE = 800_000; // node minimum 528_624
+    uint256 public constant TEMPO_GAS_BOND_OPEN_DEAL = 3_950_000; // node minimum 2_629_671
+    uint256 public constant TEMPO_GAS_BOND_BUYER_MINT = 810_000; // node minimum 534_257
+    uint256 public constant TEMPO_GAS_BOND_BUYER_APPROVE = 420_000; // node minimum 278_563
+    uint256 public constant TEMPO_GAS_BOND_ACCEPT_DEAL = 1_410_000; // node minimum 934_697
+    uint256 public constant TEMPO_GAS_BOND_WITHDRAW = 500_000; // node minimum 326_825
+    /// @notice Tempo gas limits. Flow 3 (currency).
+    uint256 public constant TEMPO_GAS_FX_USDT_MINT = 1_180_000; // node minimum 781_290
+    uint256 public constant TEMPO_GAS_FX_USDT_APPROVE = 420_000; // node minimum 278_531
+    uint256 public constant TEMPO_GAS_FX_OPEN_DEAL = 3_950_000; // node minimum 2_629_791
+    uint256 public constant TEMPO_GAS_FX_BRL_MINT = 1_180_000; // node minimum 781_302
+    uint256 public constant TEMPO_GAS_FX_BRL_APPROVE = 420_000; // node minimum 278_543
+    uint256 public constant TEMPO_GAS_FX_ACCEPT_DEAL = 1_760_000; // node minimum 1_172_305
+
     struct Roles {
         /// @dev Admin of the deployment. Only funds the other wallets' gas.
         address deployer;
@@ -160,7 +204,9 @@ contract DemoNiaraFlows is NiaraScriptBase {
     /// @notice What each of the six wallets needs for the selected flows, after the gas
     /// top-up to `fundingTarget` (0 for none): the deployer pays one transfer per wallet below
     /// the target plus the value sent, and each topped-up wallet counts that value as
-    /// received. Mirrors `fundGas`, so on Tempo there is no top-up.
+    /// received. Mirrors `fundGas`, so on Tempo there is no top-up. On Tempo every demo call has
+    /// an explicit gas limit (`callGas`), so the wallets get `fixedGas`, the sum of their limits,
+    /// instead of the budgets.
     /// @param roles The roles.
     /// @param equity Whether flow 1 runs.
     /// @param fixedIncome Whether flow 2 runs.
@@ -173,12 +219,16 @@ contract DemoNiaraFlows is NiaraScriptBase {
         returns (GasNeed[] memory needs)
     {
         needs = new GasNeed[](6);
-        needs[0] = GasNeed("deployer", roles.deployer, 0, 0, 0);
-        needs[1] = GasNeed("listing authority", roles.listingAuthority, 0, 0, 0);
-        needs[2] = GasNeed("operator", roles.operator, 0, 0, 0);
-        needs[3] = GasNeed("issuer", roles.issuer, 0, 0, 0);
-        needs[4] = GasNeed("investor A", roles.investorA, 0, 0, 0);
-        needs[5] = GasNeed("investor B", roles.investorB, 0, 0, 0);
+        needs[0] = GasNeed("deployer", roles.deployer, 0, 0, 0, 0);
+        needs[1] = GasNeed("listing authority", roles.listingAuthority, 0, 0, 0, 0);
+        needs[2] = GasNeed("operator", roles.operator, 0, 0, 0, 0);
+        needs[3] = GasNeed("issuer", roles.issuer, 0, 0, 0, 0);
+        needs[4] = GasNeed("investor A", roles.investorA, 0, 0, 0, 0);
+        needs[5] = GasNeed("investor B", roles.investorB, 0, 0, 0, 0);
+        if (block.chainid == TEMPO_TESTNET_CHAIN_ID) {
+            _addTempoGasLimits(needs, equity, fixedIncome, currency);
+            return needs;
+        }
         if (equity) {
             needs[1].gas += EQUITY_LISTING_GAS;
             needs[2].gas += EQUITY_OPERATOR_GAS;
@@ -207,6 +257,35 @@ contract DemoNiaraFlows is NiaraScriptBase {
         }
     }
 
+    /// @dev On Tempo every demo call carries an explicit gas limit (`callGas`), so each wallet
+    /// needs the sum of its limits (`fixedGas`) and nothing scaled by the multiplier. There is no
+    /// top-up on Tempo.
+    function _addTempoGasLimits(GasNeed[] memory needs, bool equity, bool fixedIncome, bool currency)
+        internal
+        pure
+    {
+        uint256 issueIssuer = TEMPO_GAS_CREATE_ASSET_TOKEN + TEMPO_GAS_SUBMIT_LISTING + TEMPO_GAS_ISSUER_USDT_MINT
+            + TEMPO_GAS_ISSUER_USDT_APPROVE + TEMPO_GAS_PAY_LISTING_FEE + TEMPO_GAS_REQUEST_ISSUANCE;
+        uint256 issueListing = TEMPO_GAS_QUOTE_LISTING + TEMPO_GAS_APPROVE_ISSUANCE;
+        if (equity) {
+            needs[1].fixedGas += issueListing;
+            needs[2].fixedGas += TEMPO_GAS_SETTLE;
+            needs[3].fixedGas += issueIssuer + TEMPO_GAS_EQUITY_WITHDRAW;
+            needs[4].fixedGas += TEMPO_GAS_EQUITY_BUYER_MINT + TEMPO_GAS_EQUITY_BUYER_APPROVE;
+            needs[5].fixedGas += TEMPO_GAS_EQUITY_SELLER_APPROVE;
+        }
+        if (fixedIncome) {
+            needs[1].fixedGas += issueListing;
+            needs[3].fixedGas += issueIssuer + TEMPO_GAS_BOND_WITHDRAW;
+            needs[4].fixedGas += TEMPO_GAS_BOND_SELLER_APPROVE + TEMPO_GAS_BOND_OPEN_DEAL;
+            needs[5].fixedGas += TEMPO_GAS_BOND_BUYER_MINT + TEMPO_GAS_BOND_BUYER_APPROVE + TEMPO_GAS_BOND_ACCEPT_DEAL;
+        }
+        if (currency) {
+            needs[4].fixedGas += TEMPO_GAS_FX_BRL_MINT + TEMPO_GAS_FX_BRL_APPROVE + TEMPO_GAS_FX_ACCEPT_DEAL;
+            needs[5].fixedGas += TEMPO_GAS_FX_USDT_MINT + TEMPO_GAS_FX_USDT_APPROVE + TEMPO_GAS_FX_OPEN_DEAL;
+        }
+    }
+
     function _demoPreflight(
         string memory phase,
         Roles memory roles,
@@ -231,6 +310,20 @@ contract DemoNiaraFlows is NiaraScriptBase {
     function gasFundingTarget() public view returns (uint256 target) {
         if (!hasNativeGasToken(block.chainid)) return 0;
         target = vm.envOr(deployedVar("DEMO_GAS_FUNDING_WEI"), vm.envOr("DEMO_GAS_FUNDING_WEI", DEFAULT_GAS_FUNDING));
+    }
+
+    /// @notice Gas a demo call forwards: `tempoLimit` on Tempo, where forge records it as the
+    /// transaction's fixed gas limit; everywhere else all the gas left, which forge treats like
+    /// a call with no gas option (it estimates the transaction and applies the multiplier).
+    /// @dev Forge (v1.7.1) still replaces a fixed limit with `eth_estimateGas` x the multiplier
+    /// before broadcasting whenever the node can estimate the call, unless simulation is
+    /// skipped: run the Tempo demo with `--skip-simulation` so every limit is sent as it is.
+    /// Both behaviors were checked on dry runs on 2026-11-20 (README, "Tempo fees").
+    /// @param tempoLimit The call's gas limit on Tempo.
+    /// @return The gas to forward.
+    function callGas(uint256 tempoLimit) public view returns (uint256) {
+        if (block.chainid == TEMPO_TESTNET_CHAIN_ID) return tempoLimit;
+        return gasleft();
     }
 
     // ── Roles ──────────────────────────────────────────────────────────────────────────
@@ -359,13 +452,13 @@ contract DemoNiaraFlows is NiaraScriptBase {
         uint256 issuerUsdtBefore = usdt.balanceOf(roles.issuer);
 
         vm.startBroadcast(roles.investorB);
-        share.approve(address(d.settlement), EQUITY_TRADE);
+        share.approve{gas: callGas(TEMPO_GAS_EQUITY_SELLER_APPROVE)}(address(d.settlement), EQUITY_TRADE);
         vm.stopBroadcast();
         console2.log("1.6 seller (investor B) approved the shares for NiaraSettlement");
 
         vm.startBroadcast(roles.investorA);
-        d.mockUsdt.mint(roles.investorA, EQUITY_PRICE);
-        usdt.approve(address(d.settlement), EQUITY_PRICE);
+        d.mockUsdt.mint{gas: callGas(TEMPO_GAS_EQUITY_BUYER_MINT)}(roles.investorA, EQUITY_PRICE);
+        usdt.approve{gas: callGas(TEMPO_GAS_EQUITY_BUYER_APPROVE)}(address(d.settlement), EQUITY_PRICE);
         vm.stopBroadcast();
         console2.log("1.7 buyer (investor A) took mock USDT from the faucet and approved it");
 
@@ -373,14 +466,14 @@ contract DemoNiaraFlows is NiaraScriptBase {
         // so every run uses a fresh one (a match settles at most once).
         bytes16 matchId = bytes16(keccak256(abi.encode("niara-demo-match", block.chainid, out.instrument)));
         vm.startBroadcast(roles.operator);
-        uint256 feeCharged = d.settlement.settle(
+        uint256 feeCharged = d.settlement.settle{gas: callGas(TEMPO_GAS_SETTLE)}(
             matchId, out.instrument, address(usdt), roles.investorA, roles.investorB, EQUITY_TRADE, EQUITY_PRICE
         );
         vm.stopBroadcast();
         console2.log("1.8 operator settled the match -> fee (mock USDT, 6 decimals):", feeCharged);
 
         vm.startBroadcast(roles.issuer);
-        d.distributor.withdraw(out.instrument, address(usdt));
+        d.distributor.withdraw{gas: callGas(TEMPO_GAS_EQUITY_WITHDRAW)}(out.instrument, address(usdt));
         vm.stopBroadcast();
         console2.log("1.9 issuer withdrew its cashback (mock USDT, 6 decimals):", out.cashback);
 
@@ -440,21 +533,21 @@ contract DemoNiaraFlows is NiaraScriptBase {
         uint64 expiresAt = uint64(block.timestamp) + DEAL_LIFETIME;
 
         vm.startBroadcast(roles.investorA);
-        bond.approve(address(d.escrow), BOND_TRADE);
-        bytes32 dealKey = d.escrow.openDeal(dealId, terms, expiresAt);
+        bond.approve{gas: callGas(TEMPO_GAS_BOND_SELLER_APPROVE)}(address(d.escrow), BOND_TRADE);
+        bytes32 dealKey = d.escrow.openDeal{gas: callGas(TEMPO_GAS_BOND_OPEN_DEAL)}(dealId, terms, expiresAt);
         vm.stopBroadcast();
         console2.log("2.6 investor A opened the deal and escrowed the bonds; deal key:");
         console2.logBytes32(dealKey);
 
         vm.startBroadcast(roles.investorB);
-        d.mockUsdt.mint(roles.investorB, BOND_PRICE);
-        usdt.approve(address(d.escrow), BOND_PRICE);
-        d.escrow.acceptDeal(dealKey);
+        d.mockUsdt.mint{gas: callGas(TEMPO_GAS_BOND_BUYER_MINT)}(roles.investorB, BOND_PRICE);
+        usdt.approve{gas: callGas(TEMPO_GAS_BOND_BUYER_APPROVE)}(address(d.escrow), BOND_PRICE);
+        d.escrow.acceptDeal{gas: callGas(TEMPO_GAS_BOND_ACCEPT_DEAL)}(dealKey);
         vm.stopBroadcast();
         console2.log("2.7 investor B accepted, paying mock USDT -> fee (6 decimals):", out.fee);
 
         vm.startBroadcast(roles.issuer);
-        d.distributor.withdraw(out.instrument, address(usdt));
+        d.distributor.withdraw{gas: callGas(TEMPO_GAS_BOND_WITHDRAW)}(out.instrument, address(usdt));
         vm.stopBroadcast();
         console2.log("2.8 issuer withdrew its cashback (mock USDT, 6 decimals):", out.cashback);
 
@@ -504,17 +597,17 @@ contract DemoNiaraFlows is NiaraScriptBase {
         uint64 expiresAt = uint64(block.timestamp) + DEAL_LIFETIME;
 
         vm.startBroadcast(roles.investorB);
-        d.mockUsdt.mint(roles.investorB, FX_USDT_AMOUNT);
-        usdt.approve(address(d.escrow), FX_USDT_AMOUNT);
-        bytes32 dealKey = d.escrow.openDeal(dealId, terms, expiresAt);
+        d.mockUsdt.mint{gas: callGas(TEMPO_GAS_FX_USDT_MINT)}(roles.investorB, FX_USDT_AMOUNT);
+        usdt.approve{gas: callGas(TEMPO_GAS_FX_USDT_APPROVE)}(address(d.escrow), FX_USDT_AMOUNT);
+        bytes32 dealKey = d.escrow.openDeal{gas: callGas(TEMPO_GAS_FX_OPEN_DEAL)}(dealId, terms, expiresAt);
         vm.stopBroadcast();
         console2.log("3.1 investor B opened the deal and escrowed the mock USDT; deal key:");
         console2.logBytes32(dealKey);
 
         vm.startBroadcast(roles.investorA);
-        d.mockBrl.mint(roles.investorA, FX_BRL_AMOUNT);
-        brl.approve(address(d.escrow), FX_BRL_AMOUNT);
-        d.escrow.acceptDeal(dealKey);
+        d.mockBrl.mint{gas: callGas(TEMPO_GAS_FX_BRL_MINT)}(roles.investorA, FX_BRL_AMOUNT);
+        brl.approve{gas: callGas(TEMPO_GAS_FX_BRL_APPROVE)}(address(d.escrow), FX_BRL_AMOUNT);
+        d.escrow.acceptDeal{gas: callGas(TEMPO_GAS_FX_ACCEPT_DEAL)}(dealKey);
         vm.stopBroadcast();
         console2.log("3.2 investor A accepted, delivering mock BRL -> fee (mock USDT, 6 decimals):", out.fee);
 
@@ -556,20 +649,23 @@ contract DemoNiaraFlows is NiaraScriptBase {
         bytes32 batchDocHash = keccak256(abi.encode("niara-demo-issuance-act", name));
 
         vm.startBroadcast(roles.issuer);
-        instrument = d.factory.createAssetToken(name, symbol, assetClass, docHash);
-        d.registry.submitListing(instrument);
+        instrument =
+            d.factory.createAssetToken{gas: callGas(TEMPO_GAS_CREATE_ASSET_TOKEN)}(name, symbol, assetClass, docHash);
+        d.registry.submitListing{gas: callGas(TEMPO_GAS_SUBMIT_LISTING)}(instrument);
         vm.stopBroadcast();
         console2.log(string.concat(".1 issuer created and submitted: ", name), instrument);
 
         listingFee = _payListingFee(roles, d, instrument);
 
         vm.startBroadcast(roles.issuer);
-        uint256 batchNo = d.registry.requestIssuance(instrument, amount, recipient, batchDocHash);
+        uint256 batchNo = d.registry.requestIssuance{gas: callGas(TEMPO_GAS_REQUEST_ISSUANCE)}(
+            instrument, amount, recipient, batchDocHash
+        );
         vm.stopBroadcast();
         console2.log(".4 issuer requested issuance batch no.", batchNo);
 
         vm.startBroadcast(roles.listingAuthority);
-        d.registry.approveIssuance(instrument, batchNo);
+        d.registry.approveIssuance{gas: callGas(TEMPO_GAS_APPROVE_ISSUANCE)}(instrument, batchNo);
         vm.stopBroadcast();
         console2.log(".5 listing authority approved the batch; the registry minted it to", recipient);
 
@@ -592,16 +688,16 @@ contract DemoNiaraFlows is NiaraScriptBase {
         uint256 protocolBefore = d.distributor.protocolBalance(address(usdt));
 
         vm.startBroadcast(roles.listingAuthority);
-        d.registry.quoteListing(
+        d.registry.quoteListing{gas: callGas(TEMPO_GAS_QUOTE_LISTING)}(
             instrument, LISTING_VALUATION, LISTING_FEE_BPS, uint64(block.timestamp) + QUOTE_LIFETIME
         );
         vm.stopBroadcast();
         console2.log(".2 listing authority quoted the listing fee (mock USDT, 6 decimals):", listingFee);
 
         vm.startBroadcast(roles.issuer);
-        d.mockUsdt.mint(roles.issuer, listingFee);
-        usdt.approve(address(d.registry), listingFee);
-        d.registry.payListingFee(instrument);
+        d.mockUsdt.mint{gas: callGas(TEMPO_GAS_ISSUER_USDT_MINT)}(roles.issuer, listingFee);
+        usdt.approve{gas: callGas(TEMPO_GAS_ISSUER_USDT_APPROVE)}(address(d.registry), listingFee);
+        d.registry.payListingFee{gas: callGas(TEMPO_GAS_PAY_LISTING_FEE)}(instrument);
         vm.stopBroadcast();
         console2.log(".3 issuer took mock USDT from the faucet and paid it; the listing is approved");
 

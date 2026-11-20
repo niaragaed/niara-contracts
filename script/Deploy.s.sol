@@ -201,7 +201,7 @@ contract DeployNiara is NiaraScriptBase {
     /// @return needs One entry, the deployer's.
     function phase1GasNeeds(Config memory cfg) public pure returns (GasNeed[] memory needs) {
         needs = new GasNeed[](1);
-        needs[0] = GasNeed("deployer", cfg.deployer, PHASE1_DEPLOYER_GAS, 0, 0);
+        needs[0] = GasNeed("deployer", cfg.deployer, PHASE1_DEPLOYER_GAS, 0, 0, 0);
     }
 
     // ── Phase 2 ────────────────────────────────────────────────────────────────────────
@@ -278,11 +278,11 @@ contract DeployNiara is NiaraScriptBase {
         uint256 listingGas = listings * LIST_CURRENCY_GAS;
         if (cfg.listingAuthority == cfg.deployer) {
             needs = new GasNeed[](1);
-            needs[0] = GasNeed("deployer and listing authority", cfg.deployer, deployerGas + listingGas, 0, 0);
+            needs[0] = GasNeed("deployer and listing authority", cfg.deployer, deployerGas + listingGas, 0, 0, 0);
         } else {
             needs = new GasNeed[](2);
-            needs[0] = GasNeed("deployer", cfg.deployer, deployerGas, 0, 0);
-            needs[1] = GasNeed("listing authority", cfg.listingAuthority, listingGas, 0, 0);
+            needs[0] = GasNeed("deployer", cfg.deployer, deployerGas, 0, 0, 0);
+            needs[1] = GasNeed("listing authority", cfg.listingAuthority, listingGas, 0, 0, 0);
         }
     }
 

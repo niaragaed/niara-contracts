@@ -66,6 +66,10 @@ abstract contract NiaraScriptBase is Script {
         uint256 value;
         /// @dev Native value the wallet receives before it signs (a top-up from the deployer).
         uint256 incoming;
+        /// @dev Sum of the explicit gas limits of the wallet's transactions that carry one (the
+        /// demo's calls on Tempo, `{gas: ...}`). Forge sends such a limit as it is, without the
+        /// multiplier, so it costs gas limit * max fee per gas.
+        uint256 fixedGas;
     }
 
     error UnsupportedChain(uint256 chainId);
@@ -221,7 +225,17 @@ abstract contract NiaraScriptBase is Script {
     /// @param feePerGas Max fee per gas.
     /// @return The cost, in wei or fee-token base units.
     function gasCost(uint256 gas, uint256 feePerGas) public view returns (uint256) {
-        uint256 cost = gas * gasEstimateMultiplier() / 100 * feePerGas;
+        return gasLimitCost(gas * gasEstimateMultiplier() / 100, feePerGas);
+    }
+
+    /// @notice Most that transactions with these gas limits, sent as they are (no multiplier),
+    /// can cost on the current chain: `gasLimit * feePerGas`, converted to pathUSD base units
+    /// (rounded up) on Tempo.
+    /// @param gasLimit Sum of the gas limits.
+    /// @param feePerGas Max fee per gas.
+    /// @return The cost, in wei or fee-token base units.
+    function gasLimitCost(uint256 gasLimit, uint256 feePerGas) public view returns (uint256) {
+        uint256 cost = gasLimit * feePerGas;
         if (hasNativeGasToken(block.chainid)) return cost;
         return (cost + TEMPO_ATTODOLLARS_PER_FEE_UNIT - 1) / TEMPO_ATTODOLLARS_PER_FEE_UNIT;
     }
@@ -229,7 +243,7 @@ abstract contract NiaraScriptBase is Script {
     /// @notice How much one wallet is missing for its part of a phase.
     /// @param need The wallet's need.
     /// @param feePerGas Max fee per gas.
-    /// @return required Gas cost plus native value sent.
+    /// @return required Gas cost (estimated and fixed-limit transactions) plus native value sent.
     /// @return available Balance plus native value received first (native chains only).
     /// @return missing `required - available`, or zero.
     function gasShortfall(GasNeed memory need, uint256 feePerGas)
@@ -237,7 +251,7 @@ abstract contract NiaraScriptBase is Script {
         view
         returns (uint256 required, uint256 available, uint256 missing)
     {
-        required = gasCost(need.gas, feePerGas) + need.value;
+        required = gasCost(need.gas, feePerGas) + gasLimitCost(need.fixedGas, feePerGas) + need.value;
         available = gasFeeBalanceOf(need.wallet) + need.incoming;
         if (available < required) missing = required - available;
     }
